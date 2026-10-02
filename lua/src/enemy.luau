@@ -7,6 +7,7 @@ local physics = require './physics'
 local angle = require './angle'
 local info = require './info'
 local random = require './random'
+local specials = require './specials'
 
 local module = {}
 local FRACUNIT = mobj.FRACUNIT
@@ -134,6 +135,45 @@ local function hitTarget(game: any, source: any, shotAngle: number, range: numbe
         end
     end
     return best
+end
+
+local function shootSpecial(game: any, source: any, shotAngle: number, range: number, target: any?): ()
+    if not source.playerId or not game.specials or not game.map then return end
+    local rayX, rayY = physics.cosFixed(shotAngle), physics.sinFixed(shotAngle)
+    local targetDistance = math.huge
+    if target then
+        local dx, dy = target.x - source.x, target.y - source.y
+        targetDistance = (dx * rayX + dy * rayY) / FRACUNIT
+    end
+    local nearestSpecial: number = math.huge
+    local nearestIndex: number? = nil
+    local nearestBlock: number = math.huge
+    local nearestBlockIndex: number? = nil
+    for index, line in game.map.lines do
+        local a, b = game.map.vertices[line.v1], game.map.vertices[line.v2]
+        if a and b then
+            local ax, ay = a.x * FRACUNIT, a.y * FRACUNIT
+            local bx, by = b.x * FRACUNIT, b.y * FRACUNIT
+            local lineX, lineY = bx - ax, by - ay
+            local offsetX, offsetY = ax - source.x, ay - source.y
+            local denominator = rayX * lineY - rayY * lineX
+            if denominator ~= 0 then
+                local distance = (offsetX * lineY - offsetY * lineX) / denominator
+                local along = (offsetX * rayY - offsetY * rayX) / denominator
+                if distance > 0 and distance <= range and along >= 0 and along <= 1 then
+                    if line.special == 24 or line.special == 46 or line.special == 47 then
+                        if distance < nearestSpecial then nearestSpecial, nearestIndex = distance, index end
+                    end
+                    if (line.left == 0xffff or bit32.band(line.flags, 1) ~= 0) and distance < nearestBlock then
+                        nearestBlock, nearestBlockIndex = distance, index
+                    end
+                end
+            end
+        end
+    end
+    if nearestIndex and nearestSpecial <= targetDistance and (nearestBlockIndex == nearestIndex or nearestBlock > nearestSpecial) then
+        specials.shootLine(game.specials, nearestIndex, source)
+    end
 end
 
 local function spawnProjectile(game: any, source: any, target: any, projectile: string, shotAngle: number, attack: info.Attack): number
@@ -267,7 +307,10 @@ function module.hitscan(game: any, sourceId: number, shotAngle: number?, range: 
     for pellet = 1, count do
         local spread = useAttack.spread or 0
         local offset = if spread == 0 then 0 else (randomByte(game) - randomByte(game)) * math.floor(spread / 128)
-        local target = hitTarget(game, source, (base + offset) % ANGLE_MAX, range or MISSILE_RANGE, useAttack)
+        local shotAngle = (base + offset) % ANGLE_MAX
+        local effectiveRange = range or MISSILE_RANGE
+        local target = hitTarget(game, source, shotAngle, effectiveRange, useAttack)
+        shootSpecial(game, source, shotAngle, effectiveRange, target)
         if target then total += lineDamage(game, source, target, useAttack, base + offset) end
     end
     return total
