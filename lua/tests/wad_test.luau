@@ -589,6 +589,28 @@ suite.describe('game tick', function()
     expect(enemy.damage(hurt, hurt.players[1].moId, 20)).toBe(20)
   end)
 
+  suite.it('applies invulnerability and skill-adjusted green armor to sector hazards', function()
+    local path = writeFixture(fixture())
+    local easyMap = mapModule.load(wadModule.open(path), 'E1M1')
+    easyMap.sectors[1].special = 5
+    local easy = gameModule.new(easyMap, { skill = 0, spawnMonsters = false })
+    local player = easy.players[1]
+    player.armor, player.armorType = 10, 1
+    gameModule.step(easy)
+    expect(player.health).toBe(96)
+    expect(player.armor).toBe(9)
+
+    local protectedMap = mapModule.load(wadModule.open(path), 'E1M1')
+    protectedMap.sectors[1].special = 5
+    local protected = gameModule.new(protectedMap, { spawnMonsters = false })
+    local invulnerable = protected.players[1]
+    invulnerable.powers[inter.POWER_INVULNERABILITY] = 20
+    invulnerable.armor, invulnerable.armorType = 10, 1
+    gameModule.step(protected)
+    expect(invulnerable.health).toBe(100)
+    expect(invulnerable.armor).toBe(10)
+  end)
+
   suite.it('hashes and restores game-flow state such as deathmatch frags', function()
     local path = writeFixture(fixture())
     local map = mapModule.load(wadModule.open(path), 'E1M1')
