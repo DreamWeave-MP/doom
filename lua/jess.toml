@@ -51,3 +51,7 @@ exports = [
   "@doom/tick",
   "@doom",
 ]
+
+[[layer.entrypoint]]
+module = "@doom/net"
+capabilities = ["network.transport"]
