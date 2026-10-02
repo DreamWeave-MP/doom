@@ -10,7 +10,8 @@ posts, classic map structures including BLOCKMAP/REJECT, texture composition, a 
 fixed-point gameplay slice, vanilla demo command validation, canonical state hashing, save/load
 envelopes, and a headless indexed software-rendering path. The gameplay and renderer are useful
 vertical slices, not a claim of byte-for-byte Linux Doom 1.10 synchronization: monster AI,
-sector movers, sprites, visplanes, and several UI systems remain incomplete.
+metadata-backed actors, sector movers, sprites, exact lookup tables, game-flow progression, and
+several UI systems remain incomplete or simplified.
 
 Run with Jess:
 

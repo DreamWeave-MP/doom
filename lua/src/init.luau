@@ -201,14 +201,24 @@ function module.run(path: string, mapName: string?, count: number, demoName: str
     local map = mapModule.load(wad, mapName or "E1M1")
     local header, frames
     local playerCount = 1
+    local activeSlots = nil
     if demoName then
         header, frames = demo.parseFull(wad:read(demoName))
         playerCount = 0
-        for _, enabled in header.players do
-            if enabled then playerCount += 1 end
+        activeSlots = {}
+        for slot, enabled in header.players do
+            if enabled then
+                playerCount += 1
+                table.insert(activeSlots, slot)
+            end
         end
     end
-    local game = flow.newGame(map, { playerCount = playerCount, mode = if string.sub(map.name, 1, 3) == "MAP" then "doom2" else "doom" })
+    local game = flow.newGame(map, {
+        playerCount = playerCount,
+        activeSlots = activeSlots,
+        consolePlayer = if header then header.consolePlayer + 1 else 1,
+        mode = if string.sub(map.name, 1, 3) == "MAP" then "doom2" else "doom",
+    })
     game.wad = wad
     game.wadPath = path
     game.mapName = map.name
