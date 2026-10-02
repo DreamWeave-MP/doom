@@ -272,12 +272,19 @@ local function replaceLevel(game: any, map: any, state: FlowState, resetFrags: b
     end
 
     game.map = replacement.map
+    game.specials = replacement.specials
     game.leveltime = 0
     game.gametic = oldGametic
     game.rngState = oldRng
+    game.totalKills = replacement.totalKills
+    game.totalItems = replacement.totalItems
+    game.totalSecret = replacement.totalSecret
     game.players = replacement.players
     game.mobjs = replacement.mobjs
     game.thinkers = replacement.thinkers
+    state.totalKills = replacement.totalKills
+    state.totalItems = replacement.totalItems
+    state.totalSecret = replacement.totalSecret
     if type(game.mapName) == 'string' then game.mapName = map.name end
     if resetFrags then state.frags = newFrags() end
     state.state = 'level'

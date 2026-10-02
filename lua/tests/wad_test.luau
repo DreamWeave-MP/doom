@@ -785,10 +785,14 @@ suite.describe('game tick', function()
     })
 
     local nextMap = mapModule.load(wadModule.open(path), 'E1M1')
+    nextMap.sectors[1].special = 5
     doom.flow.nextMap(game, nextMap)
     expect(game.players[1].killcount).toBe(0)
     expect(game.players[1].itemcount).toBe(0)
     expect(game.players[1].secretcount).toBe(0)
+    expect(game.specials.map).toBe(game.map)
+    doom.step(game)
+    expect(game.players[1].health).toBe(90)
   end)
 
   suite.it('advances monster run animation instead of resetting the first frame every tic', function()
