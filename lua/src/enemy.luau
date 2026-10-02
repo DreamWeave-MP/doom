@@ -439,8 +439,8 @@ function module.damage(game: any, targetId: number, amount: number, sourceId: nu
         if source and source.playerId then
             local owner = game.players[source.playerId]
             if owner then
-                owner.kills += 1
-                owner.killcount = (owner.killcount or 0) + 1
+                if target.playerId then owner.kills += 1 end
+                if monsterFor(target) then owner.killcount = (owner.killcount or 0) + 1 end
             end
         end
     else

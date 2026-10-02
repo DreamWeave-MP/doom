@@ -673,6 +673,7 @@ suite.describe('game tick', function()
     local targetId = enemy.spawn(game, 3001, 64 * mobj.FRACUNIT, 24 * mobj.FRACUNIT, 0)
     enemy.damage(game, targetId, 1000, player.moId)
     expect(player.killcount).toBe(1)
+    expect(player.kills).toBe(0)
     player.killcount, player.itemcount, player.secretcount = 6, 2, 1
     doom.flow.completeLevel(game)
     expect(game.flow.intermission.players[1]).toEqual({
