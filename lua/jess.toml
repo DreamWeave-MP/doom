@@ -8,6 +8,9 @@ include = ["src", "bin", "README.md", "LICENSE.TXT"]
 tests = ["tests/wad_test.luau"]
 
 [modules]
+"@doom/fixed" = "src/fixed.luau"
+"@doom/random" = "src/random.luau"
+"@doom/angle" = "src/angle.luau"
 "@doom/wad" = "src/wad.luau"
 "@doom/palette" = "src/palette.luau"
 "@doom/patch" = "src/patch.luau"
@@ -21,6 +24,9 @@ tests = ["tests/wad_test.luau"]
 [[layer]]
 id = "org.dreamweave.doom.runtime"
 exports = [
+  "@doom/fixed",
+  "@doom/random",
+  "@doom/angle",
   "@doom/wad",
   "@doom/palette",
   "@doom/patch",
