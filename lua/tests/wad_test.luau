@@ -417,6 +417,29 @@ suite.describe('fixed-point movement', function()
     weapons.fire(blocked, 1, info.WP_PISTOL)
     expect(#blocked.specials.thinkers).toBe(0)
   end)
+
+  suite.it('occludes missile splash damage behind blocking lines', function()
+    local function blast(blocked: boolean): number
+      local map = twoSectorMap(0)
+      if blocked then
+        map.lines[1].flags = 1
+        map.lines[1].left = 0xffff
+      end
+      table.insert(map.vertices, { x = 40, y = -64 })
+      table.insert(map.vertices, { x = 40, y = 64 })
+      table.insert(map.lines, { v1 = 3, v2 = 4, flags = 1, special = 0, tag = 0, right = 0, left = 0xffff })
+      local game = gameModule.new(map, { spawnMonsters = false })
+      local player = game.players[1]
+      local targetId = #game.mobjs + 1
+      table.insert(game.mobjs, mobj.newMobj(targetId, 0, 5 * mobj.FRACUNIT, 30 * mobj.FRACUNIT, 0, mobj.MF_SHOOTABLE, 100))
+      enemy.launch(game, player.moId, 0, 'rocket', { kind = 'missile', sides = 1, multiplier = 20, projectile = 'rocket' })
+      for _ = 1, 5 do enemy.step(game) end
+      return game.mobjs[targetId].health
+    end
+
+    expect(blast(false) < 100).toBe(true)
+    expect(blast(true)).toBe(100)
+  end)
 end)
 
 suite.describe('deterministic core', function()

@@ -213,7 +213,8 @@ local function explode(game: any, projectile: any, directTarget: any?): number
     if radius > 0 then
         for _, candidate in game.mobjs do
             if candidate ~= projectile and candidate ~= directTarget and candidate.health > 0 and not candidate.removed
-                and bit32.band(candidate.flags, mobj.MF_SHOOTABLE) ~= 0 and distance(projectile, candidate) <= radius then
+                and bit32.band(candidate.flags, mobj.MF_SHOOTABLE) ~= 0 and distance(projectile, candidate) <= radius
+                and canSee(game, projectile, candidate) then
                 local scaled = math.max(1, damage - math.floor(distance(projectile, candidate) / (8 * FRACUNIT)))
                 dealt += module.damage(game, candidate.id, scaled, sourceId)
             end
