@@ -418,6 +418,34 @@ suite.describe('fixed-point movement', function()
     expect(#blocked.specials.thinkers).toBe(0)
   end)
 
+  suite.it('records an actual deathmatch player frag without counting it as a monster kill', function()
+    local map = twoSectorMap(0)
+    table.insert(map.things, { x = 20, y = 0, angle = 180, kind = 2, flags = 7 })
+    table.insert(map.things, { x = -20, y = 0, angle = 0, kind = 11, flags = 0 })
+    table.insert(map.things, { x = 20, y = 0, angle = 180, kind = 11, flags = 0 })
+    local game = doom.newGame(map, {
+      playerCount = 2,
+      activeSlots = { 1, 2 },
+      deathmatch = true,
+      spawnMonsters = false,
+      seed = 2,
+      consolePlayer = 1,
+    })
+    local victim = game.players[2]
+    victim.health = 1
+    game.mobjs[victim.moId].health = 1
+
+    doom.flow.applyDemoFrame(game, {
+      [1] = { buttons = 1 },
+      [2] = {},
+    })
+
+    expect(victim.state).toBe(mobj.PST_DEAD)
+    expect(game.players[1].kills).toBe(1)
+    expect(game.players[1].killcount).toBe(0)
+    expect(game.flow.frags[1][2]).toBe(1)
+  end)
+
   suite.it('occludes missile splash damage behind blocking lines', function()
     local function blast(blocked: boolean): number
       local map = twoSectorMap(0)
@@ -439,6 +467,18 @@ suite.describe('fixed-point movement', function()
 
     expect(blast(false) < 100).toBe(true)
     expect(blast(true)).toBe(100)
+  end)
+
+  suite.it('does not let missiles directly hit shootable mobjs above their vertical path', function()
+    local game = gameModule.new(twoSectorMap(0), { spawnMonsters = false })
+    local player = game.players[1]
+    local targetId = #game.mobjs + 1
+    local target = mobj.newMobj(targetId, 0, 5 * mobj.FRACUNIT, 0, 0, mobj.MF_SHOOTABLE, 100)
+    target.z = 100 * mobj.FRACUNIT
+    table.insert(game.mobjs, target)
+    enemy.launch(game, player.moId, 0, 'rocket', { kind = 'missile', sides = 1, multiplier = 20, projectile = 'rocket' })
+    for _ = 1, 5 do enemy.step(game) end
+    expect(game.mobjs[targetId].health).toBe(100)
   end)
 end)
 

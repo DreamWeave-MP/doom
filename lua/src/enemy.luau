@@ -235,6 +235,7 @@ local function updateProjectile(game: any, projectile: any): number
     for _, candidate in game.mobjs do
         if candidate ~= projectile and candidate.health > 0 and not candidate.removed
             and candidate.id ~= projectile.sourceId and bit32.band(candidate.flags, mobj.MF_SHOOTABLE) ~= 0
+            and projectile.z < candidate.z + candidate.height and projectile.z + projectile.height > candidate.z
             and distance(projectile, candidate) <= projectile.radius + candidate.radius then
             return explode(game, projectile, candidate)
         end
@@ -466,7 +467,8 @@ function module.step(game: any): any
         local object = game.mobjs[id]
         if object and not object.removed then
             if (object :: any).projectile then
-                physics.zMove(object)
+                -- Doom missiles are MF_NOGRAVITY. Their vertical position is
+                -- fixed at launch unless an explicit vertical momentum is set.
                 updateProjectile(game, object)
             elseif monsterFor(object) then
                 physics.zMove(object)

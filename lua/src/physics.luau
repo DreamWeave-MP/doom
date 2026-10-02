@@ -185,7 +185,7 @@ function module.tryMove(map: any, object: mobj.Mobj, x: number, y: number, game:
         object.floorz, object.ceilingz = module.floorAndCeiling(map, x, y)
         return true
     end
-    if blockedByThing(game, object, x, y) then return false end
+    if bit32.band(object.flags, mobj.MF_SOLID) ~= 0 and blockedByThing(game, object, x, y) then return false end
 
     local currentFloor = object.floorz
     local targetFloor, targetCeiling = module.floorAndCeiling(map, x, y)
