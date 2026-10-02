@@ -176,6 +176,7 @@ function module.touch(game: any, specialId: number, toucherId: number): boolean
     if accepted then
         special.removed, special.flags, special.state = true, 0, 'dead'
         player.bonuscount += 6
+        player.itemcount = (player.itemcount or 0) + 1
     end
     return accepted
 end

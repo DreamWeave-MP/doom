@@ -497,6 +497,32 @@ suite.describe('game tick', function()
     expect(reborn.frags[2]).toBe(3)
   end)
 
+  suite.it('counts accepted pickups as level items and leaves refused pickups available', function()
+    local map = mapModule.load(wadModule.open(writeFixture(fixture())), 'E1M1')
+    local game = gameModule.new(map, { spawnMonsters = false })
+    local player = game.players[1]
+    local object = game.mobjs[player.moId]
+    player.health, object.health = 50, 50
+    local stimpack = inter.spawn(game, 2011, object.x, object.y)
+
+    gameModule.step(game)
+    expect(player.health).toBe(60)
+    expect(player.itemcount).toBe(1)
+    expect(game.mobjs[stimpack].removed).toBe(true)
+
+    local spare = inter.spawn(game, 2011, object.x, object.y)
+    gameModule.step(game)
+    expect(player.health).toBe(70)
+    expect(player.itemcount).toBe(2)
+    expect(game.mobjs[spare].removed).toBe(true)
+
+    player.health, object.health = 100, 100
+    local refused = inter.spawn(game, 2011, object.x, object.y)
+    gameModule.step(game)
+    expect(player.itemcount).toBe(2)
+    expect(game.mobjs[refused].removed).toBe(false)
+  end)
+
   suite.it('does not steal weapon preference when ammo arrives while holding another weapon', function()
     local wad = wadModule.open(writeFixture(fixture()))
     local map = mapModule.load(wad, 'E1M1')
