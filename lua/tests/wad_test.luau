@@ -441,6 +441,7 @@ suite.describe('fixed-point movement', function()
     })
 
     expect(victim.state).toBe(mobj.PST_DEAD)
+    expect(bit32.band(game.mobjs[victim.moId].flags, mobj.MF_SOLID)).toBe(0)
     expect(game.players[1].kills).toBe(1)
     expect(game.players[1].killcount).toBe(0)
     expect(game.flow.frags[1][2]).toBe(1)

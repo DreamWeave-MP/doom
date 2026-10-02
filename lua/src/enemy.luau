@@ -433,6 +433,7 @@ function module.damage(game: any, targetId: number, amount: number, sourceId: nu
     local source = get(game, sourceId or 0)
     if target.health <= 0 then
         target.flags = bit32.bor(bit32.band(target.flags, bit32.bnot(mobj.MF_SHOOTABLE)), mobj.MF_CORPSE)
+        if player then target.flags = bit32.band(target.flags, bit32.bnot(mobj.MF_SOLID)) end
         target.state = 'dead'
         target.tics = -1
         target.momx, target.momy, target.momz = 0, 0, 0
