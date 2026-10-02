@@ -189,6 +189,10 @@ function module.tryMove(map: any, object: mobj.Mobj, x: number, y: number, game:
 
     local currentFloor = object.floorz
     local targetFloor, targetCeiling = module.floorAndCeiling(map, x, y)
+    if bit32.band(object.flags, mobj.MF_SOLID) ~= 0 and bit32.band(object.flags, mobj.MF_DROPOFF) == 0
+        and currentFloor - targetFloor > module.MAX_STEP then
+        return false
+    end
     for _, line in map.lines do
         local a, b = map.vertices[line.v1], map.vertices[line.v2]
         if a and b then

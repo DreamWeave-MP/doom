@@ -341,6 +341,23 @@ suite.describe('fixed-point movement', function()
     expect(physics.tryMove(map, player, -25 * frac, 0, game)).toBe(true)
   end)
 
+  suite.it('lets players drop from ledges while monsters without MF_DROPOFF stay back', function()
+    local frac = mobj.FRACUNIT
+    local map = twoSectorMap(-25)
+    local monster = mobj.newMobj(99, 3001, -20 * frac, 0, 0, mobj.MF_SOLID, 100)
+    expect(physics.tryMove(map, monster, 20 * frac, 0)).toBe(false)
+
+    local game = gameModule.new(map, { spawnMonsters = false })
+    local player = game.players[1]
+    local object = game.mobjs[player.moId]
+    expect(bit32.band(object.flags, mobj.MF_DROPOFF) ~= 0).toBe(true)
+    expect(physics.tryMove(map, object, 20 * frac, 0)).toBe(true)
+    expect(object.floorz).toBe(-25 * frac)
+    gameModule.step(game)
+    gameModule.step(game)
+    expect(object.z < 0).toBe(true)
+  end)
+
   suite.it('activates a cross-line exit only after the movement succeeds', function()
     local frac = mobj.FRACUNIT
     local map = twoSectorMap(0, 52)

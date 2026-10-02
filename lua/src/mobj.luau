@@ -89,6 +89,7 @@ module.MF_PICKUP = 0x4
 module.MF_NOCLIP = 0x8
 module.MF_CORPSE = 0x10
 module.MF_AMBUSH = 0x20
+module.MF_DROPOFF = 0x400
 module.MF_SHADOW = 0x40000
 module.PST_LIVE = 'live'
 module.PST_DEAD = 'dead'
@@ -197,6 +198,7 @@ function module.spawnPlayer(map: any, playerIndex: number, id: number): (Mobj, P
 
     local angle = module.angleFromDegrees(start.angle)
     local mo = module.newMobj(id, module.MT_PLAYER, start.x * module.FRACUNIT, start.y * module.FRACUNIT, angle)
+    mo.flags = bit32.bor(mo.flags, module.MF_DROPOFF)
     local player = module.newPlayer(playerIndex, id, mo.x, mo.y, angle)
     mo.playerId = playerIndex
     return mo, player
