@@ -55,29 +55,6 @@ local function getMobj(game: any, id: number): mobj.Mobj?
     return game.mobjs[id]
 end
 
-local function kill(game: any, target: mobj.Mobj, source: mobj.Mobj?): ()
-    if target.playerId then
-        local player = game.players[target.playerId]
-        if player and player.state ~= mobj.PST_DEAD then
-            player.state = mobj.PST_DEAD
-            player.health = 0
-            player.deaths += 1
-            player.attackCooldown = 0
-            player.deathTics = 0
-            player.attackdown = false
-        end
-    end
-    target.health = 0
-    target.state = 'dead'
-    target.momx, target.momy, target.momz = 0, 0, 0
-    target.flags = bit32.band(target.flags, bit32.bnot(mobj.MF_SHOOTABLE))
-    if target.playerId == nil then target.flags = bit32.bor(target.flags, mobj.MF_CORPSE) end
-    if source and source.playerId then
-        local player = game.players[source.playerId]
-        if player then player.kills += 1 end
-    end
-end
-
 function module.damage(game: any, targetId: number, amount: number, sourceId: number?): number
     return enemy.damage(game, targetId, amount, sourceId)
 end
