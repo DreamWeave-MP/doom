@@ -13,6 +13,7 @@ if command == "help" or (not wad and command ~= "net") then
     print("  view <IWAD> <MAP> <out.ppm> [DEMO] [tics]")
     print("  run <IWAD> <MAP> [tics] [DEMO]")
     print("  statehash <IWAD> <MAP> [tics] [DEMO]")
+    print("  net <connect-token>  (host-granted client transport)")
     return
 end
 
@@ -34,6 +35,13 @@ elseif command == "run" then
 elseif command == "statehash" then
     local game = doom.run(wad, arg[3] or "E1M1", tonumber(arg[4] or "0") or 0, arg[5])
     print(doom.stateHash(game))
+elseif command == "net" then
+    local net = require("@doom/net")
+    local protocol = net.protocol()
+    local client = net.newClient(protocol)
+    net.clientConnect(client, wad)
+    net.clientFlush(client)
+    print("network client connection requested")
 else
     error(`unknown command '{command}'`)
 end
