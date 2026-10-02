@@ -11,6 +11,7 @@ tests = ["tests/wad_test.luau"]
 "@doom/fixed" = "src/fixed.luau"
 "@doom/random" = "src/random.luau"
 "@doom/angle" = "src/angle.luau"
+"@doom/tables" = "src/tables.luau"
 "@doom/wad" = "src/wad.luau"
 "@doom/palette" = "src/palette.luau"
 "@doom/patch" = "src/patch.luau"
@@ -26,6 +27,13 @@ tests = ["tests/wad_test.luau"]
 "@doom/mobj" = "src/mobj.luau"
 "@doom/physics" = "src/physics.luau"
 "@doom/tick" = "src/tick.luau"
+"@doom/info" = "src/info.luau"
+"@doom/enemy" = "src/enemy.luau"
+"@doom/weapons" = "src/weapons.luau"
+"@doom/inter" = "src/inter.luau"
+"@doom/specials" = "src/specials.luau"
+"@doom/flow" = "src/flow.luau"
+"@doom/rthings" = "src/rthings.luau"
 "@doom" = "src/init.luau"
 
 [[layer]]
@@ -34,6 +42,7 @@ exports = [
   "@doom/fixed",
   "@doom/random",
   "@doom/angle",
+  "@doom/tables",
   "@doom/wad",
   "@doom/palette",
   "@doom/patch",
@@ -49,6 +58,13 @@ exports = [
   "@doom/mobj",
   "@doom/physics",
   "@doom/tick",
+  "@doom/info",
+  "@doom/enemy",
+  "@doom/weapons",
+  "@doom/inter",
+  "@doom/specials",
+  "@doom/flow",
+  "@doom/rthings",
   "@doom",
 ]
 

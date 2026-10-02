@@ -5,6 +5,7 @@
 -- short of sprites and visplanes; those are separate renderer slices.
 local mapModule = require("@doom/map")
 local rdata = require("./rdata")
+local rthings = require("./rthings")
 
 local module = {}
 
@@ -190,7 +191,7 @@ local function renderSubsector(frame: Frame, data: rdata.Data, wad: any, map: an
     end
 end
 
-function module.view(map: any, wad: any, x: number, y: number, angleDegrees: number): (Frame, any)
+function module.view(map: any, wad: any, x: number, y: number, angleDegrees: number, mobjs: {any}?): (Frame, any)
     local data = rdata.load(wad)
     local frame: Frame = { pixels = buffer.create(WIDTH * HEIGHT), width = WIDTH, height = HEIGHT }
     local sector = mapModule.sectorAt(map, x, y)
@@ -217,6 +218,9 @@ function module.view(map: any, wad: any, x: number, y: number, angleDegrees: num
         renderSubsector(frame, data, wad, map, zbuffer, x, y, eye, angle, 1)
     else
         visit(#map.nodes - 1)
+    end
+    if mobjs then
+        rthings.render(map, mobjs, data, frame, { x = x, y = y, z = eye, angle = angleDegrees }, zbuffer, { sky = true })
     end
     return frame, data.palette
 end

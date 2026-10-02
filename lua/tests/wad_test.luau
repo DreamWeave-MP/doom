@@ -5,11 +5,13 @@ local demoModule = require '@doom/demo'
 local doom = require '@doom'
 local fixed = require '@doom/fixed'
 local gameModule = require '@doom/game'
+local info = require '@doom/info'
 local mapModule = require '@doom/map'
 local paletteModule = require '@doom/palette'
 local random = require '@doom/random'
 local save = require '@doom/save'
 local state = require '@doom/state'
+local tables = require '@doom/tables'
 local test = require '@jess/test'
 local wadModule = require '@doom/wad'
 local expect = test.expect
@@ -315,6 +317,18 @@ suite.describe('game tick', function()
     expect(gameModule.stateHash(game) ~= before).toBe(true)
     local restored = save.load(save.save(gameModule.snapshot(game)))
     expect(state.hash(restored)).toBe(state.hash(gameModule.snapshot(game)))
+  end)
+end)
+
+suite.describe('actors and lookup tables', function()
+  suite.it('uses exact table endpoints and metadata-backed actors', function()
+    expect(tables.fineSine(0)).toBe(25)
+    expect(tables.fineCosine(0)).toBe(65535)
+    expect(tables.tanToAngle(0)).toBe(0)
+    expect(info.monster(3001).name).toBe('imp')
+    expect(info.monster(16).health).toBe(4000)
+    expect(info.weapon(info.WP_SHOTGUN).pellets).toBe(7)
+    expect(info.pickup(2001).weapon).toBe(info.WP_SHOTGUN)
   end)
 end)
 

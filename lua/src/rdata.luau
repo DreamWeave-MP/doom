@@ -11,6 +11,7 @@ export type Data = {
     palette: any,
     colormap: buffer,
     textures: textureModule.Bank,
+    wad: any,
 }
 
 function module.load(wad: any): Data
@@ -20,6 +21,7 @@ function module.load(wad: any): Data
         palette = paletteModule.fromPlaypal(wad:read("PLAYPAL"), 0),
         colormap = colormap,
         textures = textureModule.load(wad),
+        wad = wad,
     }
 end
 

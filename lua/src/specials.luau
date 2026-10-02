@@ -4,6 +4,7 @@
 -- one deterministic 35 Hz tic at a time.
 local mapModule = require './map'
 local mobj = require './mobj'
+local random = require './random'
 
 local module = {}
 
@@ -168,14 +169,10 @@ local function minLight(runtime: Runtime, sectorIndex: number, maximum: number):
 end
 
 local function randomByte(runtime: Runtime): number
-    -- xorshift32 uses only bit32 operations, avoiding platform-dependent
-    -- floating-point overflow in an LCG while remaining snapshot-friendly.
-    local value = bit32.band(runtime.rngState, 0x7fffffff)
-    value = bit32.bxor(value, bit32.lshift(value, 13))
-    value = bit32.bxor(value, bit32.rshift(value, 17))
-    value = bit32.bxor(value, bit32.lshift(value, 5))
-    runtime.rngState = bit32.band(value, 0x7fffffff)
-    return bit32.band(runtime.rngState, 0xff)
+    local stream = {mIndex = 0, pIndex = runtime.rngState % 256}
+    local result = random.mRandom(stream)
+    runtime.rngState = stream.mIndex
+    return result
 end
 
 local function thinker(runtime: Runtime, kind: string, fields: any?): any

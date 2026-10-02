@@ -3,6 +3,10 @@
 -- damage/death, thinker pass, and level time.  No renderer or IO is involved.
 local mobj = require './mobj'
 local physics = require './physics'
+local enemy = require './enemy'
+local weapons = require './weapons'
+local inter = require './inter'
+local specials = require './specials'
 
 local randomModule = require('@doom/random')
 local module = {}
@@ -72,53 +76,12 @@ local function kill(game: any, target: mobj.Mobj, source: mobj.Mobj?): ()
 end
 
 function module.damage(game: any, targetId: number, amount: number, sourceId: number?): number
-    local target = getMobj(game, targetId)
-    if not target or target.removed or target.health <= 0 then return 0 end
-    if amount < 0 then amount = 0 end
-    local applied = amount
-    if target.playerId then
-        local player = game.players[target.playerId]
-        if player and player.armor > 0 then
-            local absorbed = math.min(player.armor, math.floor(amount / 2))
-            player.armor -= absorbed
-            applied -= absorbed
-        end
-        if applied < 1 then applied = 1 end
-        if player then
-            player.damagecount = math.min(100, player.damagecount + applied)
-            player.health = math.max(0, player.health - applied)
-            target.health = player.health
-        end
-    else
-        target.health = math.max(0, target.health - applied)
-    end
-    local source = if sourceId then getMobj(game, sourceId) else nil
-    if target.health <= 0 then kill(game, target, source) end
-    return applied
+    return enemy.damage(game, targetId, amount, sourceId)
 end
 
 local function fire(game: any, player: any, shooter: mobj.Mobj): boolean
-    local dx, dy = physics.cosFixed(shooter.angle), physics.sinFixed(shooter.angle)
-    local best: mobj.Mobj? = nil
-    local bestAlong = math.huge
-    for _, candidate in game.mobjs do
-        if candidate ~= shooter and not candidate.removed and candidate.health > 0
-            and bit32.band(candidate.flags, mobj.MF_SHOOTABLE) ~= 0 then
-            local vx, vy = candidate.x - shooter.x, candidate.y - shooter.y
-            local along = math.floor((vx * dx + vy * dy) / mobj.FRACUNIT)
-            if along > 0 and along < 2048 * mobj.FRACUNIT and along < bestAlong then
-                local cross = math.abs(math.floor((vx * dy - vy * dx) / mobj.FRACUNIT))
-                local radius = candidate.radius + 2 * mobj.FRACUNIT
-                if cross * cross <= radius * radius
-                    and not physics.lineBlocksShot(game.map, shooter.x, shooter.y, candidate.x, candidate.y) then
-                    best, bestAlong = candidate, along
-                end
-            end
-        end
-    end
-    if not best then return false end
-    module.damage(game, best.id, (randomByte(game) % 8 + 1) * module.PISTOL_DAMAGE, shooter.id)
-    return true
+    local result = weapons.fire(game, player.index)
+    return result.fired == true
 end
 
 local function respawn(game: any, player: any, object: mobj.Mobj): ()
@@ -164,21 +127,53 @@ local function playerThink(game: any, player: any, command: any?): ()
 
     local attack = bit32.band(cmd.buttons, module.BT_ATTACK) ~= 0
     if player.attackdown and not attack then player.attackdown = false end
-    if attack and player.readyweapon == 1 and player.ammo[1] > 0 then
+    if attack then
         -- Kept as an edge marker for callers that inspect the canonical player
         -- record; cooldown below controls held-fire deterministically.
         player.attackdown = true
         if player.attackCooldown <= 0 then
             fire(game, player, object)
-            player.ammo[1] -= 1
-            player.attackCooldown = module.ATTACK_COOLDOWN
         else
             player.attackCooldown -= 1
         end
     else
         player.attackCooldown = 0
     end
-    if bit32.band(cmd.buttons, module.BT_USE) ~= 0 then player.usedown = true else player.usedown = false end
+    local use = bit32.band(cmd.buttons, module.BT_USE) ~= 0
+    if use and not player.usedown then useLines(game, object) end
+    player.usedown = use
+end
+
+local function touchPickups(game: any, player: any): ()
+    local object = getMobj(game, player.moId)
+    if not object then return end
+    for _, candidate in game.mobjs do
+        if candidate ~= object and bit32.band(candidate.flags, mobj.MF_PICKUP) ~= 0 then
+            inter.touch(game, candidate.id, object.id)
+        end
+    end
+end
+
+local function nearLine(map: any, object: mobj.Mobj, line: any): boolean
+    local a, b = map.vertices[line.v1], map.vertices[line.v2]
+    if not a or not b then return false end
+    local px, py = object.x / mobj.FRACUNIT, object.y / mobj.FRACUNIT
+    local dx, dy = b.x - a.x, b.y - a.y
+    local length = math.max(1, dx * dx + dy * dy)
+    local t = math.clamp(((px - a.x) * dx + (py - a.y) * dy) / length, 0, 1)
+    local qx, qy = a.x + t * dx, a.y + t * dy
+    local ox, oy = px - qx, py - qy
+    return ox * ox + oy * oy <= 64 * 64
+end
+
+local function useLines(game: any, object: mobj.Mobj): boolean
+    if not game.specials then return false end
+    for index, line in game.map.lines do
+        if line.special ~= 0 and nearLine(game.map, object, line) and specials.useLine(game.specials, index, object, 0) then
+            return true
+        end
+    end
+    return false
 end
 
 function module.step(game: any, commands: any?): any
@@ -187,10 +182,11 @@ function module.step(game: any, commands: any?): any
         local command = commands[index]
         if index == 1 and commands.buttons ~= nil then command = commands end
         playerThink(game, player, command)
+        touchPickups(game, player)
     end
-    -- Thinkers are deliberately visited in spawn order, just like the vanilla
-    -- linked list.  This slice has inert monster thinkers but keeps the record
-    -- and order available for later AI/state ports.
+    weapons.step(game)
+    enemy.step(game)
+    if game.specials then specials.tick(game.specials) end
     for _, thinker in game.thinkers do
         if not thinker.removed and thinker.tics > 0 then thinker.tics -= 1 end
     end

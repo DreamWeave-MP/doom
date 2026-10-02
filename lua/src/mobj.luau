@@ -25,6 +25,14 @@ export type Mobj = {
     playerId: number?,
     targetId: number?,
     removed: boolean,
+    sprite: string?,
+    frame: number,
+    movedir: number,
+    movecount: number,
+    threshold: number,
+    attackCooldown: number,
+    projectile: boolean?,
+    sourceId: number?,
 }
 
 export type Thinker = {
@@ -111,6 +119,14 @@ function module.newMobj(id: number, kind: number, x: number, y: number, angle: n
         playerId = nil,
         targetId = nil,
         removed = false,
+        sprite = nil,
+        frame = 0,
+        movedir = 0,
+        movecount = 0,
+        threshold = 0,
+        attackCooldown = 0,
+        projectile = false,
+        sourceId = nil,
     }
 end
 
@@ -142,6 +158,14 @@ function module.newPlayer(index: number, moId: number, x: number, y: number, ang
         ammo = {50, 0, 0, 0},
         weaponowned = {true, true, false, false, false, false, false, false, false},
         cmd = {forwardmove = 0, sidemove = 0, angleturn = 0, buttons = 0},
+        powers = {},
+        cards = {},
+        maxammo = { [1] = 200, [2] = 50, [3] = 300, [4] = 50 },
+        psprites = {},
+        frags = {0, 0, 0, 0},
+        killcount = 0,
+        itemcount = 0,
+        secretcount = 0,
         spawnX = x,
         spawnY = y,
         spawnAngle = normalizeAngle(angle),
@@ -171,4 +195,3 @@ module.new = module.newMobj
 module.angle = module.angleFromDegrees
 
 return module
-

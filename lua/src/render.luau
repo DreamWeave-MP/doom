@@ -66,8 +66,8 @@ function module.automap(map: any, wad: any, trace: {{x: number, y: number}}?): (
     return frame, palette
 end
 
-function module.view(map: any, wad: any, x: number, y: number, angle: number): (Frame, any)
-    return rmain.view(map, wad, x, y, angle)
+function module.view(map: any, wad: any, x: number, y: number, angle: number, mobjs: {any}?): (Frame, any)
+    return rmain.view(map, wad, x, y, angle, mobjs)
 end
 
 function module.ppm(frame: Frame, palette: any): buffer return paletteModule.toPpm(frame.pixels, frame.width, frame.height, palette) end

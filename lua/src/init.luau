@@ -9,6 +9,8 @@ local mobj = require("@doom/mobj")
 local saveModule = require("@doom/save")
 local stateModule = require("@doom/state")
 local tick = require("@doom/tick")
+local flow = require("@doom/flow")
+local specials = require("@doom/specials")
 
 local module = {}
 
@@ -113,6 +115,7 @@ function module.load(path: string, mapName: string?, source: any?): any
             if object.playerId == 0 then object.playerId = nil end
             if object.targetId == 0 then object.targetId = nil end
         end
+        if snapshot.specials then specials.restore(game.specials, snapshot.specials) end
     end
     return game
 end
@@ -148,7 +151,7 @@ local function gameView(game: any, playerIndex: number?): any
     local x = object.x / mobj.FRACUNIT
     local y = object.y / mobj.FRACUNIT
     local angle = mobj.angleToDegrees(object.angle)
-    local frame, palette = render.view(game.map, game.wad, x, y, angle)
+    local frame, palette = render.view(game.map, game.wad, x, y, angle, game.mobjs)
     return frame, palette, x, y, angle
 end
 
@@ -205,13 +208,13 @@ function module.run(path: string, mapName: string?, count: number, demoName: str
             if enabled then playerCount += 1 end
         end
     end
-    local game = gameModule.new(map, { playerCount = playerCount })
+    local game = flow.newGame(map, { playerCount = playerCount, mode = if string.sub(map.name, 1, 3) == "MAP" then "doom2" else "doom" })
     game.wad = wad
     game.wadPath = path
     game.mapName = map.name
     for index = 1, count do
         local command = if frames then frames[index] else nil
-        module.step(game, command)
+        flow.applyDemoFrame(game, command)
     end
     return game
 end
@@ -221,5 +224,10 @@ end
 module.state = stateModule
 module.saveFormat = saveModule
 module.tickModule = tick
+module.flow = flow
+module.newGame = flow.newGame
+module.applyDemoFrame = flow.applyDemoFrame
+module.completeLevel = flow.completeLevel
+module.reborn = flow.reborn
 
 return module

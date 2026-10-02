@@ -7,11 +7,12 @@
 -- The values are close to the original lookup tables, but are not a byte-for-
 -- byte replacement for finesine/tantoangle.
 
+local tables = require('./tables')
 local module = {}
 
 local U32 = 4294967296
-local ANGLETOFINE = 524288 -- 2^ANGLETOFINESHIFT, from tables.h
-local FINEANGLES = 8192
+local ANGLETOFINE = tables.ANGLETOFINE
+local FINEANGLES = tables.FINEANGLES
 local FINEMASK = FINEANGLES - 1
 local FRACUNIT = 65536
 
@@ -121,39 +122,31 @@ function module.signed(angle: number): number
 end
 
 function module.fineIndex(angle: number): number
-	return math.floor(normalize(angle) / ANGLETOFINE) % FINEANGLES
+    return tables.fineIndex(angle)
 end
 
 function module.sine(angle: number): number
-	local sine = rotate(angle)
-	return sine
+    return tables.sine(angle)
 end
 
 function module.cosine(angle: number): number
-	local _, cosine = rotate(angle)
-	return cosine
+    return tables.cosine(angle)
 end
 
 function module.fineSine(index: number): number
-	local sine = rotate((index % FINEANGLES) * ANGLETOFINE)
-	return sine
+    return tables.fineSine(index)
 end
 
 function module.fineCosine(index: number): number
-	local cosine = rotate(((index + FINEANGLES / 4) % FINEANGLES) * ANGLETOFINE)
-	return cosine
+    return tables.fineCosine(index)
 end
 
 -- The same unsigned division used by tables.c. Inputs are unsigned in the C
 -- API; normalization here makes that contract explicit for Lua callers.
 function module.slopeDiv(num: number, den: number): number
-	local unsignedNum, unsignedDen = normalize(num), normalize(den)
-	if unsignedDen < 512 then
-		return module.SLOPERANGE
-	end
-	local denominator = math.floor(unsignedDen / 256)
-	local answer = math.floor(((unsignedNum * 8) % U32) / denominator)
-	return math.min(answer, module.SLOPERANGE)
+    local unsignedNum, unsignedDen = math.abs(num), math.abs(den)
+    if unsignedDen < 512 then return module.SLOPERANGE end
+    return math.min(module.SLOPERANGE, math.floor(unsignedNum * 8 / math.floor(unsignedDen / 256)))
 end
 
 -- Integer vectoring CORDIC, returning an unsigned BAM angle.
@@ -168,30 +161,19 @@ function module.vectorToAngle(dx: number, dy: number): number
 		return if dx > 0 then 0 else module.ANG180
 	end
 
-	local x, y = dx, dy
-	local result = 0
-	if x < 0 then
-		x, y = -x, -y
-		result = module.ANG180
-	end
-
-	for i, turn in cordicAngles do
-		local shiftedY = arithmeticShift(y, i - 1)
-		if y > 0 then
-			local oldX = x
-			x += shiftedY
-			y -= arithmeticShift(oldX, i - 1)
-			result += turn
-		elseif y < 0 then
-			local oldX = x
-			x -= shiftedY
-			y += arithmeticShift(oldX, i - 1)
-			result -= turn
-		else
-			break
-		end
-	end
-	return normalize(result)
+    local x, y = dx, dy
+    local ax, ay = math.abs(x), math.abs(y)
+    local result: number
+    if x >= 0 and y >= 0 then
+        result = if x > y then tables.tanToAngle(module.slopeDiv(ay, ax)) else module.ANG90 - tables.tanToAngle(module.slopeDiv(ax, ay))
+    elseif x >= 0 then
+        result = if x > ay then U32 - tables.tanToAngle(module.slopeDiv(ay, ax)) else module.ANG270 + tables.tanToAngle(module.slopeDiv(ax, ay))
+    elseif y >= 0 then
+        result = if ax > y then module.ANG180 - tables.tanToAngle(module.slopeDiv(y, ax)) else module.ANG90 + tables.tanToAngle(module.slopeDiv(ax, y))
+    else
+        result = if ax > ay then module.ANG180 + tables.tanToAngle(module.slopeDiv(ay, ax)) else module.ANG270 - tables.tanToAngle(module.slopeDiv(ax, ay))
+    end
+    return normalize(result)
 end
 
 -- Accept either a vector (dx, dy) or two points (x1, y1, x2, y2).

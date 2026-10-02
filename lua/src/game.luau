@@ -3,6 +3,10 @@
 -- live in tick.luau so callers can drive them without a renderer or a WAD FS.
 local mobj = require './mobj'
 local physics = require './physics'
+local info = require './info'
+local enemy = require './enemy'
+local inter = require './inter'
+local specials = require './specials'
 
 local module = {}
 export type Game = {
@@ -14,20 +18,6 @@ export type Game = {
     mobjs: {mobj.Mobj},
     thinkers: {mobj.Thinker},
 }
-
-local monsterKinds: {[number]: boolean} = {
-    [64] = true, [65] = true, [66] = true, [67] = true, [68] = true,
-    [69] = true, [71] = true, [84] = true, [88] = true,
-    [3001] = true, [3002] = true, [3003] = true, [3004] = true,
-    [3005] = true, [3006] = true, [3007] = true,
-}
-
-local function findThing(map: any, kind: number): any
-    for _, thing in map.things do
-        if thing.kind == kind then return thing end
-    end
-    return nil
-end
 
 local function spawnPlayer(game: Game, index: number): mobj.Player
     local id = #game.mobjs + 1
@@ -41,20 +31,11 @@ local function spawnPlayer(game: Game, index: number): mobj.Player
 end
 
 local function spawnMonster(game: Game, thing: any): ()
-    local id = #game.mobjs + 1
-    local object = mobj.newMobj(
-        id,
-        thing.kind,
-        thing.x * mobj.FRACUNIT,
-        thing.y * mobj.FRACUNIT,
-        mobj.angleFromDegrees(thing.angle),
-        bit32.bor(mobj.MF_SOLID, mobj.MF_SHOOTABLE),
-        if thing.kind == 3002 or thing.kind == 3003 then 150 else 20
-    )
-    object.floorz, object.ceilingz = physics.floorAndCeiling(game.map, object.x, object.y)
-    object.z = object.floorz
-    table.insert(game.mobjs, object)
-    table.insert(game.thinkers, mobj.newThinker(id, 'mobj', id))
+    if info.monster(thing.kind) then
+        enemy.spawn(game, thing.kind, thing.x * mobj.FRACUNIT, thing.y * mobj.FRACUNIT, mobj.angleFromDegrees(thing.angle))
+    elseif info.pickup(thing.kind) then
+        inter.spawn(game, thing.kind, thing.x * mobj.FRACUNIT, thing.y * mobj.FRACUNIT, mobj.angleFromDegrees(thing.angle))
+    end
 end
 
 function module.new(map: any, options: any?): Game
@@ -74,9 +55,10 @@ function module.new(map: any, options: any?): Game
     for index = 1, count do spawnPlayer(game, index) end
     if settings.spawnMonsters ~= false then
         for _, thing in map.things do
-            if monsterKinds[thing.kind] then spawnMonster(game, thing) end
+            if info.monster(thing.kind) or info.pickup(thing.kind) then spawnMonster(game, thing) end
         end
     end
+    game.specials = specials.init(game, settings)
     return game
 end
 
@@ -97,6 +79,7 @@ function module.respawn(game: Game, index: number): boolean
     object.health = 100
     object.flags = bit32.bor(object.flags, mobj.MF_SOLID, mobj.MF_SHOOTABLE)
     object.state, object.tics, object.removed = 'spawn', 0, false
+    object.flags = bit32.bor(object.flags, mobj.MF_SOLID, mobj.MF_SHOOTABLE)
     player.state, player.health, player.damagecount = mobj.PST_LIVE, 100, 0
     player.viewheight, player.viewz = 41 * mobj.FRACUNIT, object.z + 41 * mobj.FRACUNIT
     player.usedown, player.attackdown, player.attackCooldown, player.deathTics = false, false, 0, 0
@@ -151,6 +134,7 @@ function module.snapshot(game: Game): any
         players = players,
         mobjs = objects,
         thinkers = thinkers,
+        specials = if game.specials then specials.snapshot(game.specials) else nil,
     }
 end
 
