@@ -777,6 +777,8 @@ suite.describe('game tick', function()
     expect(player.killcount).toBe(1)
     expect(player.kills).toBe(0)
     player.killcount, player.itemcount, player.secretcount = 6, 2, 1
+    player.powers[inter.POWER_INVISIBILITY] = 20
+    game.mobjs[player.moId].flags = bit32.bor(game.mobjs[player.moId].flags, mobj.MF_SHADOW)
     doom.flow.completeLevel(game)
     expect(game.flow.intermission.players[1]).toEqual({
       inGame = true,
@@ -793,6 +795,8 @@ suite.describe('game tick', function()
     expect(game.players[1].killcount).toBe(0)
     expect(game.players[1].itemcount).toBe(0)
     expect(game.players[1].secretcount).toBe(0)
+    expect(game.players[1].powers[inter.POWER_INVISIBILITY]).toBe(20)
+    expect(bit32.band(game.mobjs[game.players[1].moId].flags, mobj.MF_SHADOW) ~= 0).toBe(true)
     expect(game.specials.map).toBe(game.map)
     expect(game.specials.game).toBe(game)
     doom.step(game)

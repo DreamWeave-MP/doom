@@ -235,7 +235,7 @@ local function stateFor(game: any): FlowState
     return state
 end
 
-local function copyPersistent(oldPlayer: any, newPlayer: any): ()
+local function copyPersistent(oldPlayer: any, newPlayer: any, newObject: any): ()
     newPlayer.health = oldPlayer.health
     newPlayer.armor = oldPlayer.armor
     newPlayer.armorType = oldPlayer.armorType
@@ -252,6 +252,9 @@ local function copyPersistent(oldPlayer: any, newPlayer: any): ()
     newPlayer.pendingweapon = oldPlayer.pendingweapon
     newPlayer.ammo = clone(oldPlayer.ammo)
     newPlayer.weaponowned = clone(oldPlayer.weaponowned)
+    if (newPlayer.powers[3] or 0) > 0 then
+        newObject.flags = bit32.bor(newObject.flags, mobj.MF_SHADOW)
+    end
 end
 
 local function replaceLevel(game: any, map: any, state: FlowState, resetFrags: boolean): ()
@@ -268,7 +271,7 @@ local function replaceLevel(game: any, map: any, state: FlowState, resetFrags: b
     })
     for index, oldPlayer in oldPlayers do
         local newPlayer = replacement.players[index]
-        if newPlayer then copyPersistent(oldPlayer, newPlayer) end
+        if newPlayer then copyPersistent(oldPlayer, newPlayer, replacement.mobjs[newPlayer.moId]) end
     end
 
     game.map = replacement.map
