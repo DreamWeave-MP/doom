@@ -160,9 +160,10 @@ end
 useLines = function(game: any, object: mobj.Mobj): boolean
     if not game.specials then return false end
     local rayX, rayY = physics.cosFixed(object.angle), physics.sinFixed(object.angle)
-    local nearest: number? = nil
-    local nearestIndex: number? = nil
-    local nearestSide = 0
+    local nearestSpecial: number? = nil
+    local nearestSpecialIndex: number? = nil
+    local nearestSpecialSide = 0
+    local nearestBlock: number? = nil
     for index, line in game.map.lines do
         local a, b = game.map.vertices[line.v1], game.map.vertices[line.v2]
         if a and b then
@@ -174,16 +175,33 @@ useLines = function(game: any, object: mobj.Mobj): boolean
             if denominator ~= 0 then
                 local distance = (offsetX * lineY - offsetY * lineX) / denominator
                 local along = (offsetX * rayY - offsetY * rayX) / denominator
-                if distance >= 0 and distance <= 64 * mobj.FRACUNIT and along >= 0 and along <= 1
-                    and (nearest == nil or distance < nearest) then
-                    nearest, nearestIndex = distance, index
-                    local side = lineX * (object.y - ay) - lineY * (object.x - ax)
-                    nearestSide = if side < 0 then 0 else 1
+                if distance >= 0 and distance <= 64 * mobj.FRACUNIT and along >= 0 and along <= 1 then
+                    local twoSided = line.left ~= 0xffff
+                    local blocking = not twoSided or bit32.band(line.flags, 1) ~= 0
+                    if twoSided and not blocking then
+                        local rightSide, leftSide = game.map.sides[line.right + 1], game.map.sides[line.left + 1]
+                        local right = rightSide and game.map.sectors[rightSide.sector]
+                        local left = leftSide and game.map.sectors[leftSide.sector]
+                        if not right or not left then
+                            blocking = true
+                        else
+                            local bottom = math.max(right.floor, left.floor) * mobj.FRACUNIT
+                            local top = math.min(right.ceiling, left.ceiling) * mobj.FRACUNIT
+                            blocking = top - bottom < object.height or bottom - object.floorz > physics.MAX_STEP
+                        end
+                    end
+                    if blocking and (nearestBlock == nil or distance < nearestBlock) then nearestBlock = distance end
+                    if line.special ~= 0 and (nearestSpecial == nil or distance < nearestSpecial) then
+                        nearestSpecial, nearestSpecialIndex = distance, index
+                        local side = lineX * (object.y - ay) - lineY * (object.x - ax)
+                        nearestSpecialSide = if side < 0 then 0 else 1
+                    end
                 end
             end
         end
     end
-    return nearestIndex ~= nil and specials.useLine(game.specials, nearestIndex, object, nearestSide)
+    if nearestSpecialIndex == nil or (nearestBlock ~= nil and nearestBlock < (nearestSpecial or 0)) then return false end
+    return specials.useLine(game.specials, nearestSpecialIndex, object, nearestSpecialSide)
 end
 
 function module.step(game: any, commands: any?): any

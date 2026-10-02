@@ -347,6 +347,9 @@ suite.describe('fixed-point movement', function()
   suite.it('uses the nearest special line in front of the player within reach', function()
     local frac = mobj.FRACUNIT
     local map = twoSectorMap(0, 11)
+    table.insert(map.vertices, { x = 10, y = -64 })
+    table.insert(map.vertices, { x = 10, y = 64 })
+    table.insert(map.lines, { v1 = 3, v2 = 4, flags = 0, special = 0, tag = 0, right = 0, left = 1 })
     local game = gameModule.new(map, { spawnMonsters = false })
     local player = game.players[1]
     local object = game.mobjs[player.moId]
@@ -358,6 +361,17 @@ suite.describe('fixed-point movement', function()
     player.angle = mobj.angleFromDegrees(180)
     gameModule.step(game, { { buttons = 0x2 } })
     expect(game.specials.exited).toBe(true)
+
+    local blockedMap = twoSectorMap(0, 11)
+    table.insert(blockedMap.vertices, { x = 10, y = -64 })
+    table.insert(blockedMap.vertices, { x = 10, y = 64 })
+    table.insert(blockedMap.lines, { v1 = 3, v2 = 4, flags = 1, special = 0, tag = 0, right = 0, left = 0xffff })
+    local blockedGame = gameModule.new(blockedMap, { spawnMonsters = false })
+    local blockedPlayer = blockedGame.players[1]
+    blockedGame.mobjs[blockedPlayer.moId].x = 20 * frac
+    blockedPlayer.angle = mobj.angleFromDegrees(180)
+    gameModule.step(blockedGame, { { buttons = 0x2 } })
+    expect(blockedGame.specials.exited).toBe(false)
   end)
 end)
 
