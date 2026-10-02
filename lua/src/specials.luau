@@ -198,10 +198,7 @@ end
 
 local function sectorAtObject(runtime: Runtime, object: any): number?
     if not object then return nil end
-    local ok, sector = pcall(function()
-        return mapModule.sectorAt(runtime.map, math.floor(object.x / FRACUNIT), math.floor(object.y / FRACUNIT))
-    end)
-    if not ok then return nil end
+    local sector = mapModule.sectorAt(runtime.map, math.floor(object.x / FRACUNIT), math.floor(object.y / FRACUNIT))
     for index, candidate in runtime.map.sectors do
         if candidate == sector then return index end
     end

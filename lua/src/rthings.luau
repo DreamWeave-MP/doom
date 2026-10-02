@@ -278,8 +278,14 @@ local function lit(data: any, color: number, light: number, distance: number, fu
 end
 
 local function sectorLight(map: any, x: number, y: number): number
-    local ok, sector = pcall(mapModule.sectorAt, map, x, y)
-    if ok and type(sector) == "table" and type(sector.light) == "number" then return sector.light end
+    local minX, maxX, minY, maxY = math.huge, -math.huge, math.huge, -math.huge
+    for _, vertex in map.vertices do
+        minX, maxX = math.min(minX, vertex.x), math.max(maxX, vertex.x)
+        minY, maxY = math.min(minY, vertex.y), math.max(maxY, vertex.y)
+    end
+    if minX == math.huge or x < minX or x > maxX or y < minY or y > maxY then return 160 end
+    local sector = mapModule.sectorAt(map, x, y)
+    if type(sector) == "table" and type(sector.light) == "number" then return sector.light end
     return 160
 end
 

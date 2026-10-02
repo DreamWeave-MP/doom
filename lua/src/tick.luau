@@ -191,7 +191,7 @@ function module.step(game: any, commands: any?): any
         if not thinker.removed and thinker.tics > 0 then thinker.tics -= 1 end
     end
     game.gametic += 1
-    game.leveltime += 1
+    if not game.specials then game.leveltime += 1 end
     return game
 end
 
