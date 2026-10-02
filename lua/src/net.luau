@@ -2,15 +2,15 @@
 -- Doom's dream-net wire protocol.
 --
 -- The transport owns no Doom state and retains no Luau buffers: sendEvent copies its
--- payload and pollInto fills a caller-owned scratch buffer. A Server is deliberately
--- injected because the Jess host owns the private key and is the only side allowed to
--- acquire a dream.net.Server handle.
+-- payload and pollInto fills a caller-owned buffer. Luau creates and drives servers;
+-- dream.net keeps the signing key private inside server userdata.
 
 local bytes = require("@dream/bytes")
 
 type NetModule = {
     schema: (options: { version: number, maxMessagesPerPacket: number?, channels: { { [string]: any } }, events: { { [string]: any } } }) -> dream_net_Schema,
     client: (options: { schema: dream_net_Schema, bind: string? }) -> dream_net_Client,
+    server: (options: { schema: dream_net_Schema, address: string, protocolId: integer, maxClients: number? }) -> dream_net_Server,
 }
 
 -- Jess 0.1.0/l3i 1.3 exposes this bridge as @dream/net. A missing transport
@@ -47,6 +47,11 @@ export type Protocol = {
 }
 export type ClientOptions = {
     bind: string?,
+}
+export type ServerOptions = {
+    address: string,
+    protocolId: integer,
+    maxClients: number?,
 }
 export type Client = {
     handle: dream_net_Client,
@@ -87,6 +92,7 @@ module.STATE_DIGEST_SIZE = 32
 module.MAX_EVENT_PAYLOAD = 104
 module.TIC_BUNDLE_MAX_PAYLOAD = 104
 module.POLL_BUFFER_SIZE = 104
+module.PROTOCOL_ID = 0x444f6f6d00000001i
 
 local function fail(message: string): never
     error("doom.net: " .. message, 2)
@@ -311,8 +317,16 @@ function module.newClient(protocol: Protocol, options: ClientOptions?): Client
     }
 end
 
--- Server creation is intentionally absent. The host must create and inject a
--- dream.net.Server userdata; this wrapper never accepts an address or private key.
+function module.newServer(protocol: Protocol, options: ServerOptions): Server
+    local handle = net.server({
+        schema = protocol.schema,
+        address = options.address,
+        protocolId = options.protocolId,
+        maxClients = options.maxClients,
+    })
+    return module.wrapServer(handle, protocol)
+end
+
 function module.wrapServer(handle: dream_net_Server, protocol: Protocol): Server
     return { handle = handle, protocol = protocol }
 end
@@ -332,7 +346,22 @@ local function serverSend(handle: dream_net_Server, peer: integer, id: integer, 
 end
 
 function module.clientConnect(client: Client, token: buffer | string): ()
-    client.handle:connect(token)
+    local rawToken: buffer | string = token
+    if type(token) == "string" and #token ~= net.CONNECT_TOKEN_BYTES then
+        rawToken = bytes.fromBase64(token)
+    end
+    if (if type(rawToken) == "buffer" then buffer.len(rawToken) else #rawToken) ~= net.CONNECT_TOKEN_BYTES then
+        fail(`connect token must contain {net.CONNECT_TOKEN_BYTES} bytes (or be base64 text)`)
+    end
+    client.handle:connect(rawToken)
+end
+
+function module.serverConnectToken(server: Server, clientId: integer): buffer
+    return server.handle:connectToken(clientId)
+end
+
+function module.serverConnectTokenBase64(server: Server, clientId: integer): string
+    return bytes.toBase64(module.serverConnectToken(server, clientId))
 end
 
 function module.clientDisconnect(client: Client): ()

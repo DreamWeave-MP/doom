@@ -10,6 +10,7 @@ local saveModule = require("@doom/save")
 local stateModule = require("@doom/state")
 local tick = require("@doom/tick")
 local flow = require("@doom/flow")
+local netgame = require("@doom/netgame")
 local specials = require("@doom/specials")
 
 local module = {}
@@ -102,20 +103,25 @@ function module.load(path: string, mapName: string?, source: any?): any
     if type(source) == "string" or type(source) == "buffer" then
         local data = if type(source) == "string" then fs.readBuffer(source) else source
         local snapshot = saveModule.load(data)
-        if snapshot.map ~= map.name then
-            error(`doom: save map '{snapshot.map}' does not match '{map.name}'`, 2)
+        local gameSnapshot = if type(snapshot.game) == "table" then snapshot.game else snapshot
+        if gameSnapshot.map ~= map.name then
+            error(`doom: save map '{gameSnapshot.map}' does not match '{map.name}'`, 2)
         end
-        game.leveltime = snapshot.leveltime
-        game.gametic = snapshot.gametic
-        game.rngState = snapshot.rngState
-        game.players = snapshot.players
-        game.mobjs = snapshot.mobjs
-        game.thinkers = snapshot.thinkers
+        if type(snapshot.flow) == "table" then
+            flow.restore(game, snapshot)
+        else
+            game.leveltime = gameSnapshot.leveltime
+            game.gametic = gameSnapshot.gametic
+            game.rngState = gameSnapshot.rngState
+            game.players = gameSnapshot.players
+            game.mobjs = gameSnapshot.mobjs
+            game.thinkers = gameSnapshot.thinkers
+        end
         for _, object in game.mobjs do
             if object.playerId == 0 then object.playerId = nil end
             if object.targetId == 0 then object.targetId = nil end
         end
-        if snapshot.specials then specials.restore(game.specials, snapshot.specials) end
+        if gameSnapshot.specials then specials.restore(game.specials, gameSnapshot.specials) end
     end
     return game
 end
@@ -128,15 +134,15 @@ module.tick = module.step
 module.tic = module.step
 
 function module.stateSnapshot(game: any): any
-    return gameModule.snapshot(game)
+    return if game.flow then flow.snapshot(game) else gameModule.snapshot(game)
 end
 
 function module.stateHash(game: any): string
-    return gameModule.stateHash(game)
+    return stateModule.hash(module.stateSnapshot(game))
 end
 
 function module.save(game: any, path: string?): buffer
-    local data = saveModule.save(gameModule.snapshot(game))
+    local data = saveModule.save(module.stateSnapshot(game))
     if path then fs.write(path, data) end
     return data
 end
@@ -235,6 +241,7 @@ module.state = stateModule
 module.saveFormat = saveModule
 module.tickModule = tick
 module.flow = flow
+module.netgame = netgame
 module.newGame = flow.newGame
 module.applyDemoFrame = flow.applyDemoFrame
 module.completeLevel = flow.completeLevel

@@ -1,0 +1,22 @@
+Jess release binary: jess 0.1.0, SHA-256 e319def31ff86222977acf9e85a70c1b9fbbe4733be6d5e912c78466a5fa469a
+l3i: 1.3.1 from crates.io
+Package source digest: a877b1fb18ec673dc8e265a70b87a72059325087ae8bd42ac074e81dc80406ac
+doom.jpk SHA-256: 44d661301007203f26d92d6fbf72b6950e673ef6baa6c556fec88db419cdcab9
+IWAD: external doom2.wad (MAP01)
+
+Run:
+  jess run --package doom.jpk --capability network.transport lua/bin/doom-server.luau doom2.wad MAP01 127.0.0.1:0 /tmp/doom-net-tokens.txt 4 70
+  jess run --package doom.jpk --capability network.transport lua/bin/doom-client.luau doom2.wad MAP01 /tmp/doom-net-tokens.txt 1 70 4
+  jess run --package doom.jpk --capability network.transport lua/bin/doom-client.luau doom2.wad MAP01 /tmp/doom-net-tokens.txt 2 70 4
+  jess run --package doom.jpk --capability network.transport lua/bin/doom-client.luau doom2.wad MAP01 /tmp/doom-net-tokens.txt 3 70 4
+  jess run --package doom.jpk --capability network.transport lua/bin/doom-client.luau doom2.wad MAP01 /tmp/doom-net-tokens.txt 4 70 4
+
+Result (five separate Jess processes, loopback UDP):
+  host:   70 tics, world hash bf91e7cc9acbb671
+  client1: 70 tics, world hash bf91e7cc9acbb671, mismatches 0
+  client2: 70 tics, world hash bf91e7cc9acbb671, mismatches 0
+  client3: 70 tics, world hash bf91e7cc9acbb671, mismatches 0
+  client4: 70 tics, world hash bf91e7cc9acbb671, mismatches 0
+
+The authoritative simulation, tic-command routing, client replay and hash comparison run in Luau.
+The native dream.net server userdata owns its generated signing key and only returns connect tokens.

@@ -5,7 +5,7 @@ id = "org.dreamweave.doom"
 version = "0.1.0"
 jess_api = "1"
 include = ["src", "bin", "README.md", "LICENSE.TXT"]
-tests = ["tests/wad_test.luau"]
+tests = ["tests/wad_test.luau", "tests/net_test.luau"]
 
 [modules]
 "@doom/fixed" = "src/fixed.luau"
@@ -23,6 +23,7 @@ tests = ["tests/wad_test.luau"]
 "@doom/state" = "src/state.luau"
 "@doom/save" = "src/save.luau"
 "@doom/net" = "src/net.luau"
+"@doom/netgame" = "src/netgame.luau"
 "@doom/game" = "src/game.luau"
 "@doom/mobj" = "src/mobj.luau"
 "@doom/physics" = "src/physics.luau"
@@ -54,6 +55,7 @@ exports = [
   "@doom/state",
   "@doom/save",
   "@doom/net",
+  "@doom/netgame",
   "@doom/game",
   "@doom/mobj",
   "@doom/physics",
