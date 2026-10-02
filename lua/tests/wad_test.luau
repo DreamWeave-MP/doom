@@ -3,14 +3,18 @@
 -- Synthetic WAD bytes keep the suite independent of an installed game.
 local demoModule = require '@doom/demo'
 local doom = require '@doom'
+local enemy = require '@doom/enemy'
 local fixed = require '@doom/fixed'
 local gameModule = require '@doom/game'
 local info = require '@doom/info'
 local mapModule = require '@doom/map'
+local mobj = require '@doom/mobj'
 local paletteModule = require '@doom/palette'
+local physics = require '@doom/physics'
 local random = require '@doom/random'
 local save = require '@doom/save'
 local state = require '@doom/state'
+local weapons = require '@doom/weapons'
 local tables = require '@doom/tables'
 local test = require '@jess/test'
 local wadModule = require '@doom/wad'
@@ -281,6 +285,49 @@ suite.describe('maps', function()
   end)
 end)
 
+suite.describe('fixed-point movement', function()
+  local function twoSectorMap(step: number): mapModule.Map
+    local sectors = {
+      { floor = 0, ceiling = 128, floorTex = 'FLOOR0', ceilingTex = 'CEIL0', light = 160, special = 0, tag = 0 },
+      { floor = step, ceiling = 128, floorTex = 'FLOOR1', ceilingTex = 'CEIL0', light = 160, special = 0, tag = 0 },
+    }
+    return {
+      name = 'STEPTEST',
+      vertices = { { x = 0, y = -64 }, { x = 0, y = 64 } },
+      lines = { { v1 = 1, v2 = 2, flags = 0, special = 0, tag = 0, right = 0, left = 1 } },
+      sides = {
+        { xOffset = 0, yOffset = 0, upper = '', lower = '', middle = '', sector = 1 },
+        { xOffset = 0, yOffset = 0, upper = '', lower = '', middle = '', sector = 2 },
+      },
+      sectors = sectors,
+      things = {},
+      segs = {
+        { v1 = 1, v2 = 2, line = 1, side = 0 },
+        { v1 = 2, v2 = 1, line = 1, side = 1 },
+      },
+      subsectors = { { count = 1, first = 1 }, { count = 1, first = 2 } },
+      nodes = { { x = 0, y = -64, dx = 0, dy = 128, front = 0x8001, back = 0x8000 } },
+    }
+  end
+
+  suite.it('allows steps up to 24 units and blocks higher steps', function()
+    local frac = mobj.FRACUNIT
+    local map = twoSectorMap(24)
+    local object = mobj.newMobj(1, 0, -20 * frac, 0, 0, mobj.MF_SOLID, 100)
+    object.radius, object.height = 16 * frac, 56 * frac
+    object.floorz, object.ceilingz, object.z = 0, 128 * frac, 0
+    expect(physics.tryMove(map, object, 20 * frac, 0)).toBe(true)
+    expect(object.z).toBe(24 * frac)
+
+    local tooHigh = twoSectorMap(25)
+    local blocked = mobj.newMobj(1, 0, -20 * frac, 0, 0, mobj.MF_SOLID, 100)
+    blocked.radius, blocked.height = 16 * frac, 56 * frac
+    blocked.floorz, blocked.ceilingz, blocked.z = 0, 128 * frac, 0
+    expect(physics.tryMove(tooHigh, blocked, 20 * frac, 0)).toBe(false)
+    expect(blocked.x).toBe(-20 * frac)
+  end)
+end)
+
 suite.describe('deterministic core', function()
   suite.it('preserves fixed-point products, division, and saturation', function()
     expect(fixed.mul(fixed.FRACUNIT, fixed.FRACUNIT)).toBe(fixed.FRACUNIT)
@@ -325,6 +372,59 @@ suite.describe('game tick', function()
     local loaded = doom.load(path, 'E1M1', savePath)
     expect(doom.stateHash(loaded)).toBe(doom.stateHash(runtime))
     fs.remove(savePath)
+  end)
+
+  suite.it('applies vanilla button weapon selection through pending weapon state', function()
+    local wad = wadModule.open(writeFixture(fixture()))
+    local map = mapModule.load(wad, 'E1M1')
+    local game = gameModule.new(map, { spawnMonsters = false })
+    local shotgun = info.WP_SHOTGUN
+    weapons.giveWeapon(game, 1, shotgun)
+    expect(game.players[1].readyweapon == shotgun).toBe(false)
+    game.players[1].pendingweapon = game.players[1].readyweapon
+    gameModule.step(game, { { buttons = bit32.bor(0x4, bit32.lshift(shotgun, 3)) } })
+    expect(game.players[1].readyweapon).toBe(shotgun)
+  end)
+
+  suite.it('hashes and restores game-flow state such as deathmatch frags', function()
+    local path = writeFixture(fixture())
+    local map = mapModule.load(wadModule.open(path), 'E1M1')
+    local game = doom.newGame(map, {
+      playerCount = 1,
+      activeSlots = { 1 },
+      deathmatch = true,
+      spawnMonsters = false,
+      consolePlayer = 1,
+    })
+    local remoteMap = mapModule.load(wadModule.open(path), 'E1M1')
+    local remoteView = doom.newGame(remoteMap, {
+      playerCount = 1,
+      activeSlots = { 1 },
+      deathmatch = true,
+      spawnMonsters = false,
+      consolePlayer = 2,
+    })
+    local before = doom.stateHash(game)
+    expect(doom.netgame.stateHash(game)).toBe(doom.netgame.stateHash(remoteView))
+    doom.flow.recordFrag(game, 1, 1, -1)
+    expect(doom.stateHash(game) ~= before).toBe(true)
+    expect(doom.netgame.stateHash(game) ~= doom.netgame.stateHash(remoteView)).toBe(true)
+
+    local restored = doom.load(path, 'E1M1', doom.save(game))
+    expect(restored.flow.frags[1][1]).toBe(-1)
+    expect(doom.stateHash(restored)).toBe(doom.stateHash(game))
+  end)
+
+  suite.it('advances monster run animation instead of resetting the first frame every tic', function()
+    local wad = wadModule.open(writeFixture(fixture()))
+    local map = mapModule.load(wad, 'E1M1')
+    local game = gameModule.new(map, { spawnMonsters = false })
+    local actorId = enemy.spawn(game, 3001, 96 * mobj.FRACUNIT, 24 * mobj.FRACUNIT, 0, { reactiontime = 100 })
+    local actor = game.mobjs[actorId]
+    actor.state, actor.tics = 'S_TROO_RUN1', 1
+    gameModule.step(game)
+    expect(actor.state).toBe('S_TROO_RUN2')
+    expect(actor.tics).toBe(3)
   end)
 end)
 

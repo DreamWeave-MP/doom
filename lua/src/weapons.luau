@@ -1,6 +1,6 @@
 --!strict
--- Player weapon actions and selection.  All entry points take the existing game
--- object; no tick/game integration is required.
+-- Player weapon actions and selection for the existing game object. tick.luau
+-- invokes these actions and advances their per-player state each tic.
 local enemy = require './enemy'
 local info = require './info'
 local mobj = require './mobj'

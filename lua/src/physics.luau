@@ -149,7 +149,9 @@ local function openEnough(map: any, line: any, object: mobj.Mobj, currentFloor: 
     local top = math.min(right.ceiling, left.ceiling) * module.FRACUNIT
     if top - bottom < object.height then return false end
     if bottom - currentFloor > module.MAX_STEP then return false end
-    if object.z < bottom or object.z + object.height > top then return false end
+    -- A player may step up to the opening's floor, provided the step is within
+    -- MAX_STEP; rejecting z < bottom here would make every raised floor solid.
+    if object.z + object.height > top then return false end
     return true
 end
 

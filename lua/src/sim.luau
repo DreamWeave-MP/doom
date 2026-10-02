@@ -1,6 +1,6 @@
 --!strict
--- A deliberately small headless player-motion harness. It is useful for scripted
--- integration tests before the full P_* gameplay port exists; it does not claim demo sync.
+-- Compatibility motion-only harness retained for callers of @doom/sim. New code
+-- should drive the canonical fixed-point player/object model in game.luau and tick.luau.
 local module = {}
 
 export type Player = { x: number, y: number, angle: number, momX: number, momY: number }

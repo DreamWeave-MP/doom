@@ -1,7 +1,7 @@
 --!strict
--- Deterministic actor simulation for the existing game object.  This module is
--- deliberately not wired into tick.luau: hosts can opt into this combat slice
--- without changing the canonical game/tick API.
+-- Deterministic actor simulation for the canonical game object. tick.luau drives
+-- these actor actions; the modeled states and AI remain a documented subset of
+-- Linux Doom 1.10 rather than a claim of demo-sync-complete behavior.
 local mobj = require './mobj'
 local physics = require './physics'
 local angle = require './angle'
@@ -57,6 +57,28 @@ local function setState(object: any, name: string): boolean
     object.sprite = state.sprite
     object.frame = state.frame
     return true
+end
+
+local function followsState(root: string?, wanted: string): boolean
+    if not root then return false end
+    local seen: {[string]: boolean} = {}
+    local current = root
+    for _ = 1, 64 do
+        if current == wanted then return true end
+        if seen[current] then return false end
+        seen[current] = true
+        local state = info.state(current)
+        if not state then return false end
+        current = state.next
+    end
+    return false
+end
+
+local function inActionSequence(actor: any, meta: info.Monster): boolean
+    return followsState(meta.seeState, actor.state)
+        or followsState(meta.painState, actor.state)
+        or followsState(meta.meleeState, actor.state)
+        or followsState(meta.missileState, actor.state)
 end
 
 local function monsterFor(object: any): info.Monster?
@@ -295,7 +317,7 @@ function module.chase(game: any, actorId: number, targetId: number?): string
     if not actor or not meta or actor.removed or actor.health <= 0 then return 'dead' end
     local target = if targetId then get(game, targetId) else chooseTarget(game, actor)
     if not target or target.health <= 0 then
-        setState(actor, meta.spawnState)
+        if not followsState(meta.spawnState, actor.state) then setState(actor, meta.spawnState) end
         return 'idle'
     end
     actor.targetId = target.id
@@ -326,7 +348,10 @@ function module.chase(game: any, actorId: number, targetId: number?): string
     if not moved then
         raw.movedir = (dir + 1 + randomByte(game) % 7) % 8
     end
-    setState(actor, meta.seeState)
+    -- The run states form a cycle. Re-entering the first frame on every AI tic
+    -- freezes the actor's animation; only leave the current action when it is no
+    -- longer on the see/pain/attack state chain.
+    if not inActionSequence(actor, meta) then setState(actor, meta.seeState) end
     return if moved then 'move' else 'blocked'
 end
 

@@ -14,6 +14,8 @@ local module = {}
 module.BT_ATTACK = 0x1
 module.BT_USE = 0x2
 module.BT_CHANGE = 0x4
+module.BT_WEAPONMASK = 0x38
+module.BT_WEAPONSHIFT = 3
 module.TICRATE = 35
 module.ATTACK_COOLDOWN = 4
 module.PISTOL_DAMAGE = 3
@@ -124,6 +126,11 @@ local function playerThink(game: any, player: any, command: any?): ()
     physics.move(game.map, object)
     player.viewz = object.z + player.viewheight
     if player.damagecount > 0 then player.damagecount -= 1 end
+
+    if bit32.band(cmd.buttons, module.BT_CHANGE) ~= 0 then
+        local weaponId = bit32.band(bit32.rshift(cmd.buttons, module.BT_WEAPONSHIFT), 7)
+        weapons.switch(game, player.index, weaponId)
+    end
 
     local attack = bit32.band(cmd.buttons, module.BT_ATTACK) ~= 0
     if player.attackdown and not attack then player.attackdown = false end
