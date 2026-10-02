@@ -437,7 +437,10 @@ function module.damage(game: any, targetId: number, amount: number, sourceId: nu
         if player then player.state, player.health, player.deathTics = mobj.PST_DEAD, 0, 0 end
         if source and source.playerId then
             local owner = game.players[source.playerId]
-            if owner then owner.kills += 1 end
+            if owner then
+                owner.kills += 1
+                owner.killcount = (owner.killcount or 0) + 1
+            end
         end
     else
         local meta = monsterFor(target)

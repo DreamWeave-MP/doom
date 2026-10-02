@@ -241,9 +241,9 @@ local function copyPersistent(oldPlayer: any, newPlayer: any): ()
     newPlayer.armorType = oldPlayer.armorType
     newPlayer.deaths = oldPlayer.deaths
     newPlayer.kills = oldPlayer.kills
-    newPlayer.killcount = oldPlayer.killcount or oldPlayer.kills or 0
-    newPlayer.itemcount = oldPlayer.itemcount or 0
-    newPlayer.secretcount = oldPlayer.secretcount or 0
+    newPlayer.killcount = 0
+    newPlayer.itemcount = 0
+    newPlayer.secretcount = 0
     newPlayer.powers = clone(oldPlayer.powers or {})
     newPlayer.cards = clone(oldPlayer.cards or {})
     newPlayer.backpack = oldPlayer.backpack == true
@@ -362,9 +362,9 @@ local function playerSummary(game: any, state: FlowState): {any}
     for index, player in game.players do
         result[index] = {
             inGame = true,
-            kills = player.kills,
-            items = 0,
-            secret = if state.didSecret then 1 else 0,
+            kills = player.killcount or 0,
+            items = player.itemcount or 0,
+            secret = player.secretcount or 0,
             time = game.leveltime,
             frags = clone(state.frags[index]),
         }

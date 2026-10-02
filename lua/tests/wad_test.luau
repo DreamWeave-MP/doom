@@ -640,6 +640,34 @@ suite.describe('game tick', function()
     expect(doom.stateHash(restored)).toBe(doom.stateHash(game))
   end)
 
+  suite.it('reports per-player intermission counts and resets them on the next level', function()
+    local path = writeFixture(fixture())
+    local game = doom.newGame(mapModule.load(wadModule.open(path), 'E1M1'), {
+      playerCount = 1,
+      spawnMonsters = false,
+    })
+    local player = game.players[1]
+    local targetId = enemy.spawn(game, 3001, 64 * mobj.FRACUNIT, 24 * mobj.FRACUNIT, 0)
+    enemy.damage(game, targetId, 1000, player.moId)
+    expect(player.killcount).toBe(1)
+    player.killcount, player.itemcount, player.secretcount = 6, 2, 1
+    doom.flow.completeLevel(game)
+    expect(game.flow.intermission.players[1]).toEqual({
+      inGame = true,
+      kills = 6,
+      items = 2,
+      secret = 1,
+      time = game.leveltime,
+      frags = { 0, 0, 0, 0 },
+    })
+
+    local nextMap = mapModule.load(wadModule.open(path), 'E1M1')
+    doom.flow.nextMap(game, nextMap)
+    expect(game.players[1].killcount).toBe(0)
+    expect(game.players[1].itemcount).toBe(0)
+    expect(game.players[1].secretcount).toBe(0)
+  end)
+
   suite.it('advances monster run animation instead of resetting the first frame every tic', function()
     local wad = wadModule.open(writeFixture(fixture()))
     local map = mapModule.load(wad, 'E1M1')
