@@ -59,6 +59,7 @@ export type Player = {
     attackdown: boolean,
     attackCooldown: number,
     deathTics: number,
+    deathSourceId: number,
     deaths: number,
     kills: number,
     killcount: number,
@@ -162,6 +163,7 @@ function module.newPlayer(index: number, moId: number, x: number, y: number, ang
         attackdown = false,
         attackCooldown = 0,
         deathTics = 0,
+        deathSourceId = 0,
         deaths = 0,
         kills = 0,
         readyweapon = 1, -- pistol; the fist is represented by 0

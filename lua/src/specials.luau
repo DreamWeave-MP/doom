@@ -228,6 +228,7 @@ local function damage(runtime: Runtime, object: any, amount: number): number
         object.health = player.health
         if player.health == 0 then
             player.state = mobj.PST_DEAD
+            player.deathSourceId = 0
             player.deaths = (player.deaths or 0) + 1
             object.state = 'dead'
             object.flags = bit32.band(object.flags, bit32.bnot(mobj.MF_SHOOTABLE))

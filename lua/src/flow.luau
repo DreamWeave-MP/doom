@@ -404,10 +404,8 @@ function module.applyDemoFrame(game: FlowGame, frame: any?): FlowGame
     local direct = type(source) == 'table' and source.forwardmove == nil and source.forward == nil and source.sidemove == nil and source.side == nil and source.buttons == nil
     local commands: {any} = {}
     local beforeDead: {[number]: boolean} = {}
-    local beforeKills: {[number]: number} = {}
     for index, player in game.players do
         beforeDead[index] = player.state == mobj.PST_DEAD
-        beforeKills[index] = player.kills
         local command = nil
         if not direct and index == state.consolePlayer then
             command = source
@@ -425,13 +423,14 @@ function module.applyDemoFrame(game: FlowGame, frame: any?): FlowGame
         if not beforeDead[index] and player.state == mobj.PST_DEAD then table.insert(newDeaths, index) end
     end
     if state.deathmatch and #newDeaths > 0 then
-        local killers: {number} = {}
-        for index, player in game.players do
-            if player.kills > (beforeKills[index] or player.kills) then table.insert(killers, index) end
-        end
-        for position, victim in newDeaths do
-            local killer = killers[position]
-            if killer then module.recordFrag(game, killer, victim) end
+        for _, victim in newDeaths do
+            local deathSourceId = game.players[victim].deathSourceId or 0
+            if deathSourceId == 0 then
+                module.recordFrag(game, victim, victim)
+            else
+                local source = game.mobjs[deathSourceId]
+                if source and source.playerId then module.recordFrag(game, source.playerId, victim) end
+            end
         end
     end
 

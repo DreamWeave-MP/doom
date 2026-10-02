@@ -143,7 +143,8 @@ local function snapshotPlayer(player: mobj.Player): any
         armor = player.armor, armorType = player.armorType, damagecount = player.damagecount,
         bonuscount = player.bonuscount, viewheight = player.viewheight, viewz = player.viewz,
         angle = player.angle, usedown = player.usedown, attackdown = player.attackdown,
-        attackCooldown = player.attackCooldown, deathTics = player.deathTics, deaths = player.deaths, kills = player.kills,
+        attackCooldown = player.attackCooldown, deathTics = player.deathTics, deathSourceId = player.deathSourceId,
+        deaths = player.deaths, kills = player.kills,
         readyweapon = player.readyweapon, pendingweapon = player.pendingweapon,
         ammo = {player.ammo[1], player.ammo[2], player.ammo[3], player.ammo[4]},
         weaponowned = {table.unpack(player.weaponowned)},
@@ -169,6 +170,7 @@ function module.normalizePlayers(game: Game): ()
         raw.killcount = raw.killcount or player.kills or 0
         raw.itemcount = raw.itemcount or 0
         raw.secretcount = raw.secretcount or 0
+        raw.deathSourceId = raw.deathSourceId or 0
         raw.index = raw.index or index
     end
 end

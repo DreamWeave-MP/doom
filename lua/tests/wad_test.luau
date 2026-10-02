@@ -418,19 +418,27 @@ suite.describe('fixed-point movement', function()
     expect(#blocked.specials.thinkers).toBe(0)
   end)
 
-  suite.it('records an actual deathmatch player frag without counting it as a monster kill', function()
-    local map = twoSectorMap(0)
-    table.insert(map.things, { x = 20, y = 0, angle = 180, kind = 2, flags = 7 })
-    table.insert(map.things, { x = -20, y = 0, angle = 0, kind = 11, flags = 0 })
-    table.insert(map.things, { x = 20, y = 0, angle = 180, kind = 11, flags = 0 })
-    local game = doom.newGame(map, {
-      playerCount = 2,
-      activeSlots = { 1, 2 },
-      deathmatch = true,
-      spawnMonsters = false,
-      seed = 2,
-      consolePlayer = 1,
-    })
+  suite.it('attributes player, environmental, and monster deaths correctly in deathmatch', function()
+    local function deathmatchMap(): mapModule.Map
+      local map = twoSectorMap(0)
+      table.insert(map.things, { x = 20, y = 0, angle = 180, kind = 2, flags = 7 })
+      table.insert(map.things, { x = -20, y = 0, angle = 0, kind = 11, flags = 0 })
+      table.insert(map.things, { x = 20, y = 0, angle = 180, kind = 11, flags = 0 })
+      return map
+    end
+
+    local function startDeathmatch(map: mapModule.Map): any
+      return doom.newGame(map, {
+        playerCount = 2,
+        activeSlots = { 1, 2 },
+        deathmatch = true,
+        spawnMonsters = false,
+        seed = 2,
+        consolePlayer = 1,
+      })
+    end
+
+    local game = startDeathmatch(deathmatchMap())
     local victim = game.players[2]
     victim.health = 1
     game.mobjs[victim.moId].health = 1
@@ -445,6 +453,28 @@ suite.describe('fixed-point movement', function()
     expect(game.players[1].kills).toBe(1)
     expect(game.players[1].killcount).toBe(0)
     expect(game.flow.frags[1][2]).toBe(1)
+
+    local hazardMap = deathmatchMap()
+    hazardMap.sectors[1].special, hazardMap.sectors[2].special = 5, 5
+    local environmental = startDeathmatch(hazardMap)
+    local environmentVictim = environmental.players[2]
+    environmentVictim.health = 1
+    environmental.mobjs[environmentVictim.moId].health = 1
+    doom.flow.applyDemoFrame(environmental, { [1] = {}, [2] = {} })
+    expect(environmentVictim.state).toBe(mobj.PST_DEAD)
+    expect(environmental.flow.frags[2][2]).toBe(1)
+
+    local monsterGame = startDeathmatch(deathmatchMap())
+    local monsterVictim = monsterGame.players[2]
+    local victimObject = monsterGame.mobjs[monsterVictim.moId]
+    monsterVictim.health = 1
+    victimObject.health = 1
+    enemy.spawn(monsterGame, 3001, victimObject.x, victimObject.y, 0)
+    doom.flow.applyDemoFrame(monsterGame, { [1] = {}, [2] = {} })
+    expect(monsterVictim.state).toBe(mobj.PST_DEAD)
+    expect(monsterVictim.deathSourceId ~= 0).toBe(true)
+    expect(monsterGame.flow.frags[2][2]).toBe(0)
+    expect(monsterGame.flow.frags[1][2]).toBe(0)
   end)
 
   suite.it('occludes missile splash damage behind blocking lines', function()

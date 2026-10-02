@@ -437,7 +437,10 @@ function module.damage(game: any, targetId: number, amount: number, sourceId: nu
         target.state = 'dead'
         target.tics = -1
         target.momx, target.momy, target.momz = 0, 0, 0
-        if player then player.state, player.health, player.deathTics = mobj.PST_DEAD, 0, 0 end
+        if player then
+            player.state, player.health, player.deathTics = mobj.PST_DEAD, 0, 0
+            player.deathSourceId = sourceId or 0
+        end
         if source and source.playerId then
             local owner = game.players[source.playerId]
             if owner then
