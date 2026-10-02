@@ -2,6 +2,7 @@
 -- One deterministic 35 Hz gameplay step: player input, movement, hitscan,
 -- damage/death, thinker pass, and level time.  No renderer or IO is involved.
 local mobj = require './mobj'
+local gameModule = require './game'
 local physics = require './physics'
 local enemy = require './enemy'
 local weapons = require './weapons'
@@ -86,17 +87,9 @@ local function fire(game: any, player: any, shooter: mobj.Mobj): boolean
     return result.fired == true
 end
 
-local function respawn(game: any, player: any, object: mobj.Mobj): ()
-    object.x, object.y, object.angle = player.spawnX, player.spawnY, player.spawnAngle
-    object.floorz, object.ceilingz = physics.floorAndCeiling(game.map, object.x, object.y)
-    object.z = object.floorz
-    object.momx, object.momy, object.momz = 0, 0, 0
-    object.health = 100
-    object.flags = bit32.bor(object.flags, mobj.MF_SOLID, mobj.MF_SHOOTABLE)
-    object.state, object.removed = 'spawn', false
-    player.state, player.health = mobj.PST_LIVE, 100
-    player.viewheight, player.viewz = 41 * mobj.FRACUNIT, object.z + 41 * mobj.FRACUNIT
-    player.usedown, player.attackdown, player.deathTics = false, false, 0
+local function respawn(game: any, player: any): any
+    gameModule.respawn(game, player.index)
+    return game.players[player.index]
 end
 
 local function playerThink(game: any, player: any, command: any?): ()
@@ -108,7 +101,7 @@ local function playerThink(game: any, player: any, command: any?): ()
     if player.state == mobj.PST_DEAD then
         player.deathTics += 1
         if bit32.band(cmd.buttons, module.BT_USE) ~= 0 and not player.usedown then
-            respawn(game, player, object)
+            player = respawn(game, player)
             player.usedown = true
         else
             player.usedown = bit32.band(cmd.buttons, module.BT_USE) ~= 0
@@ -149,6 +142,7 @@ local function playerThink(game: any, player: any, command: any?): ()
     local use = bit32.band(cmd.buttons, module.BT_USE) ~= 0
     if use and not player.usedown then useLines(game, object) end
     player.usedown = use
+    inter.tickPowers(game, player.index)
 end
 
 local function touchPickups(game: any, player: any): ()

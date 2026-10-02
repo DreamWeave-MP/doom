@@ -61,10 +61,18 @@ export type Player = {
     deathTics: number,
     deaths: number,
     kills: number,
+    killcount: number,
+    itemcount: number,
+    secretcount: number,
+    frags: {number},
     readyweapon: number,
     pendingweapon: number,
     ammo: {number},
     weaponowned: {boolean},
+    powers: {[number]: number},
+    cards: {[string]: boolean},
+    backpack: boolean,
+    maxammo: {number},
     cmd: {forwardmove: number, sidemove: number, angleturn: number, buttons: number},
     spawnX: number,
     spawnY: number,
@@ -80,6 +88,8 @@ module.MF_SHOOTABLE = 0x2
 module.MF_PICKUP = 0x4
 module.MF_NOCLIP = 0x8
 module.MF_CORPSE = 0x10
+module.MF_AMBUSH = 0x20
+module.MF_SHADOW = 0x40000
 module.PST_LIVE = 'live'
 module.PST_DEAD = 'dead'
 
@@ -160,6 +170,7 @@ function module.newPlayer(index: number, moId: number, x: number, y: number, ang
         cmd = {forwardmove = 0, sidemove = 0, angleturn = 0, buttons = 0},
         powers = {},
         cards = {},
+        backpack = false,
         maxammo = { [1] = 200, [2] = 50, [3] = 300, [4] = 50 },
         psprites = {},
         frags = {0, 0, 0, 0},

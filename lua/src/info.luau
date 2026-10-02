@@ -315,6 +315,11 @@ function module.pickup(kind: number | string): Pickup?
     if type(kind) == 'number' then return pickupKinds[kind] end
     return pickups[string.lower(kind)] or pickupSprites[string.upper(kind)]
 end
+
+function module.notInDeathmatch(kind: number): boolean
+    local pickup = pickupKinds[kind]
+    return pickup ~= nil and (pickup.power == 'bluecard' or pickup.power == 'redcard' or pickup.power == 'yellowcard')
+end
 function module.isMonster(kind: number): boolean
     return monsters[kind] ~= nil
 end

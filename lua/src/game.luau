@@ -30,21 +30,39 @@ local function spawnPlayer(game: Game, index: number): mobj.Player
     return player
 end
 
-local function spawnMonster(game: Game, thing: any): ()
+local function spawnThing(game: Game, thing: any, settings: any): ()
     if info.monster(thing.kind) then
-        enemy.spawn(game, thing.kind, thing.x * mobj.FRACUNIT, thing.y * mobj.FRACUNIT, mobj.angleFromDegrees(thing.angle))
+        if settings.spawnMonsters == false then return end
+        enemy.spawn(
+            game,
+            thing.kind,
+            thing.x * mobj.FRACUNIT,
+            thing.y * mobj.FRACUNIT,
+            mobj.angleFromDegrees(thing.angle),
+            { ambush = bit32.band(thing.flags, 8) ~= 0 }
+        )
+        game.totalKills = (game.totalKills or 0) + 1
     elseif info.pickup(thing.kind) then
+        if settings.deathmatch == true and info.notInDeathmatch(thing.kind) then return end
         inter.spawn(game, thing.kind, thing.x * mobj.FRACUNIT, thing.y * mobj.FRACUNIT, mobj.angleFromDegrees(thing.angle))
+        game.totalItems = (game.totalItems or 0) + 1
     end
 end
 
 function module.new(map: any, options: any?): Game
     local settings = options or {}
+    local skill = settings.skill or 2 -- Doom's default is Hurt Me Plenty.
+    if skill < 0 or skill > 4 or skill ~= math.floor(skill) then error('game: skill must be an integer in [0, 4]', 2) end
     local game: Game = {
         map = map,
         leveltime = 0,
         gametic = 0,
         rngState = settings.seed or 0x12345678,
+        skill = skill,
+        deathmatch = settings.deathmatch == true,
+        netgame = settings.netgame == true,
+        totalKills = 0,
+        totalItems = 0,
         players = {},
         mobjs = {},
         thinkers = {},
@@ -53,9 +71,13 @@ function module.new(map: any, options: any?): Game
     if count < 1 then count = 1 end
     if count > 4 then count = 4 end
     for index = 1, count do spawnPlayer(game, index) end
-    if settings.spawnMonsters ~= false then
-        for _, thing in map.things do
-            if info.monster(thing.kind) or info.pickup(thing.kind) then spawnMonster(game, thing) end
+    local skillMask = if skill <= 1 then 1 elseif skill == 2 then 2 else 4
+    for _, thing in map.things do
+        local flags = thing.flags or 0
+        local inSkill = bit32.band(flags, skillMask) ~= 0
+        local singleOnly = bit32.band(flags, 16) ~= 0
+        if inSkill and (settings.netgame == true or not singleOnly) then
+            spawnThing(game, thing, settings)
         end
     end
     game.specials = specials.init(game, settings)
@@ -67,19 +89,37 @@ function module.spawnPlayer(game: Game, index: number): mobj.Player
     return spawnPlayer(game, index)
 end
 
+function module.resetPlayerForReborn(game: Game, index: number): mobj.Player?
+    local old = game.players[index]
+    if not old then return nil end
+    local reborn = mobj.newPlayer(index, old.moId, old.spawnX, old.spawnY, old.spawnAngle)
+    -- G_PlayerReborn preserves level counters and frag totals, but resets
+    -- weapons, ammo, armor, cards, backpack and power timers.
+    reborn.deaths = old.deaths or 0
+    reborn.kills = old.kills or 0
+    reborn.frags = table.clone(old.frags or { 0, 0, 0, 0 })
+    reborn.killcount = old.killcount or old.kills or 0
+    reborn.itemcount = old.itemcount or 0
+    reborn.secretcount = old.secretcount or 0
+    local flow = (game :: any).flow
+    if flow and flow.frags and flow.frags[index] then reborn.frags = flow.frags[index] end
+    game.players[index] = reborn
+    return reborn
+end
+
 function module.respawn(game: Game, index: number): boolean
     local player = game.players[index]
     if not player then return false end
     local object = game.mobjs[player.moId]
     if not object then return false end
+    player = module.resetPlayerForReborn(game, index) or player
     object.x, object.y, object.angle = player.spawnX, player.spawnY, player.spawnAngle
     object.floorz, object.ceilingz = physics.floorAndCeiling(game.map, object.x, object.y)
     object.z = object.floorz
     object.momx, object.momy, object.momz = 0, 0, 0
     object.health = 100
-    object.flags = bit32.bor(object.flags, mobj.MF_SOLID, mobj.MF_SHOOTABLE)
+    object.flags = bit32.bor(bit32.band(object.flags, bit32.bnot(mobj.MF_CORPSE)), mobj.MF_SOLID, mobj.MF_SHOOTABLE)
     object.state, object.tics, object.removed = 'spawn', 0, false
-    object.flags = bit32.bor(object.flags, mobj.MF_SOLID, mobj.MF_SHOOTABLE)
     player.state, player.health, player.damagecount = mobj.PST_LIVE, 100, 0
     player.viewheight, player.viewz = 41 * mobj.FRACUNIT, object.z + 41 * mobj.FRACUNIT
     player.usedown, player.attackdown, player.attackCooldown, player.deathTics = false, false, 0, 0
@@ -112,7 +152,25 @@ local function snapshotPlayer(player: mobj.Player): any
             angleturn = player.cmd.angleturn, buttons = player.cmd.buttons,
         },
         spawnX = player.spawnX, spawnY = player.spawnY, spawnAngle = player.spawnAngle,
+        powers = table.clone(player.powers), cards = table.clone(player.cards), backpack = player.backpack,
+        maxammo = table.clone(player.maxammo), frags = table.clone(player.frags),
+        killcount = player.killcount, itemcount = player.itemcount, secretcount = player.secretcount,
     }
+end
+
+function module.normalizePlayers(game: Game): ()
+    for index, player in game.players do
+        local raw = player :: any
+        raw.powers = raw.powers or {}
+        raw.cards = raw.cards or {}
+        raw.backpack = raw.backpack == true
+        raw.maxammo = raw.maxammo or { [1] = 200, [2] = 50, [3] = 300, [4] = 50 }
+        raw.frags = raw.frags or { 0, 0, 0, 0 }
+        raw.killcount = raw.killcount or player.kills or 0
+        raw.itemcount = raw.itemcount or 0
+        raw.secretcount = raw.secretcount or 0
+        raw.index = raw.index or index
+    end
 end
 
 function module.snapshot(game: Game): any
@@ -131,6 +189,7 @@ function module.snapshot(game: Game): any
         gametic = game.gametic,
         leveltime = game.leveltime,
         rngState = game.rngState,
+        skill = (game :: any).skill or 2,
         players = players,
         mobjs = objects,
         thinkers = thinkers,

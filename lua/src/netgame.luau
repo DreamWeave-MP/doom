@@ -5,8 +5,8 @@ local flow = require './flow'
 local state = require './state'
 
 local module = {}
-local MAX_PLAYERS = 4
-local INTEGER_SLOTS: {integer} = { 1i, 2i, 3i, 4i }
+local MaxPlayers = 4
+local IntegerSlots: {integer} = { 1i, 2i, 3i, 4i }
 
 type Host = {
     game: any,
@@ -58,9 +58,14 @@ local function copySlots(game: any): {number}
     if slots then
         for _, slot in slots do table.insert(result, slot) end
     else
-        for index = 1, math.min(#game.players, MAX_PLAYERS) do table.insert(result, index) end
+        for index = 1, math.min(#game.players, MaxPlayers) do
+            table.insert(result, index)
+        end
     end
-    if #result == 0 or #result > MAX_PLAYERS then error('doom.netgame: game must have one to four active players', 2) end
+
+    if #result == 0 or #result > MaxPlayers then
+        error('doom.netgame: game must have one to four active players', 2)
+    end
     return result
 end
 
@@ -69,10 +74,13 @@ function module.newHost(game: any, address: string, protocolId: integer?): Host
     local server = wire.newServer(protocol, {
         address = address,
         protocolId = protocolId or wire.PROTOCOL_ID,
-        maxClients = MAX_PLAYERS,
+        maxClients = MaxPlayers,
     })
     local commands: {[number]: wire.TicCmd} = {}
-    for slot = 1, MAX_PLAYERS do commands[slot] = neutral() end
+    for slot = 1, MaxPlayers do
+        commands[slot] = neutral()
+    end
+
     return {
         game = game,
         server = server,
@@ -85,8 +93,10 @@ function module.newHost(game: any, address: string, protocolId: integer?): Host
 end
 
 function module.connectToken(host: Host, player: number): string
-    if player < 1 or player > MAX_PLAYERS or player ~= math.floor(player) then error('doom.netgame: player slot must be in [1, 4]', 2) end
-    return wire.serverConnectTokenBase64(host.server, INTEGER_SLOTS[player])
+    if player < 1 or player > MaxPlayers or player ~= math.floor(player) then
+        error('doom.netgame: player slot must be in [1, 4]', 2)
+    end
+    return wire.serverConnectTokenBase64(host.server, IntegerSlots[player])
 end
 
 function module.serverPump(host: Host): number
@@ -98,9 +108,13 @@ function module.serverPump(host: Host): number
         count += 1
         if event.kind == 'connected' then
             local slotAllowed = false
-            for _, slot in INTEGER_SLOTS do
-                if event.clientId == slot then slotAllowed = true; break end
+            for _, slot in IntegerSlots do
+                if event.clientId == slot then
+                    slotAllowed = true
+                    break
+                end
             end
+
             if not slotAllowed then
                 host.server.handle:disconnect(event.peer)
             else
@@ -135,7 +149,9 @@ end
 function module.serverTic(host: Host): any
     local tic = host.game.gametic
     local inputs = {}
-    for _, slot in host.slots do inputs[slot] = localCommand(host.commands[slot] or neutral()) end
+    for _, slot in host.slots do
+        inputs[slot] = localCommand(host.commands[slot] or neutral())
+    end
     flow.applyDemoFrame(host.game, inputs)
 
     for _, slot in host.slots do
@@ -146,6 +162,7 @@ function module.serverTic(host: Host): any
         }
         wire.serverBroadcastTicBundle(host.server, bundle)
     end
+
     if host.game.gametic % 35 == 0 then
         wire.serverBroadcastStateHash(host.server, host.game.gametic, module.stateHash(host.game))
     end
@@ -154,7 +171,9 @@ function module.serverTic(host: Host): any
 end
 
 function module.newClient(game: any, token: string, player: number, bind: string?): Client
-    if player < 1 or player > MAX_PLAYERS or player ~= math.floor(player) then error('doom.netgame: player slot must be in [1, 4]', 2) end
+    if player < 1 or player > MaxPlayers or player ~= math.floor(player) then
+        error('doom.netgame: player slot must be in [1, 4]', 2)
+    end
     local protocol = wire.protocol()
     local client = wire.newClient(protocol, { bind = bind })
     wire.clientConnect(client, token)
@@ -184,6 +203,7 @@ function module.clientPump(client: Client): number
                 row = {}
                 client.bundles[bundle.firstTic] = row
             end
+
             if bundle.commands[1] then row[bundle.player] = bundle.commands[1] end
         elseif event.kind == 'message' and event.event == 'STATE_HASH' then
             local hash = wire.unpackStateHash(event.payload)
@@ -206,7 +226,10 @@ function module.clientTic(client: Client, command: wire.TicCmd): (any, boolean?)
     local tic = client.game.gametic
     local row = client.bundles[tic]
     if not row then return client.game, nil end
-    for _, slot in client.slots do if row[slot] == nil then return client.game, nil end end
+
+    for _, slot in client.slots do
+        if row[slot] == nil then return client.game, nil end
+    end
 
     local inputs = {}
     for _, slot in client.slots do inputs[slot] = localCommand(row[slot]) end
@@ -226,6 +249,6 @@ function module.clientDisconnect(client: Client): ()
 end
 
 module.TICRATE = 35
-module.MAX_PLAYERS = MAX_PLAYERS
+module.MAX_PLAYERS = MaxPlayers
 
 return module

@@ -8,6 +8,49 @@ local weapons = require './weapons'
 
 local module = {}
 local FRACUNIT = mobj.FRACUNIT
+local TICRATE = 35
+
+module.POWER_INVULNERABILITY = 1
+module.POWER_STRENGTH = 2
+module.POWER_INVISIBILITY = 3
+module.POWER_IRONFEET = 4
+module.POWER_ALLMAP = 5
+module.POWER_INFRARED = 6
+module.INVULNERABILITY_TICS = 30 * TICRATE
+module.INVISIBILITY_TICS = 60 * TICRATE
+module.INFRARED_TICS = 120 * TICRATE
+module.IRONFEET_TICS = 60 * TICRATE
+
+local powerSlot: {[string]: number} = {
+    invulnerability = module.POWER_INVULNERABILITY,
+    berserk = module.POWER_STRENGTH,
+    invisibility = module.POWER_INVISIBILITY,
+    radiation = module.POWER_IRONFEET,
+    allmap = module.POWER_ALLMAP,
+    infrared = module.POWER_INFRARED,
+}
+local powerDuration: {[string]: number} = {
+    invulnerability = module.INVULNERABILITY_TICS,
+    invisibility = module.INVISIBILITY_TICS,
+    radiation = module.IRONFEET_TICS,
+    infrared = module.INFRARED_TICS,
+}
+local timedPowerSlots = {
+    module.POWER_INVULNERABILITY,
+    module.POWER_INVISIBILITY,
+    module.POWER_IRONFEET,
+    module.POWER_INFRARED,
+}
+
+function module.power(player: any, name: string): number
+    local slot = powerSlot[name]
+    if not slot then return 0 end
+    return (player.powers and player.powers[slot]) or 0
+end
+
+function module.hasPower(player: any, name: string): boolean
+    return module.power(player, name) > 0
+end
 
 local function get(game: any, id: number): any return if id > 0 then game.mobjs[id] else nil end
 local function playerFor(game: any, playerIndex: number): any return game.players[playerIndex] end
@@ -51,17 +94,39 @@ local function applyPower(game: any, playerIndex: number, power: string): boolea
     elseif power == 'soul' then
         player.health = math.min(200, player.health + 100)
     elseif power == 'berserk' then
-        powers.berserk = true
         player.health = math.min(100, player.health + 100)
+        powers[module.POWER_STRENGTH] = 1
         if player.readyweapon ~= info.WP_FIST then player.pendingweapon = info.WP_FIST end
-    elseif powers[power] then
-        return false
     else
-        powers[power] = true
+        local slot = powerSlot[power]
+        if not slot then return false end
+        if power == 'allmap' and powers[slot] then return false end
+        powers[slot] = powerDuration[power] or 1
+        if power == 'invisibility' then
+            local object = get(game, player.moId)
+            if object then object.flags = bit32.bor(object.flags, mobj.MF_SHADOW) end
+        end
     end
     local object = get(game, player.moId)
     if object then object.health = player.health end
     return true
+end
+
+function module.tickPowers(game: any, playerIndex: number): ()
+    local player = playerFor(game, playerIndex)
+    if not player then return end
+    local powers = player.powers or {}
+    for _, slot in timedPowerSlots do
+        local remaining = powers[slot] or 0
+        if remaining > 0 then powers[slot] = remaining - 1 end
+    end
+    local strength = powers[module.POWER_STRENGTH] or 0
+    if strength > 0 then powers[module.POWER_STRENGTH] = strength + 1 end
+    local invisible = powers[module.POWER_INVISIBILITY] or 0
+    if invisible == 0 then
+        local object = get(game, player.moId)
+        if object then object.flags = bit32.band(object.flags, bit32.bnot(mobj.MF_SHADOW)) end
+    end
 end
 
 function module.touch(game: any, specialId: number, toucherId: number): boolean

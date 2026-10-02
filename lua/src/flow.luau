@@ -47,6 +47,7 @@ export type FlowState = {
     deathmatch: boolean,
     netgame: boolean,
     spawnMonsters: boolean,
+    skill: number,
     consolePlayer: number,
     activeSlots: {number},
     didSecret: boolean,
@@ -194,6 +195,7 @@ local function makeState(game: any, descriptor: MapDescriptor, settings: any): F
     local consolePlayer = settings.consolePlayer or settings.consoleplayer or 1
     if consolePlayer == 0 then consolePlayer = 1 end
     consolePlayer = integer(consolePlayer, 'consolePlayer', 1, MAX_PLAYERS)
+    local skill = integer(settings.skill or 2, 'skill', 0, 4)
     return {
         version = FLOW_VERSION,
         state = 'level',
@@ -204,6 +206,7 @@ local function makeState(game: any, descriptor: MapDescriptor, settings: any): F
         deathmatch = settings.deathmatch == true,
         netgame = settings.netgame == true,
         spawnMonsters = settings.spawnMonsters ~= false and settings.nomonsters ~= true and settings.nomons ~= true,
+        skill = skill,
         consolePlayer = consolePlayer,
         activeSlots = slots,
         didSecret = settings.didSecret == true,
@@ -211,9 +214,9 @@ local function makeState(game: any, descriptor: MapDescriptor, settings: any): F
         pending = nil,
         intermission = nil,
         frags = newFrags(),
-        totalKills = if type(settings.totalKills) == 'number' then settings.totalKills else 0,
-        totalItems = if type(settings.totalItems) == 'number' then settings.totalItems else 0,
-        totalSecret = if type(settings.totalSecret) == 'number' then settings.totalSecret else 0,
+        totalKills = if type(settings.totalKills) == 'number' then settings.totalKills else (game.totalKills or 0),
+        totalItems = if type(settings.totalItems) == 'number' then settings.totalItems else (game.totalItems or 0),
+        totalSecret = if type(settings.totalSecret) == 'number' then settings.totalSecret else (game.totalSecret or 0),
         demoTics = 0,
         timedemo = settings.timedemo == true or settings.timeDemo == true,
         timedemoTics = 0,
@@ -233,10 +236,18 @@ local function stateFor(game: any): FlowState
 end
 
 local function copyPersistent(oldPlayer: any, newPlayer: any): ()
+    newPlayer.health = oldPlayer.health
     newPlayer.armor = oldPlayer.armor
     newPlayer.armorType = oldPlayer.armorType
     newPlayer.deaths = oldPlayer.deaths
     newPlayer.kills = oldPlayer.kills
+    newPlayer.killcount = oldPlayer.killcount or oldPlayer.kills or 0
+    newPlayer.itemcount = oldPlayer.itemcount or 0
+    newPlayer.secretcount = oldPlayer.secretcount or 0
+    newPlayer.powers = clone(oldPlayer.powers or {})
+    newPlayer.cards = clone(oldPlayer.cards or {})
+    newPlayer.backpack = oldPlayer.backpack == true
+    newPlayer.maxammo = clone(oldPlayer.maxammo or { [1] = 200, [2] = 50, [3] = 300, [4] = 50 })
     newPlayer.readyweapon = oldPlayer.readyweapon
     newPlayer.pendingweapon = oldPlayer.pendingweapon
     newPlayer.ammo = clone(oldPlayer.ammo)
@@ -251,6 +262,9 @@ local function replaceLevel(game: any, map: any, state: FlowState, resetFrags: b
         playerCount = math.max(1, #oldPlayers),
         spawnMonsters = state.spawnMonsters,
         seed = oldRng,
+        skill = state.skill,
+        deathmatch = state.deathmatch,
+        netgame = state.netgame,
     })
     for index, oldPlayer in oldPlayers do
         local newPlayer = replacement.players[index]
@@ -274,7 +288,7 @@ local function replaceLevel(game: any, map: any, state: FlowState, resetFrags: b
 end
 
 local function setPlayerSpawn(game: any, playerIndex: number, thing: any): boolean
-    local player = game.players[playerIndex]
+    local player = gameModule.resetPlayerForReborn(game, playerIndex)
     if not player then return false end
     local object = game.mobjs[player.moId]
     if not object then return false end
@@ -371,6 +385,9 @@ function module.newGame(map: any, options: any?): FlowGame
         playerCount = settings.playerCount or 1,
         spawnMonsters = settings.spawnMonsters ~= false and settings.nomonsters ~= true and settings.nomons ~= true,
         seed = settings.seed,
+        skill = settings.skill or 2,
+        deathmatch = settings.deathmatch == true,
+        netgame = settings.netgame == true,
     }
     local game: any = gameModule.new(map, gameOptions)
     local state = makeState(game, descriptor, settings)
@@ -542,6 +559,7 @@ function module.reborn(game: FlowGame, playerIndex: number?, killerIndex: number
 
     -- Vanilla single-player G_DoReborn reloads the whole level.  The current
     -- map is supplied directly, so this remains deterministic and has no IO.
+    gameModule.resetPlayerForReborn(game, index)
     replaceLevel(game, game.map, state, true)
     return game
 end
@@ -561,6 +579,7 @@ function module.snapshot(game: FlowGame): any
             deathmatch = state.deathmatch,
             netgame = state.netgame,
             spawnMonsters = state.spawnMonsters,
+            skill = state.skill,
             consolePlayer = state.consolePlayer,
             activeSlots = clone(state.activeSlots),
             didSecret = state.didSecret,
@@ -589,6 +608,8 @@ local function restoreGame(game: any, record: any): ()
     game.gametic = raw.gametic
     game.leveltime = raw.leveltime
     game.rngState = raw.rngState
+    local rawGame = game :: any
+    rawGame.skill = raw.skill or 2
     game.players = clone(raw.players)
     game.mobjs = clone(raw.mobjs)
     game.thinkers = clone(raw.thinkers)
@@ -596,6 +617,7 @@ local function restoreGame(game: any, record: any): ()
         if object.playerId == 0 then object.playerId = nil end
         if object.targetId == 0 then object.targetId = nil end
     end
+    gameModule.normalizePlayers(game)
 end
 
 function module.restore(game: FlowGame, record: any): FlowGame
@@ -613,6 +635,7 @@ function module.restore(game: FlowGame, record: any): FlowGame
         old.deathmatch = saved.deathmatch
         old.netgame = saved.netgame
         old.spawnMonsters = saved.spawnMonsters
+        old.skill = saved.skill or 2
         old.consolePlayer = saved.consolePlayer
         old.activeSlots = clone(saved.activeSlots)
         old.didSecret = saved.didSecret

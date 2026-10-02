@@ -7,6 +7,7 @@ local enemy = require '@doom/enemy'
 local fixed = require '@doom/fixed'
 local gameModule = require '@doom/game'
 local info = require '@doom/info'
+local inter = require '@doom/inter'
 local mapModule = require '@doom/map'
 local mobj = require '@doom/mobj'
 local paletteModule = require '@doom/palette'
@@ -400,6 +401,92 @@ suite.describe('game tick', function()
     game.players[1].pendingweapon = game.players[1].readyweapon
     gameModule.step(game, { { buttons = bit32.bor(0x4, bit32.lshift(shotgun, 3)) } })
     expect(game.players[1].readyweapon).toBe(shotgun)
+  end)
+
+  suite.it('times powerups, applies invulnerability/shadow flags, and resets inventory on reborn', function()
+    local wad = wadModule.open(writeFixture(fixture()))
+    local map = mapModule.load(wad, 'E1M1')
+    local game = gameModule.new(map, { spawnMonsters = false })
+    local player = game.players[1]
+    local object = game.mobjs[player.moId]
+
+    expect(inter.givePower(game, 1, 'invulnerability')).toBe(true)
+    expect(player.powers[inter.POWER_INVULNERABILITY]).toBe(inter.INVULNERABILITY_TICS)
+    expect(enemy.damage(game, object.id, 20)).toBe(0)
+    inter.tickPowers(game, 1)
+    expect(player.powers[inter.POWER_INVULNERABILITY]).toBe(inter.INVULNERABILITY_TICS - 1)
+
+    expect(inter.givePower(game, 1, 'invisibility')).toBe(true)
+    expect(bit32.band(object.flags, mobj.MF_SHADOW) ~= 0).toBe(true)
+    player.powers[inter.POWER_INVISIBILITY] = 1
+    inter.tickPowers(game, 1)
+    expect(bit32.band(object.flags, mobj.MF_SHADOW) == 0).toBe(true)
+
+    player.frags[2] = 3
+    player.powers[inter.POWER_IRONFEET] = 20
+    player.cards.blue = true
+    player.backpack = true
+    player.armor, player.armorType = 75, 1
+    player.ammo[1] = 100
+    gameModule.respawn(game, 1)
+    local reborn = game.players[1]
+    expect(reborn.health).toBe(100)
+    expect(reborn.readyweapon).toBe(info.WP_PISTOL)
+    expect(reborn.ammo[info.AMMO_CLIP]).toBe(50)
+    expect(reborn.armor).toBe(0)
+    expect(reborn.cards.blue).toBe(nil)
+    expect(reborn.backpack).toBe(false)
+    expect(reborn.powers[inter.POWER_IRONFEET] or 0).toBe(0)
+    expect(reborn.frags[2]).toBe(3)
+  end)
+
+  suite.it('does not steal weapon preference when ammo arrives while holding another weapon', function()
+    local wad = wadModule.open(writeFixture(fixture()))
+    local map = mapModule.load(wad, 'E1M1')
+    local game = gameModule.new(map, { spawnMonsters = false })
+    local player = game.players[1]
+    weapons.giveWeapon(game, 1, info.WP_CHAINGUN)
+    player.pendingweapon = player.readyweapon
+    player.ammo[info.AMMO_CLIP] = 0
+    weapons.giveAmmo(game, 1, info.AMMO_CLIP, 1)
+    expect(player.pendingweapon).toBe(info.WP_PISTOL)
+  end)
+
+  suite.it('applies Doom skill flags, not-single/netgame flags, and deathmatch key exclusions', function()
+    local path = writeFixture(fixture())
+    local easyMap = mapModule.load(wadModule.open(path), 'E1M1')
+    table.insert(easyMap.things, { x = 64, y = 24, angle = 180, kind = 3001, flags = 1 })
+    local easy = gameModule.new(easyMap, { skill = 0, spawnMonsters = true })
+    expect(#easy.mobjs).toBe(2)
+
+    local mediumMap = mapModule.load(wadModule.open(path), 'E1M1')
+    table.insert(mediumMap.things, { x = 64, y = 24, angle = 180, kind = 3001, flags = 1 })
+    local medium = gameModule.new(mediumMap, { skill = 2, spawnMonsters = true })
+    expect(#medium.mobjs).toBe(1)
+
+    local singleOnlyMap = mapModule.load(wadModule.open(path), 'E1M1')
+    table.insert(singleOnlyMap.things, { x = 64, y = 24, angle = 180, kind = 3001, flags = 17 })
+    expect(#gameModule.new(singleOnlyMap, { skill = 0 }).mobjs).toBe(1)
+    local networkMap = mapModule.load(wadModule.open(path), 'E1M1')
+    table.insert(networkMap.things, { x = 64, y = 24, angle = 180, kind = 3001, flags = 17 })
+    expect(#gameModule.new(networkMap, { skill = 0, netgame = true }).mobjs).toBe(2)
+
+    local keyMap = mapModule.load(wadModule.open(path), 'E1M1')
+    table.insert(keyMap.things, { x = 64, y = 24, angle = 0, kind = 5, flags = 7 })
+    expect(#gameModule.new(keyMap, { deathmatch = true }).mobjs).toBe(1)
+  end)
+
+  suite.it('doubles baby/nightmare ammo and halves baby damage to the player', function()
+    local path = writeFixture(fixture())
+    local easy = gameModule.new(mapModule.load(wadModule.open(path), 'E1M1'), { skill = 0 })
+    local nightmare = gameModule.new(mapModule.load(wadModule.open(path), 'E1M1'), { skill = 4 })
+    weapons.giveAmmo(easy, 1, info.AMMO_SHELL, 1)
+    weapons.giveAmmo(nightmare, 1, info.AMMO_SHELL, 1)
+    expect(easy.players[1].ammo[info.AMMO_SHELL]).toBe(8)
+    expect(nightmare.players[1].ammo[info.AMMO_SHELL]).toBe(8)
+    expect(enemy.damage(easy, easy.players[1].moId, 20)).toBe(10)
+    local hurt = gameModule.new(mapModule.load(wadModule.open(path), 'E1M1'), { skill = 2 })
+    expect(enemy.damage(hurt, hurt.players[1].moId, 20)).toBe(20)
   end)
 
   suite.it('hashes and restores game-flow state such as deathmatch frags', function()

@@ -100,7 +100,7 @@ local function chooseTarget(game: any, actor: any): any
     local best, bestDistance = nil, math.huge
     for _, player in game.players do
         local target = get(game, player.moId)
-        if target and player.state ~= mobj.PST_DEAD and target.health > 0 and not target.removed then
+        if target and player.state ~= mobj.PST_DEAD and target.health > 0 and not target.removed and canSee(game, actor, target) then
             local d = distance(actor, target)
             if d < bestDistance then best, bestDistance = target, d end
         end
@@ -229,6 +229,7 @@ function module.spawn(game: any, kind: number, x: number, y: number, actorAngle:
     if not meta then error(`enemy: unknown monster kind {kind}`, 2) end
     local id = #game.mobjs + 1
     local object = mobj.newMobj(id, kind, x, y, actorAngle or 0, meta.flags, meta.health)
+    if options and options.ambush then object.flags = bit32.bor(object.flags, mobj.MF_AMBUSH) end
     object.radius, object.height = meta.radius * FRACUNIT, meta.height * FRACUNIT
     if game.map and game.map.sectors then
         object.floorz, object.ceilingz = physics.floorAndCeiling(game.map, x, y)
@@ -248,7 +249,11 @@ function module.face(game: any, actorId: number, targetId: number?): boolean
     local target = get(game, targetId or (actor and actor.targetId) or 0)
     if not actor or not target then return false end
     actor.targetId = target.id
+    actor.flags = bit32.band(actor.flags, bit32.bnot(mobj.MF_AMBUSH))
     actor.angle = angle.vectorToAngle(target.x - actor.x, target.y - actor.y)
+    if bit32.band(target.flags, mobj.MF_SHADOW) ~= 0 then
+        actor.angle = (actor.angle + (randomByte(game) - randomByte(game)) * 0x200000) % ANGLE_MAX
+    end
     return true
 end
 
@@ -320,6 +325,11 @@ function module.chase(game: any, actorId: number, targetId: number?): string
         if not followsState(meta.spawnState, actor.state) then setState(actor, meta.spawnState) end
         return 'idle'
     end
+    if not canSee(game, actor, target) and (actor.threshold or 0) <= 0 then
+        actor.targetId = nil
+        if not followsState(meta.spawnState, actor.state) then setState(actor, meta.spawnState) end
+        return 'lost-target'
+    end
     actor.targetId = target.id
     if actor.reactiontime > 0 then actor.reactiontime -= 1 end
     local raw = actor :: any
@@ -361,8 +371,9 @@ function module.damage(game: any, targetId: number, amount: number, sourceId: nu
     local damage = math.max(0, math.floor(amount))
     local player = playerFor(game, target)
     if player then
-        local powers = (player :: any).powers
-        if powers and powers.invulnerability and damage < 1000 then return 0 end
+        if game.skill == 0 then damage = math.floor(damage / 2) end
+        local powers = player.powers
+        if powers and (powers[1] or 0) > 0 and damage < 1000 then return 0 end
         local saved = 0
         if player.armorType and player.armorType > 0 then saved = math.floor(damage / if player.armorType == 1 then 3 else 2) end
         saved = math.min(saved, player.armor or 0)

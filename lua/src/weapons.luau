@@ -55,14 +55,23 @@ function module.giveAmmo(game: any, playerIndex: number, ammo: number, clips: nu
     local value = player(game, playerIndex)
     if not value or not maxAmmo[ammo] then return 0 end
     local units = if clips == nil or clips == 0 then halfClip[ammo] else clips * clipAmmo[ammo]
+    if game.skill == 0 or game.skill == 4 then units *= 2 end
     local limit = module.ammoMax(game, playerIndex, ammo)
     local before = value.ammo[ammo] or 0
     value.ammo[ammo] = math.min(limit, before + units)
     if before == 0 and value.ammo[ammo] > 0 then
-        if ammo == info.AMMO_CLIP and owned(value, info.WP_CHAINGUN) then value.pendingweapon = info.WP_CHAINGUN end
-        if ammo == info.AMMO_SHELL and owned(value, info.WP_SHOTGUN) then value.pendingweapon = info.WP_SHOTGUN end
-        if ammo == info.AMMO_CELL and owned(value, info.WP_PLASMA) then value.pendingweapon = info.WP_PLASMA end
-        if ammo == info.AMMO_MISSILE and owned(value, info.WP_MISSILE) then value.pendingweapon = info.WP_MISSILE end
+        local ready = value.readyweapon
+        if ammo == info.AMMO_CLIP and ready == info.WP_FIST then
+            value.pendingweapon = if owned(value, info.WP_CHAINGUN) then info.WP_CHAINGUN else info.WP_PISTOL
+        elseif ammo == info.AMMO_SHELL and (ready == info.WP_FIST or ready == info.WP_PISTOL)
+            and owned(value, info.WP_SHOTGUN) then
+            value.pendingweapon = info.WP_SHOTGUN
+        elseif ammo == info.AMMO_CELL and (ready == info.WP_FIST or ready == info.WP_PISTOL)
+            and owned(value, info.WP_PLASMA) then
+            value.pendingweapon = info.WP_PLASMA
+        elseif ammo == info.AMMO_MISSILE and ready == info.WP_FIST and owned(value, info.WP_MISSILE) then
+            value.pendingweapon = info.WP_MISSILE
+        end
     end
     return value.ammo[ammo] - before
 end
@@ -142,6 +151,10 @@ function module.fire(game: any, playerIndex: number, weaponId: number?): any
     shooter.state = 'weapon_attack'
     shooter.tics = weapon.cooldown
     local attack = attackCache[id]
+    if id == info.WP_FIST and (value.powers[2] or 0) > 0 then
+        attack = table.clone(attack)
+        attack.multiplier *= 10
+    end
     local damage = 0
     if attack.kind == 'missile' then
         enemy.launch(game, shooter.id, shooter.angle, attack.projectile or 'rocket', attack)

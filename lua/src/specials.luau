@@ -206,9 +206,7 @@ local function sectorAtObject(runtime: Runtime, object: any): number?
 end
 
 local function hasIronfeet(player: any): boolean
-    if player.ironfeet == true then return true end
-    if player.powers and (player.powers.ironfeet == true or player.powers[6] == true) then return true end
-    return false
+    return player.ironfeet == true or (player.powers and (player.powers[4] or 0) > 0) == true
 end
 
 local function damage(runtime: Runtime, object: any, amount: number): number
@@ -216,6 +214,7 @@ local function damage(runtime: Runtime, object: any, amount: number): number
     local player = playerFor(runtime, object)
     local applied = amount
     if player then
+        if runtime.game.skill == 0 then applied = math.floor(applied / 2) end
         if player.armor and player.armor > 0 then
             local absorbed = math.min(player.armor, math.floor(amount / 2))
             player.armor -= absorbed

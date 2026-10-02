@@ -113,10 +113,12 @@ function module.load(path: string, mapName: string?, source: any?): any
             game.leveltime = gameSnapshot.leveltime
             game.gametic = gameSnapshot.gametic
             game.rngState = gameSnapshot.rngState
+            game.skill = gameSnapshot.skill or 2
             game.players = gameSnapshot.players
             game.mobjs = gameSnapshot.mobjs
             game.thinkers = gameSnapshot.thinkers
         end
+        gameModule.normalizePlayers(game)
         for _, object in game.mobjs do
             if object.playerId == 0 then object.playerId = nil end
             if object.targetId == 0 then object.targetId = nil end
@@ -223,6 +225,7 @@ function module.run(path: string, mapName: string?, count: number, demoName: str
         playerCount = playerCount,
         activeSlots = activeSlots,
         consolePlayer = if header then header.consolePlayer + 1 else 1,
+        skill = if header then header.skill else 2,
         mode = if string.sub(map.name, 1, 3) == "MAP" then "doom2" else "doom",
     })
     game.wad = wad
