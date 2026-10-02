@@ -92,6 +92,8 @@ local function respawn(game: any, player: any): any
     return game.players[player.index]
 end
 
+local useLines: any
+
 local function playerThink(game: any, player: any, command: any?): ()
     local object = getMobj(game, player.moId)
     if not object then return end
@@ -155,26 +157,33 @@ local function touchPickups(game: any, player: any): ()
     end
 end
 
-local function nearLine(map: any, object: mobj.Mobj, line: any): boolean
-    local a, b = map.vertices[line.v1], map.vertices[line.v2]
-    if not a or not b then return false end
-    local px, py = object.x / mobj.FRACUNIT, object.y / mobj.FRACUNIT
-    local dx, dy = b.x - a.x, b.y - a.y
-    local length = math.max(1, dx * dx + dy * dy)
-    local t = math.clamp(((px - a.x) * dx + (py - a.y) * dy) / length, 0, 1)
-    local qx, qy = a.x + t * dx, a.y + t * dy
-    local ox, oy = px - qx, py - qy
-    return ox * ox + oy * oy <= 64 * 64
-end
-
-local function useLines(game: any, object: mobj.Mobj): boolean
+useLines = function(game: any, object: mobj.Mobj): boolean
     if not game.specials then return false end
+    local rayX, rayY = physics.cosFixed(object.angle), physics.sinFixed(object.angle)
+    local nearest: number? = nil
+    local nearestIndex: number? = nil
+    local nearestSide = 0
     for index, line in game.map.lines do
-        if line.special ~= 0 and nearLine(game.map, object, line) and specials.useLine(game.specials, index, object, 0) then
-            return true
+        local a, b = game.map.vertices[line.v1], game.map.vertices[line.v2]
+        if a and b then
+            local ax, ay = a.x * mobj.FRACUNIT, a.y * mobj.FRACUNIT
+            local bx, by = b.x * mobj.FRACUNIT, b.y * mobj.FRACUNIT
+            local lineX, lineY = bx - ax, by - ay
+            local offsetX, offsetY = ax - object.x, ay - object.y
+            local denominator = rayX * lineY - rayY * lineX
+            if denominator ~= 0 then
+                local distance = (offsetX * lineY - offsetY * lineX) / denominator
+                local along = (offsetX * rayY - offsetY * rayX) / denominator
+                if distance >= 0 and distance <= 64 * mobj.FRACUNIT and along >= 0 and along <= 1
+                    and (nearest == nil or distance < nearest) then
+                    nearest, nearestIndex = distance, index
+                    local side = lineX * (object.y - ay) - lineY * (object.x - ax)
+                    nearestSide = if side < 0 then 0 else 1
+                end
+            end
         end
     end
-    return false
+    return nearestIndex ~= nil and specials.useLine(game.specials, nearestIndex, object, nearestSide)
 end
 
 function module.step(game: any, commands: any?): any

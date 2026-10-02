@@ -343,6 +343,22 @@ suite.describe('fixed-point movement', function()
     expect(physics.tryMove(blockedMap, blockedObject, 20 * frac, 0, blockedGame)).toBe(false)
     expect(blockedGame.specials.exited).toBe(false)
   end)
+
+  suite.it('uses the nearest special line in front of the player within reach', function()
+    local frac = mobj.FRACUNIT
+    local map = twoSectorMap(0, 11)
+    local game = gameModule.new(map, { spawnMonsters = false })
+    local player = game.players[1]
+    local object = game.mobjs[player.moId]
+    object.x, player.angle = 20 * frac, mobj.angleFromDegrees(0)
+    gameModule.step(game, { { buttons = 0x2 } })
+    expect(game.specials.exited).toBe(false)
+
+    player.usedown = false
+    player.angle = mobj.angleFromDegrees(180)
+    gameModule.step(game, { { buttons = 0x2 } })
+    expect(game.specials.exited).toBe(true)
+  end)
 end)
 
 suite.describe('deterministic core', function()
