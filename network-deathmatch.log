@@ -1,7 +1,7 @@
 Jess release binary: jess 0.1.0, SHA-256 e319def31ff86222977acf9e85a70c1b9fbbe4733be6d5e912c78466a5fa469a
 l3i: 1.3.1 from crates.io
-Package source digest: df3654196eb481910d298071b781da6bbda61731d1df777c224d7915a063acc2
-doom.jpk SHA-256: 6cb0aaa4c62f2caf3edc57dbc87df1cbd86ea90efc62cd8be4a0b14927ffafdf
+Package source digest: 3d063f6a8627da9617e2a7a6c402f45063aed840f3dab022262058832d31f139
+doom.jpk SHA-256: cde9974654b5039952d37f8be605be744442416717305ad03ab5e8053b979354
 IWAD: external doom2.wad (MAP01)
 
 Run:
