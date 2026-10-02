@@ -13,6 +13,8 @@ if command == "help" or (not wad and command ~= "net") then
     print("  view <IWAD> <MAP> <out.ppm> [DEMO] [tics]")
     print("  run <IWAD> <MAP> [tics] [DEMO]")
     print("  statehash <IWAD> <MAP> [tics] [DEMO]")
+    print("  save <IWAD> <MAP> <save> [tics] [DEMO]")
+    print("  load <IWAD> <MAP> <save> [out.ppm]")
     print("  net <connect-token>  (host-granted client transport)")
     return
 end
@@ -35,6 +37,22 @@ elseif command == "run" then
 elseif command == "statehash" then
     local game = doom.run(wad, arg[3] or "E1M1", tonumber(arg[4] or "0") or 0, arg[5])
     print(doom.stateHash(game))
+elseif command == "save" then
+    local mapName = arg[3] or "E1M1"
+    local savePath = arg[4]
+    if not savePath then error("save requires <save>") end
+    local game = doom.run(wad, mapName, tonumber(arg[5] or "0") or 0, arg[6])
+    doom.save(game, savePath)
+    print(`saved {savePath}: tic {game.gametic}, state hash {doom.stateHash(game)}`)
+elseif command == "load" then
+    local mapName = arg[3] or "E1M1"
+    local savePath = arg[4]
+    if not savePath then error("load requires <save>") end
+    local game = doom.load(wad, mapName, savePath)
+    local output = arg[5]
+    local result = if output then doom.render(game, output) else nil
+    print(`loaded {savePath}: tic {game.gametic}, state hash {doom.stateHash(game)}`)
+    if result then print(`wrote {result.output}: {result.width}x{result.height}`) end
 elseif command == "net" then
     local net = require("@doom/net")
     local protocol = net.protocol()
