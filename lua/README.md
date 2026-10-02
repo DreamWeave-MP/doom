@@ -1,53 +1,103 @@
 # doom.jpk
 
-Headless DOOM data/runtime slice for Jess. This package does **not** contain any IWAD data.
-Supply a legally obtained DOOM-family WAD at runtime.
+DOOM's game simulation in Luau, for Jess. The package holds **no** IWAD data: supply a legally
+obtained DOOM-family WAD at runtime.
 
-This source port is distributed under GPL-2.0; see `LICENSE.TXT`. It is derived from the released id DOOM source and intentionally ships no game data.
+The source is distributed under GPL-2.0 (see `LICENSE.TXT`); it is derived from the released id
+DOOM source.
 
-The package implements the WAD directory and override rules, PLAYPAL/COLORMAP palettes, patch
-posts, classic map structures including BLOCKMAP/REJECT, texture composition, a deterministic
-fixed-point gameplay slice, vanilla demo command validation, canonical state hashing, save/load
-envelopes, and a headless indexed software-rendering path. The gameplay and renderer are useful
-vertical slices, not a claim of byte-for-byte Linux Doom 1.10 synchronization: monster AI,
-sector movement, collision edge cases, visplanes, weapon/status-bar presentation, and several UI
-systems remain incomplete or simplified.
+## What is in it
 
-Run with Jess:
+- `@doom/play` is a port of Linux Doom 1.10's play simulation (`p_*.c`, `g_game.c`): map setup,
+  thinkers, movement and collision, sliding, hitscan and projectiles, every monster and its state
+  actions, weapons, pickups, doors, floors, ceilings, lifts, stairs, crushers, lights, teleporters,
+  switches, all line and sector specials, deathmatch spawns and frags, item respawn, nightmare
+  respawn, level exits, and map progression. State and thing tables are generated from `info.c`
+  by `tools/geninfo.luau`.
+- It plays vanilla demos. All thirteen built-in demos of `doom.wad`, `doom2.wad`, `plutonia.wad`,
+  and `tnt.wad` run to the recorded player's death, tic for tic (`tests/play_test.luau`).
+- Save games (`play.save`, `play.load`) store the whole game graph and restore to the same future.
+- `@doom/agent` and `bin/doom-arena.luau` run a live deathmatch for players that plan rather than
+  press keys: each slot reads a text observation and writes short timed plans.
+- `@doom/net` and `@doom/netgame` are the tic-command protocol over dream.net: an authoritative
+  host, clients that replay the same tics, and a world hash to compare.
+- WAD, map, palette, patch, and texture readers, and a headless indexed renderer for the title,
+  the automap, and a first-person view.
 
-    jess run --package doom.jpk --capability network.transport doom.luau title DOOM.WAD title.ppm
-    jess run --package doom.jpk --capability network.transport doom.luau map DOOM.WAD E1M1 e1m1.ppm DEMO1
-    jess run --package doom.jpk --capability network.transport doom.luau view DOOM.WAD E1M1 view.ppm
-    jess run --package doom.jpk --capability network.transport doom.luau view DOOM.WAD E1M1 view-200.ppm DEMO1 200
-    jess run --package doom.jpk --capability network.transport doom.luau run DOOM.WAD E1M1 350 DEMO1
-    jess run --package doom.jpk --capability network.transport doom.luau statehash DOOM.WAD E1M1 350
-    jess run --package doom.jpk --capability network.transport doom.luau save DOOM.WAD E1M1 save.bin 350 DEMO1
-    jess run --package doom.jpk --capability network.transport doom.luau load DOOM.WAD E1M1 save.bin restored.ppm
+What it is not: there is no sound, no status bar, menu, intermission or finale screen (the
+intermission is a timed pause that any player can skip), and the first-person renderer draws
+the map's starting geometry, so opened doors and moved lifts are not shown. The original's
+overflow emulation (intercepts, spechits, the body queue) is not reproduced, so a demo that
+relies on one of those can drift.
 
-`doom.luau` is the launcher distributed beside `doom.jpk`; its source is also stored in the JPK
-under `bin/doom.luau`.
+## Running
 
-The `@doom/net` module defines the real dream-net ticcmd protocol and uses native transport
-handles. `jess run` accepts explicit `--capability network.transport` grants; without that flag,
-`@dream/net` client and server creation are denied by design. With it, Luau can create its own
-server and mint client tokens while the native transport keeps its private key opaque. The Doom
-simulation, authoritative game loop, and tic-command routing remain in Luau.
+Every command is `jess run --package doom.jpk --capability network.transport doom.luau ...` (or
+`--package lua lua/bin/doom.luau` from this repository):
 
-Run a four-player headless deathmatch as separate Jess processes (server in one terminal; then
-start four clients from another). The server writes one base64 token per slot and waits for all four
-clients before ticking:
+    doom.luau info      DOOM.WAD
+    doom.luau demo      DOOM.WAD DEMO1          # play a demo lump or a .lmp file, print the outcome
+    doom.luau run       DOOM.WAD E1M1 350       # idle for 350 tics
+    doom.luau statehash DOOM.WAD E1M1 350 DEMO1
+    doom.luau save      DOOM.WAD E1M5 save.bin 800 DEMO1
+    doom.luau load      DOOM.WAD save.bin 100 view.ppm
+    doom.luau title     DOOM.WAD title.ppm
+    doom.luau map       DOOM.WAD E1M5 map.ppm DEMO1
+    doom.luau view      DOOM.WAD E1M1 view.ppm
 
-    jess run --package doom.jpk --capability network.transport lua/bin/doom-server.luau doom2.wad MAP01 127.0.0.1:0 /tmp/doom-tokens.txt 4 700
-    jess run --package doom.jpk --capability network.transport lua/bin/doom-client.luau doom2.wad MAP01 /tmp/doom-tokens.txt 1 700 4
-    jess run --package doom.jpk --capability network.transport lua/bin/doom-client.luau doom2.wad MAP01 /tmp/doom-tokens.txt 2 700 4
-    jess run --package doom.jpk --capability network.transport lua/bin/doom-client.luau doom2.wad MAP01 /tmp/doom-tokens.txt 3 700 4
-    jess run --package doom.jpk --capability network.transport lua/bin/doom-client.luau doom2.wad MAP01 /tmp/doom-tokens.txt 4 700 4
+From Luau:
 
-The CLI harness paces the Luau host loop at Doom's 35 Hz. Every client should report the same
-final state hash and zero received-state hash mismatches. Token files are credentials: share them
-only with the intended clients and remove them after the session.
+```luau
+local play = require('@doom/play')
 
-For local development, inspect performance and emitted code with `jess run --package doom.jpk
---capability network.transport --profile doom.luau run DOOM.WAD E1M1 350`, or dump a script with
-`jess run --package doom.jpk --capability network.transport --disassemble listing.txt lua/bin/doom-server.luau`
-and `--emit-asm listing.asm`.
+local game = play.new('doom2.wad', { mapName = 'MAP01', skill = 3 })
+for _ = 1, 35 do
+  play.tick { [0] = play.command { forward = 50, turn = 2, attack = true } }
+end
+
+print(play.summary().players[1].x, play.hash())
+```
+
+`play.tick` takes one ticcmd per slot (0 to 3). `play.observe(slot)` returns what that player
+can know: its own state, everything in line of sight with distance and bearing, and how far it
+can walk in ten directions. One game runs per Jess runtime.
+
+## Live deathmatch for agents
+
+The host runs the match at a chosen speed and never waits for anyone: a slot with no plan
+stands still.
+
+    jess run --package lua --capability network.transport lua/bin/doom-arena.luau \
+      doom2.wad MAP01 session 4 10 6000 10
+
+That is four players, ten tics per second, a 6000-tic limit, and a frag limit of ten. Each
+player then drives one slot:
+
+    doom-agent.luau session 2 join
+    doom-agent.luau session 2 look
+    doom-agent.luau session 2 act "turn=35 for=4" "attack for=20" "forward=50 side=20 for=30"
+
+A plan is up to sixteen steps; each step holds `forward=`, `back=`, `side=` (-50 to 50),
+`turn=` (degrees over the step, positive left), `attack`, `use`, `weapon=`, and `for=` (tics).
+A new plan replaces the one running. The session folder also holds `status.txt` (the
+scoreboard), `events.log` (kills and respawns), and `match.lmp`: the whole match as a version
+1.9 demo, which `doom.luau demo doom2.wad session/match.lmp` replays to the same state hash.
+
+## Network deathmatch
+
+The server writes one connect token per slot and waits for every client before ticking:
+
+    doom-server.luau doom2.wad MAP01 127.0.0.1:0 tokens.txt 4 700
+    doom-client.luau doom2.wad MAP01 tokens.txt 1 700 4 [session-dir]
+
+With a session folder a client takes its commands from `doom-agent.luau` plans and writes its
+observations there; without one it runs a canned patrol. Every client should report the host's
+final world hash and zero mismatches. Token files are credentials: share each only with its
+player and remove them afterwards.
+
+## Checks
+
+    jess package test lua
+    jess run lua/bin/doom-stylecheck.luau
+
+The demo tests run only when the IWADs sit in the working folder.

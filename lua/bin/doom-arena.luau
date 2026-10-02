@@ -29,7 +29,7 @@ for slot = 0, playerCount - 1 do
   present[slot + 1] = true
 end
 
-local game = play.new(wadPath, { mapName = mapName, deathmatch = 1, netgame = true, players = present, skill = 3, nomonsters = true })
+local game = play.new(wadPath, { mapName = mapName, deathmatch = 1, netgame = true, players = present, skill = 3, nomonsters = true, intermissionTics = 1 })
 local events: { string } = {}
 local plans: { [number]: agent.Plan? } = {}
 local lastSeq: { [number]: number } = {}
@@ -90,6 +90,18 @@ local function writeObservations(): ()
   end
 end
 
+-- Every command is kept in the vanilla demo format, so the match replays here
+-- (`doom.luau demo`) and in any port that plays version 1.9 demos.
+local skill = 3
+local demo = { string.char(109, skill, game.gameepisode, game.gamemap, 1, 0, 0, 1, 0) }
+for slot = 0, 3 do
+  table.insert(demo, string.char(if slot < playerCount then 1 else 0))
+end
+
+local function writeDemo(): ()
+  fs.replace(fs.join(dir, 'match.lmp'), table.concat(demo) .. '\128')
+end
+
 -- The start barrier: every slot's player says it is ready, or the wait ends.
 writeObservations()
 writeStatus('waiting for players')
@@ -127,6 +139,14 @@ while game.gametic < ticLimit and not winner and not fs.exists(fs.join(dir, 'sto
     cmds[slot] = agent.nextCommand(plans[slot])
   end
 
+  for slot = 0, playerCount - 1 do
+    local cmd = cmds[slot]
+    table.insert(
+      demo,
+      if cmd then string.char(cmd.forwardmove % 256, cmd.sidemove % 256, (cmd.angleturn // 256) % 256, cmd.buttons) else '\0\0\0\0'
+    )
+  end
+
   play.tick(cmds)
 
   if game.gamestate ~= 'level' then
@@ -159,10 +179,13 @@ while game.gametic < ticLimit and not winner and not fs.exists(fs.join(dir, 'sto
 
   writeObservations()
   if game.gametic % rate == 0 then writeStatus('playing') end
+  if game.gametic % 350 == 0 then writeDemo() end
 end
 
 if winner then note(everyone, `slot {winner} reached the frag limit`) end
 note(everyone, 'the match is over')
 writeObservations()
 writeStatus('finished')
+writeDemo()
+print(`final state hash {play.hash()}; the whole match is in {fs.join(dir, 'match.lmp')}`)
 print(fs.read(fs.join(dir, 'status.txt')))

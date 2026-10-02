@@ -8,7 +8,7 @@ local function usage(): ()
   print('  map       <IWAD> <E1M1|MAP01> <out.ppm> [DEMO1]')
   print('  view      <IWAD> <E1M1|MAP01> <out.ppm> [DEMO1] [tics]')
   print('  run       <IWAD> <MAP> [tics] [DEMO1]')
-  print('  demo      <IWAD> <DEMO1>')
+  print('  demo      <IWAD> <DEMO1|file.lmp>')
   print('  trace     <IWAD> <MAP> [DEMO1] [tics]')
   print('  statehash <IWAD> <MAP> [tics] [DEMO1]')
   print('  save      <IWAD> <MAP> <save> [tics] [DEMO1]')
@@ -53,7 +53,9 @@ elseif command == 'run' then
   doom.run(wad, arg[3] or 'E1M1', tonumber(arg[4] or '35') or 35, arg[5])
   report()
 elseif command == 'demo' then
-  local result = doom.play.playDemo(wad, arg[3] or 'DEMO1')
+  -- A demo is a lump name, or a .lmp file such as an arena match.
+  local name = arg[3] or 'DEMO1'
+  local result = doom.play.playDemo(wad, if jess.fs.isFile(name) then jess.fs.readBuffer(name) :: buffer else name)
   print(`played {result.tics} of {result.length} demo tics`)
   report()
 elseif command == 'trace' then

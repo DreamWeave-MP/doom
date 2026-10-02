@@ -121,7 +121,8 @@ function module.readPlan(dir: string, slot: number, lastSeq: number?): Plan?
 end
 
 -- The plan's ticcmd for this tic, or nil once it has run out. The turn is
--- spread evenly over the step, and a weapon change is sent on its first tic.
+-- spread evenly over the step in the 256-unit steps a demo file can hold (the
+-- remainder carries to the next tic), and a weapon change is sent on its first tic.
 function module.nextCommand(plan: Plan?): any
   if not plan then return nil end
 
@@ -136,7 +137,7 @@ function module.nextCommand(plan: Plan?): any
 
   if not step then return nil end
 
-  local turn = math.clamp(math.floor(plan.turnLeft / plan.left + 0.5), -32768, 32767)
+  local turn = math.clamp(math.floor(plan.turnLeft / plan.left / 256 + 0.5) * 256, -32768, 32512)
   local buttons = step.buttons
   if plan.left ~= step.tics then buttons = bit32.band(buttons, 3) end
 
