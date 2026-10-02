@@ -620,6 +620,8 @@ suite.describe('game tick', function()
 
     player.frags[2] = 3
     player.powers[inter.POWER_IRONFEET] = 20
+    player.powers[inter.POWER_INVISIBILITY] = 20
+    object.flags = bit32.bor(object.flags, mobj.MF_SHADOW)
     player.cards.blue = true
     player.backpack = true
     player.armor, player.armorType = 75, 1
@@ -633,6 +635,7 @@ suite.describe('game tick', function()
     expect(reborn.cards.blue).toBe(nil)
     expect(reborn.backpack).toBe(false)
     expect(reborn.powers[inter.POWER_IRONFEET] or 0).toBe(0)
+    expect(bit32.band(object.flags, mobj.MF_SHADOW)).toBe(0)
     expect(reborn.frags[2]).toBe(3)
   end)
 

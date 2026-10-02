@@ -118,7 +118,12 @@ function module.respawn(game: Game, index: number): boolean
     object.z = object.floorz
     object.momx, object.momy, object.momz = 0, 0, 0
     object.health = 100
-    object.flags = bit32.bor(bit32.band(object.flags, bit32.bnot(mobj.MF_CORPSE)), mobj.MF_SOLID, mobj.MF_SHOOTABLE)
+    object.flags = bit32.bor(
+        bit32.band(object.flags, bit32.bnot(bit32.bor(mobj.MF_CORPSE, mobj.MF_SHADOW))),
+        mobj.MF_SOLID,
+        mobj.MF_SHOOTABLE,
+        mobj.MF_DROPOFF
+    )
     object.state, object.tics, object.removed = 'spawn', 0, false
     player.state, player.health, player.damagecount = mobj.PST_LIVE, 100, 0
     player.viewheight, player.viewz = 41 * mobj.FRACUNIT, object.z + 41 * mobj.FRACUNIT
