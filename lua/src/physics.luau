@@ -14,6 +14,7 @@ module.MAXMOVE = 30 * module.FRACUNIT
 module.PLAYER_RADIUS = 16 * module.FRACUNIT
 module.PLAYER_HEIGHT = 56 * module.FRACUNIT
 module.MAX_STEP = 24 * module.FRACUNIT
+module.GRAVITY = module.FRACUNIT / 8
 
 local function trunc(value: number): number
     return if value < 0 then math.ceil(value) else math.floor(value)
@@ -212,6 +213,22 @@ function module.move(map: any, object: mobj.Mobj): boolean
             object.momy = module.fixedMul(object.momy, module.FRICTION)
         end
     end
+    return true
+end
+
+function module.zMove(object: mobj.Mobj): boolean
+    object.z += object.momz
+    if object.z <= object.floorz then
+        object.z = object.floorz
+        object.momz = 0
+        return false
+    end
+    if object.z + object.height >= object.ceilingz then
+        object.z = object.ceilingz - object.height
+        object.momz = 0
+        return false
+    end
+    object.momz -= module.GRAVITY
     return true
 end
 

@@ -17,6 +17,7 @@ export type Attack = {
     kind: string,
     sides: number?,
     multiplier: number?,
+    fixed: number?,
     pellets: number?,
     projectile: string?,
     spread: number?,
@@ -175,7 +176,7 @@ local function fireball(projectile: string, sides: number, multiplier: number?):
     return { kind = 'missile', projectile = projectile, sides = sides, multiplier = multiplier or 1 }
 end
 local function bullets(pellets: number): Attack
-    return { kind = 'hitscan', sides = 5, multiplier = 3, pellets = pellets, spread = 0x01000000 }
+    return { kind = 'hitscan', sides = 3, multiplier = 1, fixed = 5, pellets = pellets, spread = 0x01000000 }
 end
 
 monster('zombieman', 3004, 'POSS', 20, 8, 20, 56, 200, 'hitscan', nil, bullets(1))
@@ -200,7 +201,7 @@ monster('archvile', 64, 'VILE', 700, 15, 20, 56, 10, 'missile', nil, fireball('v
 local weapons: {[number]: Weapon} = {}
 local function weapon(value: Weapon): () weapons[value.id] = value end
 weapon({ id = 0, name = 'fist', ammo = nil, ammoPerShot = 0, damageSides = 10, damageMultiplier = 2, pellets = 1, range = 64, spread = 0x02000000, cooldown = 8, readyState = 'S_PUNCH', downState = 'S_PUNCHDOWN', upState = 'S_PUNCHUP', attackState = 'S_PUNCH1', pickup = nil })
-weapon({ id = 1, name = 'pistol', ammo = module.AMMO_CLIP, ammoPerShot = 1, damageSides = 3, damageMultiplier = 3, pellets = 1, range = 2048, spread = 0x01000000, cooldown = 4, readyState = 'S_PISTOL', downState = 'S_PISTOLDOWN', upState = 'S_PISTOLUP', attackState = 'S_PISTOL1', flashState = 'S_PISTOLFLASH' })
+weapon({ id = 1, name = 'pistol', ammo = module.AMMO_CLIP, ammoPerShot = 1, damageSides = 3, damageMultiplier = 1, pellets = 1, range = 2048, spread = 0x01000000, cooldown = 4, readyState = 'S_PISTOL', downState = 'S_PISTOLDOWN', upState = 'S_PISTOLUP', attackState = 'S_PISTOL1', flashState = 'S_PISTOLFLASH' })
 weapon({ id = 2, name = 'shotgun', ammo = module.AMMO_SHELL, ammoPerShot = 1, damageSides = 3, damageMultiplier = 5, pellets = 7, range = 2048, spread = 0x02000000, cooldown = 30, readyState = 'S_SGUN', downState = 'S_SGUNDOWN', upState = 'S_SGUNUP', attackState = 'S_SGUN1', flashState = 'S_SGUNFLASH1', pickup = 'shotgun' })
 weapon({ id = 3, name = 'chaingun', ammo = module.AMMO_CLIP, ammoPerShot = 1, damageSides = 3, damageMultiplier = 5, pellets = 1, range = 2048, spread = 0x01000000, cooldown = 4, readyState = 'S_CHAIN', downState = 'S_CHAINDOWN', upState = 'S_CHAINUP', attackState = 'S_CHAIN1', flashState = 'S_CHAINFLASH1', pickup = 'chaingun' })
 weapon({ id = 4, name = 'rocket launcher', ammo = module.AMMO_MISSILE, ammoPerShot = 1, damageSides = 20, damageMultiplier = 1, pellets = 1, range = 2048, spread = 0, cooldown = 30, readyState = 'S_MISSILE', downState = 'S_MISSILEDOWN', upState = 'S_MISSILEUP', attackState = 'S_MISSILE1', flashState = 'S_MISSILEFLASH1', pickup = 'rocket launcher' })

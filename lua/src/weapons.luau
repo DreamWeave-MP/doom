@@ -18,6 +18,7 @@ for id, weapon in info.weapons do
         kind = if weapon.ammo == nil and id ~= info.WP_FIST and id ~= info.WP_CHAINSAW then 'hitscan' else if weapon.ammo == nil then 'melee' else if weapon.id == info.WP_MISSILE or weapon.id == info.WP_BFG then 'missile' else 'hitscan',
         sides = weapon.damageSides,
         multiplier = weapon.damageMultiplier,
+        fixed = if id == info.WP_PISTOL then 5 else nil,
         pellets = weapon.pellets,
         spread = weapon.spread,
         projectile = if weapon.id == info.WP_MISSILE then 'rocket' elseif weapon.id == info.WP_PLASMA then 'plasma' elseif weapon.id == info.WP_BFG then 'bfg' else nil,

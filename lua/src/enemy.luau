@@ -54,6 +54,8 @@ local function setState(object: any, name: string): boolean
     if not state then return false end
     object.state = name
     object.tics = state.tics
+    object.sprite = state.sprite
+    object.frame = state.frame
     return true
 end
 
@@ -88,7 +90,7 @@ end
 local function lineDamage(game: any, source: any, target: any, attack: info.Attack, shotAngle: number): number
     local sides = attack.sides or 1
     local multiplier = attack.multiplier or 1
-    local damage = roll(game, sides, multiplier)
+    local damage = if attack.fixed then attack.fixed * (randomByte(game) % sides + 1) else roll(game, sides, multiplier)
     return module.damage(game, target.id, damage, source.id)
 end
 
@@ -210,7 +212,7 @@ function module.spawn(game: any, kind: number, x: number, y: number, actorAngle:
         object.floorz, object.ceilingz = physics.floorAndCeiling(game.map, x, y)
         object.z = object.floorz
     end
-    object.state, object.tics = meta.spawnState, (info.state(meta.spawnState) :: info.State).tics
+    setState(object, meta.spawnState)
     object.reactiontime = if options and options.reactiontime then options.reactiontime else 0
     local raw = object :: any
     raw.movedir, raw.movecount, raw.threshold, raw.attackCooldown = 0, 0, 0, 0
@@ -381,8 +383,10 @@ function module.step(game: any): any
         local object = game.mobjs[id]
         if object and not object.removed then
             if (object :: any).projectile then
+                physics.zMove(object)
                 updateProjectile(game, object)
             elseif monsterFor(object) then
+                physics.zMove(object)
                 advanceState(object)
                 if object.health > 0 then module.chase(game, id) end
             end
