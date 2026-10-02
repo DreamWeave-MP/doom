@@ -35,6 +35,7 @@ tests = ["tests/wad_test.luau", "tests/net_test.luau"]
 "@doom/specials" = "src/specials.luau"
 "@doom/flow" = "src/flow.luau"
 "@doom/rthings" = "src/rthings.luau"
+"@doom/play" = "src/play/api.luau"
 "@doom" = "src/init.luau"
 
 [[layer]]
@@ -67,6 +68,7 @@ exports = [
   "@doom/specials",
   "@doom/flow",
   "@doom/rthings",
+  "@doom/play",
   "@doom",
 ]
 
