@@ -19,6 +19,13 @@ tests = ["tests/wad_test.luau"]
 "@doom/texture" = "src/texture.luau"
 "@doom/sim" = "src/sim.luau"
 "@doom/demo" = "src/demo.luau"
+"@doom/state" = "src/state.luau"
+"@doom/save" = "src/save.luau"
+"@doom/net" = "src/net.luau"
+"@doom/game" = "src/game.luau"
+"@doom/mobj" = "src/mobj.luau"
+"@doom/physics" = "src/physics.luau"
+"@doom/tick" = "src/tick.luau"
 "@doom" = "src/init.luau"
 
 [[layer]]
@@ -35,5 +42,12 @@ exports = [
   "@doom/texture",
   "@doom/sim",
   "@doom/demo",
+  "@doom/state",
+  "@doom/save",
+  "@doom/net",
+  "@doom/game",
+  "@doom/mobj",
+  "@doom/physics",
+  "@doom/tick",
   "@doom",
 ]
