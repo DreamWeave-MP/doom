@@ -273,6 +273,7 @@ local function replaceLevel(game: any, map: any, state: FlowState, resetFrags: b
 
     game.map = replacement.map
     game.specials = replacement.specials
+    game.specials.game, game.specials.map = game, game.map
     game.leveltime = 0
     game.gametic = oldGametic
     game.rngState = oldRng
