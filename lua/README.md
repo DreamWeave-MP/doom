@@ -10,8 +10,8 @@ posts, classic map structures including BLOCKMAP/REJECT, texture composition, a 
 fixed-point gameplay slice, vanilla demo command validation, canonical state hashing, save/load
 envelopes, and a headless indexed software-rendering path. The gameplay and renderer are useful
 vertical slices, not a claim of byte-for-byte Linux Doom 1.10 synchronization: monster AI,
-metadata-backed actors, sector movers, sprites, exact lookup tables, game-flow progression, and
-several UI systems remain incomplete or simplified.
+sector movement, collision edge cases, visplanes, weapon/status-bar presentation, and several UI
+systems remain incomplete or simplified.
 
 Run with Jess:
 
@@ -21,6 +21,8 @@ Run with Jess:
     jess run --package doom.jpk doom.luau view DOOM.WAD E1M1 view-200.ppm DEMO1 200
     jess run --package doom.jpk doom.luau run DOOM.WAD E1M1 350 DEMO1
     jess run --package doom.jpk doom.luau statehash DOOM.WAD E1M1 350
+    jess run --package doom.jpk doom.luau save DOOM.WAD E1M1 save.bin 350 DEMO1
+    jess run --package doom.jpk doom.luau load DOOM.WAD E1M1 save.bin restored.ppm
 
 `doom.luau` is the launcher distributed beside `doom.jpk`; its source is also stored in the JPK
 under `bin/doom.luau`.
