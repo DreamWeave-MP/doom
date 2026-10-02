@@ -154,44 +154,11 @@ function module.snapshot(game: Game): any
     }
 end
 
-local stateModule: any = nil
-local stateLoaded, stateValue = pcall(require, './state')
-if stateLoaded then stateModule = stateValue end
-
-local function fallbackHash(value: any): string
-    -- Keep the fallback useful even when @doom/state is not in the package graph.
-    -- Every field is appended in record order; no table address enters the hash.
-    local parts = {tostring(value.version), tostring(value.map), tostring(value.gametic), tostring(value.leveltime), tostring(value.rngState)}
-    local function add(...: any): ()
-        for _, item in {...} do table.insert(parts, tostring(item)) end
-    end
-    for _, player in value.players do
-        add('p', player.index, player.moId, player.state, player.health, player.armor,
-            player.armorType, player.damagecount, player.bonuscount, player.viewheight,
-            player.viewz, player.angle, player.usedown, player.attackdown,
-            player.attackCooldown, player.deathTics, player.deaths, player.kills,
-            player.readyweapon, player.pendingweapon, player.spawnX, player.spawnY, player.spawnAngle)
-        for _, ammo in player.ammo do add('ammo', ammo) end
-        for _, owned in player.weaponowned do add('weapon', owned) end
-        add('cmd', player.cmd.forwardmove, player.cmd.sidemove, player.cmd.angleturn, player.cmd.buttons)
-    end
-    for _, object in value.mobjs do
-        add('m', object.id, object.kind, object.x, object.y, object.z, object.momx,
-            object.momy, object.momz, object.angle, object.radius, object.height,
-            object.floorz, object.ceilingz, object.health, object.flags, object.state,
-            object.tics, object.reactiontime, object.playerId, object.targetId, object.removed)
-    end
-    for _, thinker in value.thinkers do add('t', thinker.id, thinker.kind, thinker.mobjId, thinker.tics, thinker.removed) end
-    local text = table.concat(parts, '|')
-    local hash = 2166136261
-    for i = 1, #text do hash = bit32.band((bit32.bxor(hash, string.byte(text, i)) * 16777619), 0xffffffff) end
-    return string.format('%08x', hash)
-end
+local stateModule = require('./state')
 
 function module.hash(game: Game): string
     local value = module.snapshot(game)
-    if stateModule and type(stateModule.hash) == 'function' then return stateModule.hash(value) end
-    return fallbackHash(value)
+    return stateModule.hash(value)
 end
 
 module.stateSnapshot = module.snapshot
@@ -206,4 +173,3 @@ module.tic = module.step
 module.newGame = module.new
 
 return module
-

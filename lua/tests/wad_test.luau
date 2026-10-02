@@ -3,8 +3,13 @@
 -- Synthetic WAD bytes keep the suite independent of an installed game.
 local demoModule = require '@doom/demo'
 local doom = require '@doom'
+local fixed = require '@doom/fixed'
+local gameModule = require '@doom/game'
 local mapModule = require '@doom/map'
 local paletteModule = require '@doom/palette'
+local random = require '@doom/random'
+local save = require '@doom/save'
+local state = require '@doom/state'
 local test = require '@jess/test'
 local wadModule = require '@doom/wad'
 local expect = test.expect
@@ -271,6 +276,45 @@ suite.describe('maps', function()
     }
 
     expect(mapModule.sectorAt(map, 0, 0)).toBe(sector)
+  end)
+end)
+
+suite.describe('deterministic core', function()
+  suite.it('preserves fixed-point products, division, and saturation', function()
+    expect(fixed.mul(fixed.FRACUNIT, fixed.FRACUNIT)).toBe(fixed.FRACUNIT)
+    expect(fixed.mul(-1, fixed.FRACUNIT)).toBe(-1)
+    expect(fixed.mul(-1, 1)).toBe(-1)
+    expect(fixed.div(fixed.FRACUNIT, 2 * fixed.FRACUNIT)).toBe(32768)
+    expect(fixed.div(fixed.MAXINT, 0)).toBe(fixed.MAXINT)
+    expect(fixed.div(fixed.MININT, 0)).toBe(fixed.MININT)
+  end)
+
+  suite.it('uses separate vanilla random streams and canonical state bytes', function()
+    local rng = random.new()
+    expect(random.pRandom(rng)).toBe(8)
+    expect(random.pRandom(rng)).toBe(109)
+    expect(random.mRandom(rng)).toBe(8)
+    expect(rng).toEqual({ mIndex = 1, pIndex = 2 })
+
+    local value = { z = 3, a = { true, 7 } }
+    local encoded = state.encode(value)
+    expect(state.hash(value)).toBe(state.fnv1a64(encoded))
+    expect(state.decode(encoded)).toEqual(value)
+    expect(save.load(save.save(value))).toEqual(value)
+  end)
+end)
+
+suite.describe('game tick', function()
+  suite.it('spawns, advances, hashes, and saves a deterministic player', function()
+    local wad = wadModule.open(writeFixture(fixture()))
+    local map = mapModule.load(wad, 'E1M1')
+    local game = gameModule.new(map, { spawnMonsters = false })
+    local before = gameModule.stateHash(game)
+    gameModule.step(game, { { forwardmove = 20, sidemove = 0, angleturn = 0, buttons = 0 } })
+    expect(game.gametic).toBe(1)
+    expect(gameModule.stateHash(game) ~= before).toBe(true)
+    local restored = save.load(save.save(gameModule.snapshot(game)))
+    expect(state.hash(restored)).toBe(state.hash(gameModule.snapshot(game)))
   end)
 end)
 

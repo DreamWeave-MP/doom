@@ -3,15 +3,9 @@
 local mobj = require './mobj'
 local module = {}
 
-local fixedModule: any = nil
-local angleModule: any = nil
-local mapModule: any = nil
-local ok, value = pcall(require, '@doom/fixed')
-if ok then fixedModule = value end
-ok, value = pcall(require, '@doom/angle')
-if ok then angleModule = value end
-ok, value = pcall(require, '@doom/map')
-if ok then mapModule = value end
+local fixedModule = require('@doom/fixed')
+local angleModule = require('@doom/angle')
+local mapModule = require('@doom/map')
 
 module.FRACUNIT = mobj.FRACUNIT
 module.FRICTION = 0xe800
@@ -26,26 +20,12 @@ local function trunc(value: number): number
 end
 
 function module.fixedMul(a: number, b: number): number
-    if fixedModule then
-        local f = fixedModule.fixedMul or fixedModule.mul
-        if type(f) == 'function' then
-            local worked, result = pcall(f, a, b)
-            if worked and type(result) == 'number' then return trunc(result) end
-        end
-    end
-    return trunc(a * b / module.FRACUNIT)
+    return trunc(fixedModule.mul(a, b))
 end
 
 function module.fixedDiv(a: number, b: number): number
     if b == 0 then error('physics: fixed divide by zero', 2) end
-    if fixedModule then
-        local f = fixedModule.fixedDiv or fixedModule.div
-        if type(f) == 'function' then
-            local worked, result = pcall(f, a, b)
-            if worked and type(result) == 'number' then return trunc(result) end
-        end
-    end
-    return trunc(a * module.FRACUNIT / b)
+    return trunc(fixedModule.div(a, b))
 end
 
 function module.toFixed(value: number): number
@@ -56,32 +36,9 @@ function module.toInt(value: number): number
     return trunc(value / module.FRACUNIT)
 end
 
-local TrigSize = 4096
-local Trig: {number} = table.create(TrigSize)
-for i = 0, TrigSize - 1 do
-    Trig[i + 1] = math.floor(math.cos(i * 2 * math.pi / TrigSize) * module.FRACUNIT + 0.5)
-end
-
-local function externalTrig(name: string, angle: number): number?
-    if not angleModule then return nil end
-    local f = angleModule[name]
-    if type(f) ~= 'function' then return nil end
-    local worked, result = pcall(f, angle)
-    if not worked or type(result) ~= 'number' then return nil end
-    if result >= -2 and result <= 2 then result *= module.FRACUNIT end
-    return trunc(result)
-end
-
 local function trig(angle: number, offset: number): number
-    local result = externalTrig(if offset == 0 then 'cosFixed' else 'sinFixed', angle)
-    if result ~= nil then return result end
-    result = externalTrig(if offset == 0 then 'cos' else 'sin', angle)
-    if result ~= nil then return result end
-    result = externalTrig(if offset == 0 then 'cosine' else 'sine', angle)
-    if result ~= nil then return result end
-    local index = math.floor((angle % mobj.ANGLE_MAX) * TrigSize / mobj.ANGLE_MAX + 0.5) % TrigSize
-    index = (index + offset) % TrigSize
-    return Trig[index + 1]
+    if offset == 0 then return trunc(angleModule.cosine(angle)) end
+    return trunc(angleModule.sine(angle))
 end
 
 function module.cosFixed(angle: number): number
@@ -89,7 +46,7 @@ function module.cosFixed(angle: number): number
 end
 
 function module.sinFixed(angle: number): number
-    return trig(angle, TrigSize / 4)
+    return trig(angle, 1)
 end
 
 function module.thrust(object: mobj.Mobj, angle: number, amount: number): ()
@@ -169,11 +126,7 @@ function module.lineBlocksShot(map: any, x0: number, y0: number, x1: number, y1:
 end
 
 local function sectorAt(map: any, x: number, y: number): any
-    if mapModule and type(mapModule.sectorAt) == 'function' then
-        local worked, sector = pcall(mapModule.sectorAt, map, module.toInt(x), module.toInt(y))
-        if worked and sector then return sector end
-    end
-    return {floor = 0, ceiling = 128}
+    return mapModule.sectorAt(map, module.toInt(x), module.toInt(y))
 end
 
 local function lineSectors(map: any, line: any): (any?, any?)
@@ -268,4 +221,3 @@ module.try_move = module.tryMove
 module.line_blocks_shot = module.lineBlocksShot
 
 return module
-

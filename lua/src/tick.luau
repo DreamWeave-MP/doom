@@ -4,11 +4,7 @@
 local mobj = require './mobj'
 local physics = require './physics'
 
--- Optional in larger package graphs; the local LCG below remains the canonical
--- fallback because its state is part of the gameplay snapshot.
-local randomModule: any = nil
-local randomLoaded, randomValue = pcall(require, '@doom/random')
-if randomLoaded then randomModule = randomValue end
+local randomModule = require('@doom/random')
 local module = {}
 
 module.BT_ATTACK = 0x1
@@ -42,16 +38,10 @@ end
 local function randomByte(game: any): number
     -- The state is explicit rather than hidden in a module global, which makes
     -- replay and snapshot hashes independent of call order outside the tic.
-    if randomModule and type(randomModule.mRandom) == 'function' then
-        local stream = {mIndex = game.rngState % 256, pIndex = 0}
-        local worked, value = pcall(randomModule.mRandom, stream)
-        if worked and type(value) == 'number' then
-            game.rngState = stream.mIndex
-            return value
-        end
-    end
-    game.rngState = bit32.band(game.rngState * 1664525 + 1013904223, 0xffffffff)
-    return bit32.band(game.rngState, 0xff)
+    local stream = {mIndex = 0, pIndex = game.rngState % 256}
+    local value = randomModule.pRandom(stream)
+    game.rngState = stream.pIndex
+    return value
 end
 
 local function getMobj(game: any, id: number): mobj.Mobj?
@@ -217,4 +207,3 @@ module.randomByte = randomByte
 module.normalizeCommand = normalizeCommand
 
 return module
-

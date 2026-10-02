@@ -13,19 +13,9 @@ type NetModule = {
     client: (options: { schema: dream_net_Schema, bind: string? }) -> dream_net_Client,
 }
 
--- Jess 0.1.0/l3i 1.3 exposes @dream/net. Keep the requested netclient spelling as
--- the first probe so this module also works with the split module used by newer hosts.
-local function loadNet(): NetModule
-    local ok, loaded = pcall(function(): any
-        return require("@dream/netclient")
-    end)
-    if ok then
-        return loaded :: NetModule
-    end
-    return require("@dream/net") :: NetModule
-end
-
-local net = loadNet()
+-- Jess 0.1.0/l3i 1.3 exposes this bridge as @dream/net. A missing transport
+-- is an environment error and must remain visible to the caller.
+local net = require("@dream/net") :: NetModule
 local module = {}
 
 export type EventName = "TICCMD" | "TIC_BUNDLE" | "STATE_HASH"

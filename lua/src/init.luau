@@ -4,7 +4,6 @@ local wadModule = require("@doom/wad")
 local mapModule = require("@doom/map")
 local render = require("@doom/render")
 local demo = require("@doom/demo")
-local sim = require("@doom/sim")
 local gameModule = require("@doom/game")
 local mobj = require("@doom/mobj")
 local saveModule = require("@doom/save")
@@ -36,14 +35,23 @@ function module.renderMap(path: string, mapName: string, output: string, demoNam
     local trace = nil
     local demoTics = 0
     if demoName then
-        local _, tics = demo.parse(wad:read(demoName))
-        demoTics = #tics
-        local p = sim.new(map)
-        trace = { { x = p.x, y = p.y } }
-        for i, cmd in tics do
-            sim.tic(map, p, cmd.forward, cmd.side, cmd.turn)
-            if i % 4 == 0 then table.insert(trace, { x = p.x, y = p.y }) end
+        local header, frames = demo.parseFull(wad:read(demoName))
+        local active = 0
+        for _, enabled in header.players do
+            if enabled then active += 1 end
         end
+        local game = gameModule.new(map, { playerCount = active, spawnMonsters = false })
+        local player = game.players[header.consolePlayer + 1]
+        local object = game.mobjs[player.moId]
+        trace = { { x = object.x / mobj.FRACUNIT, y = object.y / mobj.FRACUNIT } }
+        for index, frame in frames do
+            gameModule.step(game, frame)
+            if index % 4 == 0 then
+                object = game.mobjs[player.moId]
+                table.insert(trace, { x = object.x / mobj.FRACUNIT, y = object.y / mobj.FRACUNIT })
+            end
+        end
+        demoTics = #frames
     end
     local frame, palette = render.automap(map, wad, trace)
     fs.write(output, render.ppm(frame, palette))
@@ -60,20 +68,23 @@ end
 
 function module.renderView(path: string, mapName: string, output: string, demoName: string?, demoTics: number?): any
     local wad, map = openMap(path, mapName)
-    local p = sim.new(map)
+    local game = gameModule.new(map)
     local advanced = 0
     if demoName then
-        local _, tics = demo.parse(wad:read(demoName))
-        local limit = math.min(#tics, demoTics or 0)
+        local _, frames = demo.parseFull(wad:read(demoName))
+        local limit = math.min(#frames, demoTics or #frames)
         for i = 1, limit do
-            local cmd = tics[i]
-            sim.tic(map, p, cmd.forward, cmd.side, cmd.turn)
+            gameModule.step(game, frames[i])
             advanced = i
         end
     end
-    local frame, palette = render.view(map, wad, p.x, p.y, p.angle)
+    local player = game.players[1]
+    local object = game.mobjs[player.moId]
+    local x, y = object.x / mobj.FRACUNIT, object.y / mobj.FRACUNIT
+    local angle = mobj.angleToDegrees(object.angle)
+    local frame, palette = render.view(map, wad, x, y, angle)
     fs.write(output, render.ppm(frame, palette))
-    return { output = output, map = mapName, x = p.x, y = p.y, angle = p.angle, demoTics = advanced }
+    return { output = output, map = mapName, x = x, y = y, angle = angle, demoTics = advanced }
 end
 
 -- Load a WAD map into the deterministic gameplay container. If source is a
@@ -184,13 +195,24 @@ end
 
 function module.run(path: string, mapName: string?, count: number, demoName: string?): any
     local wad = wadModule.open(path)
-    local game = module.load(path, mapName or "E1M1")
-    local commands = {}
+    local map = mapModule.load(wad, mapName or "E1M1")
+    local header, frames
+    local playerCount = 1
     if demoName then
-        local _, tics = demo.parse(wad:read(demoName))
-        commands = tics
+        header, frames = demo.parseFull(wad:read(demoName))
+        playerCount = 0
+        for _, enabled in header.players do
+            if enabled then playerCount += 1 end
+        end
     end
-    for index = 1, count do module.step(game, { commands[index] }) end
+    local game = gameModule.new(map, { playerCount = playerCount })
+    game.wad = wad
+    game.wadPath = path
+    game.mapName = map.name
+    for index = 1, count do
+        local command = if frames then frames[index] else nil
+        module.step(game, command)
+    end
     return game
 end
 
