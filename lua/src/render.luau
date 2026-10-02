@@ -3,7 +3,7 @@
 local paletteModule = require("@doom/palette")
 local patchModule = require("@doom/patch")
 local mapModule = require("@doom/map")
-local textureModule = require("@doom/texture")
+local rmain = require("./rmain")
 
 local module = {}
 export type Frame = { pixels: buffer, width: number, height: number }
@@ -66,101 +66,8 @@ function module.automap(map: any, wad: any, trace: {{x: number, y: number}}?): (
     return frame, palette
 end
 
-local function raySegment(px: number, py: number, rdx: number, rdy: number, ax: number, ay: number, bx: number, by: number): (number?, number?)
-    local sx, sy = bx - ax, by - ay
-    local den = rdx * sy - rdy * sx
-    if math.abs(den) < 1e-9 then return nil, nil end
-    local qx, qy = ax - px, ay - py
-    local t = (qx * sy - qy * sx) / den
-    local u = (qx * rdy - qy * rdx) / den
-    if t > 0.01 and u >= 0 and u <= 1 then return t, u end
-    return nil, nil
-end
-
-local function flatSample(wad: any, name: string, x: number, y: number): number?
-    if name == "F_SKY1" then return nil end
-    local lump = wad:find(name)
-    if not lump or lump.size < 4096 then return nil end
-    local xx = bit32.band(math.floor(x), 63)
-    local yy = bit32.band(-math.floor(y), 63)
-    return buffer.readu8(wad.data, lump.offset + yy * 64 + xx)
-end
-
 function module.view(map: any, wad: any, x: number, y: number, angle: number): (Frame, any)
-    local palette = paletteModule.fromPlaypal(wad:read("PLAYPAL"), 0)
-    local frame = module.frame(320, 200, 0)
-    local bank = textureModule.load(wad)
-    local colormap = wad:read("COLORMAP")
-    local sector = mapModule.sectorAt(map, x, y)
-    local eye = sector.floor + 41
-    local focal, center = 160, 100
-    local ang = math.rad(angle)
-
-    -- Current-sector flat casting gives the frame genuine WAD floor/ceiling pixels.
-    for sy = 0, frame.height - 1 do
-        if sy ~= center then
-            local planeZ = if sy > center then eye - sector.floor else sector.ceiling - eye
-            local perp = math.abs(planeZ * focal / (sy - center))
-            for sx = 0, frame.width - 1 do
-                local delta = math.atan((sx + 0.5 - 160) / focal)
-                local rayDist = perp / math.max(0.01, math.cos(delta))
-                local ra = ang + delta
-                local wx, wy = x + math.cos(ra) * rayDist, y + math.sin(ra) * rayDist
-                local name = if sy > center then sector.floorTex else sector.ceilingTex
-                local c = flatSample(wad, name, wx, wy)
-                if c == nil then c = if sy > center then palette:nearest(48, 40, 32) else palette:nearest(56, 56, 64) end
-                buffer.writeu8(frame.pixels, sy * frame.width + sx, c)
-            end
-        end
-    end
-
-    for sx = 0, frame.width - 1 do
-        local delta = math.atan((sx + 0.5 - 160) / focal)
-        local ra = ang + delta
-        local rdx, rdy = math.cos(ra), math.sin(ra)
-        local bestT, bestU, bestLine, bestSide = math.huge, 0, nil, nil
-        for _, l in map.lines do
-            -- One-sided geometry is solid. A two-sided middle texture is a masked/solid wall for this milestone.
-            local sideIndex = 65535
-            local playerCross = (map.vertices[l.v2].x - map.vertices[l.v1].x) * (y - map.vertices[l.v1].y) - (map.vertices[l.v2].y - map.vertices[l.v1].y) * (x - map.vertices[l.v1].x)
-            if playerCross <= 0 then sideIndex = l.right else sideIndex = l.left end
-            if sideIndex == 65535 then sideIndex = if l.right ~= 65535 then l.right else l.left end
-            local side = if sideIndex ~= 65535 then map.sides[sideIndex + 1] else nil
-            local solid = l.left == 65535 or l.right == 65535 or (side and side.middle ~= "" and side.middle ~= "-")
-            if solid then
-                local a, b = map.vertices[l.v1], map.vertices[l.v2]
-                local t, u = raySegment(x, y, rdx, rdy, a.x, a.y, b.x, b.y)
-                if t and t < bestT then bestT, bestU, bestLine, bestSide = t, u or 0, l, side end
-            end
-        end
-        if bestLine and bestSide then
-            local wallSector = map.sectors[bestSide.sector]
-            local perp = bestT * math.cos(delta)
-            local top = math.floor(center - (wallSector.ceiling - eye) * focal / perp)
-            local bottom = math.ceil(center - (wallSector.floor - eye) * focal / perp)
-            top = math.max(0, top); bottom = math.min(frame.height - 1, bottom)
-            local texName = bestSide.middle
-            if texName == "" or texName == "-" then texName = if bestSide.upper ~= "" and bestSide.upper ~= "-" then bestSide.upper else bestSide.lower end
-            local tex = bank:get(texName)
-            local a, b = map.vertices[bestLine.v1], map.vertices[bestLine.v2]
-            local lineLen = math.sqrt((b.x - a.x)^2 + (b.y - a.y)^2)
-            local tx = 0
-            if tex then tx = math.floor(bestU * lineLen + bestSide.xOffset) % tex.width end
-            local shade = math.clamp(math.floor(perp / 80) + math.floor((255 - wallSector.light) / 16), 0, 31)
-            for sy = top, bottom do
-                local color = palette:nearest(96, 80, 64)
-                if tex then
-                    local worldZ = eye + (center - sy) * perp / focal
-                    local ty = math.floor(wallSector.ceiling - worldZ + bestSide.yOffset) % tex.height
-                    local o = ty * tex.width + tx
-                    if buffer.readu8(tex.opaque, o) ~= 0 then color = buffer.readu8(tex.pixels, o) end
-                end
-                if buffer.len(colormap) >= 32 * 256 then color = buffer.readu8(colormap, shade * 256 + color) end
-                buffer.writeu8(frame.pixels, sy * frame.width + sx, color)
-            end
-        end
-    end
-    return frame, palette
+    return rmain.view(map, wad, x, y, angle)
 end
 
 function module.ppm(frame: Frame, palette: any): buffer return paletteModule.toPpm(frame.pixels, frame.width, frame.height, palette) end
