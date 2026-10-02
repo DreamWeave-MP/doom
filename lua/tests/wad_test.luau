@@ -286,7 +286,7 @@ suite.describe('maps', function()
 end)
 
 suite.describe('fixed-point movement', function()
-  local function twoSectorMap(step: number): mapModule.Map
+  local function twoSectorMap(step: number, special: number?): mapModule.Map
     local sectors = {
       { floor = 0, ceiling = 128, floorTex = 'FLOOR0', ceilingTex = 'CEIL0', light = 160, special = 0, tag = 0 },
       { floor = step, ceiling = 128, floorTex = 'FLOOR1', ceilingTex = 'CEIL0', light = 160, special = 0, tag = 0 },
@@ -294,13 +294,13 @@ suite.describe('fixed-point movement', function()
     return {
       name = 'STEPTEST',
       vertices = { { x = 0, y = -64 }, { x = 0, y = 64 } },
-      lines = { { v1 = 1, v2 = 2, flags = 0, special = 0, tag = 0, right = 0, left = 1 } },
+      lines = { { v1 = 1, v2 = 2, flags = 0, special = special or 0, tag = 0, right = 0, left = 1 } },
       sides = {
         { xOffset = 0, yOffset = 0, upper = '', lower = '', middle = '', sector = 1 },
         { xOffset = 0, yOffset = 0, upper = '', lower = '', middle = '', sector = 2 },
       },
       sectors = sectors,
-      things = {},
+      things = { { x = -20, y = 0, angle = 0, kind = 1, flags = 7 } },
       segs = {
         { v1 = 1, v2 = 2, line = 1, side = 0 },
         { v1 = 2, v2 = 1, line = 1, side = 1 },
@@ -325,6 +325,22 @@ suite.describe('fixed-point movement', function()
     blocked.floorz, blocked.ceilingz, blocked.z = 0, 128 * frac, 0
     expect(physics.tryMove(tooHigh, blocked, 20 * frac, 0)).toBe(false)
     expect(blocked.x).toBe(-20 * frac)
+  end)
+
+  suite.it('activates a cross-line exit only after the movement succeeds', function()
+    local frac = mobj.FRACUNIT
+    local map = twoSectorMap(0, 52)
+    local game = gameModule.new(map, { spawnMonsters = false })
+    local object = game.mobjs[game.players[1].moId]
+    expect(physics.tryMove(map, object, 20 * frac, 0, game)).toBe(true)
+    expect(game.specials.exited).toBe(true)
+    expect(map.lines[1].special).toBe(52)
+
+    local blockedMap = twoSectorMap(25, 52)
+    local blockedGame = gameModule.new(blockedMap, { spawnMonsters = false })
+    local blockedObject = blockedGame.mobjs[blockedGame.players[1].moId]
+    expect(physics.tryMove(blockedMap, blockedObject, 20 * frac, 0, blockedGame)).toBe(false)
+    expect(blockedGame.specials.exited).toBe(false)
   end)
 end)
 

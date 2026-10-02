@@ -6,6 +6,7 @@ local module = {}
 local fixedModule = require('@doom/fixed')
 local angleModule = require('@doom/angle')
 local mapModule = require('@doom/map')
+local specials = require './specials'
 
 module.FRACUNIT = mobj.FRACUNIT
 module.FRICTION = 0xe800
@@ -114,6 +115,11 @@ local function segmentsIntersect(ax: number, ay: number, bx: number, by: number,
     return fourth == 0 and onSegment(cx, cy, dx, dy, bx, by)
 end
 
+local function lineSide(x: number, y: number, ax: number, ay: number, bx: number, by: number): number
+    local cross = (bx - ax) * (y - ay) - (by - ay) * (x - ax)
+    return if cross < 0 then 0 else 1
+end
+
 function module.lineBlocksShot(map: any, x0: number, y0: number, x1: number, y1: number): boolean
     for _, line in map.lines do
         local a, b = map.vertices[line.v1], map.vertices[line.v2]
@@ -160,7 +166,7 @@ function module.floorAndCeiling(map: any, x: number, y: number): (number, number
     return sector.floor * module.FRACUNIT, sector.ceiling * module.FRACUNIT
 end
 
-function module.tryMove(map: any, object: mobj.Mobj, x: number, y: number): boolean
+function module.tryMove(map: any, object: mobj.Mobj, x: number, y: number, game: any?): boolean
     if bit32.band(object.flags, mobj.MF_NOCLIP) ~= 0 then
         object.x, object.y = x, y
         object.floorz, object.ceilingz = module.floorAndCeiling(map, x, y)
@@ -184,25 +190,42 @@ function module.tryMove(map: any, object: mobj.Mobj, x: number, y: number): bool
     end
     if targetFloor - currentFloor > module.MAX_STEP then return false end
     if targetCeiling - targetFloor < object.height then return false end
+    local oldX, oldY = object.x, object.y
     object.x, object.y = x, y
     object.floorz, object.ceilingz = targetFloor, targetCeiling
     if object.z < targetFloor then object.z = targetFloor end
+    if game and game.specials and bit32.band(object.flags, mobj.MF_NOCLIP) == 0 then
+        for index, line in map.lines do
+            if line.special ~= 0 then
+                local a, b = map.vertices[line.v1], map.vertices[line.v2]
+                if a and b then
+                    local ax, ay = a.x * module.FRACUNIT, a.y * module.FRACUNIT
+                    local bx, by = b.x * module.FRACUNIT, b.y * module.FRACUNIT
+                    local oldSide = lineSide(oldX, oldY, ax, ay, bx, by)
+                    local newSide = lineSide(x, y, ax, ay, bx, by)
+                    if oldSide ~= newSide and segmentsIntersect(oldX, oldY, x, y, ax, ay, bx, by) then
+                        specials.crossLine(game.specials, index, oldSide, object)
+                    end
+                end
+            end
+        end
+    end
     return true
 end
 
-function module.move(map: any, object: mobj.Mobj): boolean
+function module.move(map: any, object: mobj.Mobj, game: any?): boolean
     local max = module.MAXMOVE
     if object.momx > max then object.momx = max elseif object.momx < -max then object.momx = -max end
     if object.momy > max then object.momy = max elseif object.momy < -max then object.momy = -max end
     if object.momx == 0 and object.momy == 0 then return true end
 
     local nx, ny = object.x + object.momx, object.y + object.momy
-    if not module.tryMove(map, object, nx, ny) then
+    if not module.tryMove(map, object, nx, ny, game) then
         -- This is the useful player subset of P_SlideMove: try each component
         -- independently, retaining the component that was not blocked.
-        local movedX = module.tryMove(map, object, nx, object.y)
+        local movedX = module.tryMove(map, object, nx, object.y, game)
         if not movedX then object.momx = 0 end
-        local movedY = module.tryMove(map, object, object.x, ny)
+        local movedY = module.tryMove(map, object, object.x, ny, game)
         if not movedY then object.momy = 0 end
         if not movedX and not movedY then object.momx, object.momy = 0, 0 end
     end

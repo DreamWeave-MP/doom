@@ -188,7 +188,7 @@ end
 
 local function updateProjectile(game: any, projectile: any): number
     local nx, ny = projectile.x + projectile.momx, projectile.y + projectile.momy
-    if game.map and not physics.tryMove(game.map, projectile, nx, ny) then return explode(game, projectile, nil) end
+    if game.map and not physics.tryMove(game.map, projectile, nx, ny, game) then return explode(game, projectile, nil) end
     projectile.x, projectile.y = nx, ny
     local target = get(game, projectile.targetId or 0)
     for _, candidate in game.mobjs do
@@ -344,7 +344,7 @@ function module.chase(game: any, actorId: number, targetId: number?): string
     local speed = meta.speed * FRACUNIT
     local nx = actor.x + physics.fixedMul(speed, step.x)
     local ny = actor.y + physics.fixedMul(speed, step.y)
-    local moved = if game.map then physics.tryMove(game.map, actor, nx, ny) else false
+    local moved = if game.map then physics.tryMove(game.map, actor, nx, ny, game) else false
     if not moved then
         raw.movedir = (dir + 1 + randomByte(game) % 7) % 8
     end

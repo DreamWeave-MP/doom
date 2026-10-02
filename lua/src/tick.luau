@@ -123,7 +123,7 @@ local function playerThink(game: any, player: any, command: any?): ()
         physics.thrust(object, player.angle, cmd.forwardmove * 2048)
         physics.thrust(object, (player.angle - mobj.ANG90) % mobj.ANGLE_MAX, cmd.sidemove * 2048)
     end
-    physics.move(game.map, object)
+    physics.move(game.map, object, game)
     player.viewz = object.z + player.viewheight
     if player.damagecount > 0 then player.damagecount -= 1 end
 
