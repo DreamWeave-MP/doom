@@ -767,10 +767,11 @@ suite.describe('game tick', function()
 
   suite.it('reports per-player intermission counts and resets them on the next level', function()
     local path = writeFixture(fixture())
-    local game = doom.newGame(mapModule.load(wadModule.open(path), 'E1M1'), {
-      playerCount = 1,
-      spawnMonsters = false,
-    })
+    local map = mapModule.load(wadModule.open(path), 'E1M1')
+    table.insert(map.things, { x = 64, y = 24, angle = 0, kind = 3001, flags = 2 })
+    table.insert(map.things, { x = 80, y = 24, angle = 0, kind = 2011, flags = 2 })
+    map.sectors[1].special = 9
+    local game = doom.newGame(map, { playerCount = 1 })
     local player = game.players[1]
     local targetId = enemy.spawn(game, 3001, 64 * mobj.FRACUNIT, 24 * mobj.FRACUNIT, 0)
     enemy.damage(game, targetId, 1000, player.moId)
@@ -788,6 +789,9 @@ suite.describe('game tick', function()
       time = game.leveltime,
       frags = { 0, 0, 0, 0 },
     })
+    expect(game.flow.intermission.maxKills).toBe(1)
+    expect(game.flow.intermission.maxItems).toBe(1)
+    expect(game.flow.intermission.maxSecret).toBe(1)
 
     local nextMap = mapModule.load(wadModule.open(path), 'E1M1')
     nextMap.sectors[1].special = 5
@@ -799,6 +803,9 @@ suite.describe('game tick', function()
     expect(bit32.band(game.mobjs[game.players[1].moId].flags, mobj.MF_SHADOW) ~= 0).toBe(true)
     expect(game.specials.map).toBe(game.map)
     expect(game.specials.game).toBe(game)
+    expect(game.totalKills).toBe(0)
+    expect(game.totalItems).toBe(0)
+    expect(game.totalSecret).toBe(0)
     doom.step(game)
     expect(game.players[1].health).toBe(90)
   end)

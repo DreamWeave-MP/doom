@@ -63,6 +63,7 @@ function module.new(map: any, options: any?): Game
         netgame = settings.netgame == true,
         totalKills = 0,
         totalItems = 0,
+        totalSecret = 0,
         players = {},
         mobjs = {},
         thinkers = {},
