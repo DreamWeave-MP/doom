@@ -1,8 +1,7 @@
 --!strict
 -- Luau-owned Doom deathmatch orchestration over dream.net's opaque transport handles.
 local wire = require './net'
-local flow = require './flow'
-local state = require './state'
+local play = require './play/api'
 
 local module = {}
 local MaxPlayers = 4
@@ -42,25 +41,17 @@ local function localCommand(command: wire.TicCmd): any
     }
 end
 
-local function flowHash(game: any): string
-    local snapshot = flow.snapshot(game)
-    -- The console player is a per-client view preference, not authoritative world
-    -- state; omit it so independently running clients can compare their simulations.
-    snapshot.flow.consolePlayer = 0
-    return state.hash(snapshot)
+-- The digest covers only what steers the simulation, so every peer computes
+-- the same one whichever slot is its console player.
+function module.stateHash(_game: any): string
+    return play.hash()
 end
 
-module.stateHash = flowHash
-
+-- Wire slots are 1 to 4; the simulation's are 0 to 3.
 local function copySlots(game: any): {number}
     local result = {}
-    local slots = if game.flow and game.flow.activeSlots then game.flow.activeSlots else nil
-    if slots then
-        for _, slot in slots do table.insert(result, slot) end
-    else
-        for index = 1, math.min(#game.players, MaxPlayers) do
-            table.insert(result, index)
-        end
+    for slot = 1, MaxPlayers do
+        if game.playeringame[slot - 1] then table.insert(result, slot) end
     end
 
     if #result == 0 or #result > MaxPlayers then
@@ -150,9 +141,9 @@ function module.serverTic(host: Host): any
     local tic = host.game.gametic
     local inputs = {}
     for _, slot in host.slots do
-        inputs[slot] = localCommand(host.commands[slot] or neutral())
+        inputs[slot - 1] = localCommand(host.commands[slot] or neutral())
     end
-    flow.applyDemoFrame(host.game, inputs)
+    play.tick(inputs)
 
     for _, slot in host.slots do
         local bundle: wire.TicBundle = {
@@ -232,8 +223,8 @@ function module.clientTic(client: Client, command: wire.TicCmd): (any, boolean?)
     end
 
     local inputs = {}
-    for _, slot in client.slots do inputs[slot] = localCommand(row[slot]) end
-    flow.applyDemoFrame(client.game, inputs)
+    for _, slot in client.slots do inputs[slot - 1] = localCommand(row[slot]) end
+    play.tick(inputs)
     client.bundles[tic] = nil
 
     local expected = client.hashes[client.game.gametic]

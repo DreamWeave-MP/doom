@@ -5,7 +5,7 @@ id = "org.dreamweave.doom"
 version = "0.1.0"
 jess_api = "1"
 include = ["src", "bin", "README.md", "LICENSE.TXT"]
-tests = ["tests/wad_test.luau", "tests/net_test.luau"]
+tests = ["tests/wad_test.luau", "tests/net_test.luau", "tests/play_test.luau"]
 
 [modules]
 "@doom/fixed" = "src/fixed.luau"
@@ -18,24 +18,14 @@ tests = ["tests/wad_test.luau", "tests/net_test.luau"]
 "@doom/map" = "src/map.luau"
 "@doom/render" = "src/render.luau"
 "@doom/texture" = "src/texture.luau"
-"@doom/sim" = "src/sim.luau"
 "@doom/demo" = "src/demo.luau"
 "@doom/state" = "src/state.luau"
 "@doom/save" = "src/save.luau"
 "@doom/net" = "src/net.luau"
 "@doom/netgame" = "src/netgame.luau"
-"@doom/game" = "src/game.luau"
-"@doom/mobj" = "src/mobj.luau"
-"@doom/physics" = "src/physics.luau"
-"@doom/tick" = "src/tick.luau"
-"@doom/info" = "src/info.luau"
-"@doom/enemy" = "src/enemy.luau"
-"@doom/weapons" = "src/weapons.luau"
-"@doom/inter" = "src/inter.luau"
-"@doom/specials" = "src/specials.luau"
-"@doom/flow" = "src/flow.luau"
 "@doom/rthings" = "src/rthings.luau"
 "@doom/play" = "src/play/api.luau"
+"@doom/agent" = "src/agent.luau"
 "@doom" = "src/init.luau"
 
 [[layer]]
@@ -51,24 +41,14 @@ exports = [
   "@doom/map",
   "@doom/render",
   "@doom/texture",
-  "@doom/sim",
   "@doom/demo",
   "@doom/state",
   "@doom/save",
   "@doom/net",
   "@doom/netgame",
-  "@doom/game",
-  "@doom/mobj",
-  "@doom/physics",
-  "@doom/tick",
-  "@doom/info",
-  "@doom/enemy",
-  "@doom/weapons",
-  "@doom/inter",
-  "@doom/specials",
-  "@doom/flow",
   "@doom/rthings",
   "@doom/play",
+  "@doom/agent",
   "@doom",
 ]
 

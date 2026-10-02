@@ -1,9 +1,7 @@
 --!strict
 -- Luau-owned headless DOOM deathmatch server. Each slot's token is an opaque credential;
 -- the native dream.net userdata retains the signing key, while all simulation remains here.
-local doom = require '@doom'
-local wadModule = require '@doom/wad'
-local mapModule = require '@doom/map'
+local play = require '@doom/play'
 local net = require '@doom/net'
 local netgame = require '@doom/netgame'
 
@@ -29,22 +27,20 @@ if ticCount < 1 or ticCount ~= math.floor(ticCount) then
     error('tics must be a positive integer')
 end
 
-local wad = wadModule.open(wadPath)
-local map = mapModule.load(wad, mapName)
-local slots = {}
+local present = {}
 for slot = 1, playerCount do
-    slots[slot] = slot
+    present[slot] = true
 end
 
-local game = doom.flow.newGame(map, {
-    playerCount = playerCount,
-    activeSlots = slots,
-    consolePlayer = 1,
-    deathmatch = true,
+local game = play.new(wadPath, {
+    mapName = mapName,
+    players = present,
+    consoleplayer = 0,
+    deathmatch = 1,
     netgame = true,
-    mode = if string.sub(map.name, 1, 3) == 'MAP' then 'doom2' else 'doom',
+    nomonsters = true,
+    skill = 3,
 })
-game.wad, game.wadPath, game.mapName = wad, wadPath, map.name
 
 local host = netgame.newHost(game, address, net.PROTOCOL_ID)
 local tokens = {}
@@ -52,7 +48,7 @@ for slot = 1, playerCount do
     tokens[slot] = netgame.connectToken(host, slot)
 end
 jess.fs.write(tokenPath, table.concat(tokens, '\n') .. '\n')
-print(`DOOM host {map.name} at {host.server.handle.address}; {playerCount} tokens written to {tokenPath}`)
+print(`DOOM host {game.mapname} at {host.server.handle.address}; {playerCount} tokens written to {tokenPath}`)
 
 local connectDeadline = os.clock() + 30
 while host.server.handle.numConnected < playerCount and os.clock() < connectDeadline do
