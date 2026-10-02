@@ -129,6 +129,7 @@ function module.load(path: string, mapName: string?, source: any?): any
 end
 
 function module.step(game: any, commands: any?): any
+    if game and game.flow then return flow.applyDemoFrame(game, commands) end
     return gameModule.step(game, commands)
 end
 

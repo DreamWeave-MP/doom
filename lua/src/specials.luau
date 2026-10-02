@@ -754,7 +754,7 @@ local function activate(runtime: Runtime, line: any, value: any, side: number, f
     return started
 end
 
-local oneShotCross: {[number]: boolean} = {[2]=true,[3]=true,[4]=true,[5]=true,[6]=true,[8]=true,[10]=true,[12]=true,[13]=true,[16]=true,[17]=true,[19]=true,[22]=true,[25]=true,[30]=true,[35]=true,[36]=true,[37]=true,[38]=true,[39]=true,[40]=true,[44]=true,[52]=true,[53]=true,[54]=true,[56]=true,[57]=true,[58]=true,[59]=true,[100]=true,[104]=true,[108]=true,[109]=true,[110]=true,[119]=true,[121]=true,[124]=true,[125]=true,[130]=true,[141]=true}
+local oneShotCross: {[number]: boolean} = {[2]=true,[3]=true,[4]=true,[5]=true,[6]=true,[8]=true,[10]=true,[12]=true,[13]=true,[16]=true,[17]=true,[19]=true,[22]=true,[25]=true,[30]=true,[35]=true,[36]=true,[37]=true,[38]=true,[39]=true,[40]=true,[44]=true,[51]=true,[52]=true,[53]=true,[54]=true,[56]=true,[57]=true,[58]=true,[59]=true,[100]=true,[104]=true,[108]=true,[109]=true,[110]=true,[119]=true,[121]=true,[124]=true,[125]=true,[130]=true,[141]=true}
 local retriggerCross: {[number]: boolean} = {[72]=true,[73]=true,[74]=true,[75]=true,[76]=true,[77]=true,[79]=true,[80]=true,[81]=true,[82]=true,[83]=true,[84]=true,[86]=true,[87]=true,[88]=true,[89]=true,[90]=true,[91]=true,[92]=true,[93]=true,[94]=true,[95]=true,[96]=true,[97]=true,[98]=true,[105]=true,[106]=true,[107]=true,[120]=true,[126]=true,[128]=true,[129]=true}
 
 local function tickMover(runtime: Runtime, mover: any): ()

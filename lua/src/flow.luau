@@ -434,6 +434,11 @@ function module.applyDemoFrame(game: FlowGame, frame: any?): FlowGame
         end
     end
 
+    local runtime = game.specials
+    if runtime and runtime.exited then
+        module.completeLevel(game, { secretExit = runtime.secretExit })
+    end
+
     state.demoTics += 1
     if state.timedemo then state.timedemoTics += 1 end
     game.demoTics = state.demoTics

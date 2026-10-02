@@ -374,6 +374,29 @@ suite.describe('fixed-point movement', function()
     expect(blockedGame.specials.exited).toBe(false)
   end)
 
+  suite.it('turns normal and secret cross-line exits into the matching intermission', function()
+    local function crossExit(special: number): any
+      local game = doom.newGame(twoSectorMap(0, special), { spawnMonsters = false })
+      local player = game.players[1]
+      local object = game.mobjs[player.moId]
+      object.x = -mobj.FRACUNIT
+      doom.step(game, { forwardmove = 64 })
+      return game
+    end
+
+    local normal = crossExit(52)
+    expect(normal.specials.exited).toBe(true)
+    expect(normal.flow.state).toBe('intermission')
+    expect(normal.flow.intermission.nextName).toBe('E1M2')
+    expect(normal.flow.secretExit).toBe(false)
+
+    local secret = crossExit(51)
+    expect(secret.specials.exited).toBe(true)
+    expect(secret.flow.state).toBe('intermission')
+    expect(secret.flow.intermission.nextName).toBe('E1M9')
+    expect(secret.flow.secretExit).toBe(true)
+  end)
+
   suite.it('uses the nearest special line in front of the player within reach', function()
     local frac = mobj.FRACUNIT
     local map = twoSectorMap(0, 11)
@@ -453,6 +476,11 @@ suite.describe('fixed-point movement', function()
     expect(game.players[1].kills).toBe(1)
     expect(game.players[1].killcount).toBe(0)
     expect(game.flow.frags[1][2]).toBe(1)
+    local restoredRecord = save.load(save.save(doom.stateSnapshot(game)))
+    local restored = startDeathmatch(deathmatchMap())
+    doom.flow.restore(restored, restoredRecord)
+    expect(restored.players[2].deathSourceId).toBe(restored.players[1].moId)
+    expect(restored.flow.frags[1][2]).toBe(1)
 
     local hazardMap = deathmatchMap()
     hazardMap.sectors[1].special, hazardMap.sectors[2].special = 5, 5
