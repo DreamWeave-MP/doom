@@ -166,12 +166,26 @@ function module.floorAndCeiling(map: any, x: number, y: number): (number, number
     return sector.floor * module.FRACUNIT, sector.ceiling * module.FRACUNIT
 end
 
+local function blockedByThing(game: any, object: mobj.Mobj, x: number, y: number): boolean
+    if not game then return false end
+    for _, other in game.mobjs do
+        if other ~= object and not other.removed and bit32.band(other.flags, mobj.MF_SOLID) ~= 0
+            and object.z < other.z + other.height and object.z + object.height > other.z
+            and math.abs(x - other.x) < object.radius + other.radius
+            and math.abs(y - other.y) < object.radius + other.radius then
+            return true
+        end
+    end
+    return false
+end
+
 function module.tryMove(map: any, object: mobj.Mobj, x: number, y: number, game: any?): boolean
     if bit32.band(object.flags, mobj.MF_NOCLIP) ~= 0 then
         object.x, object.y = x, y
         object.floorz, object.ceilingz = module.floorAndCeiling(map, x, y)
         return true
     end
+    if blockedByThing(game, object, x, y) then return false end
 
     local currentFloor = object.floorz
     local targetFloor, targetCeiling = module.floorAndCeiling(map, x, y)

@@ -328,6 +328,19 @@ suite.describe('fixed-point movement', function()
     expect(blocked.x).toBe(-20 * frac)
   end)
 
+  suite.it('blocks movement into overlapping solid mobjs but ignores nonsolid mobjs', function()
+    local frac = mobj.FRACUNIT
+    local map = twoSectorMap(0)
+    local game = gameModule.new(map, { spawnMonsters = false })
+    local player = game.mobjs[game.players[1].moId]
+    local blocker = mobj.newMobj(#game.mobjs + 1, 3001, -50 * frac, 0, 0, mobj.MF_SOLID, 100)
+    table.insert(game.mobjs, blocker)
+
+    expect(physics.tryMove(map, player, -25 * frac, 0, game)).toBe(false)
+    blocker.flags = 0
+    expect(physics.tryMove(map, player, -25 * frac, 0, game)).toBe(true)
+  end)
+
   suite.it('activates a cross-line exit only after the movement succeeds', function()
     local frac = mobj.FRACUNIT
     local map = twoSectorMap(0, 52)
