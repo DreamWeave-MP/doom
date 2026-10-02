@@ -8,6 +8,7 @@ require('./pmobj')
 require('./penemy')
 require('./pspec')
 require('./game')
+require('./save')
 
 local wadModule = require('../wad')
 local demoModule = require('../demo')
@@ -59,6 +60,17 @@ function module.command(action: Action): any
     angleturn = turn,
     buttons = buttons,
   }
+end
+
+-- The whole game as bytes, and back. A restored game continues on the same WAD.
+function module.save(): buffer
+  return P.Save()
+end
+
+function module.load(wad: any, data: buffer): any
+  if type(wad) == 'string' then wad = wadModule.open(wad) end
+  P.Restore(wad, data)
+  return G
 end
 
 local function mix(hash: number, value: number): number
@@ -211,6 +223,45 @@ function module.summary(): any
   }
 end
 
+local ItemNames = {
+  ARM1 = 'green armor',
+  ARM2 = 'blue armor',
+  BON1 = 'health bonus',
+  BON2 = 'armor bonus',
+  SOUL = 'soulsphere',
+  MEGA = 'megasphere',
+  STIM = 'stimpack',
+  MEDI = 'medikit',
+  PINV = 'invulnerability',
+  PSTR = 'berserk',
+  PINS = 'invisibility',
+  SUIT = 'radiation suit',
+  PMAP = 'computer map',
+  PVIS = 'light goggles',
+  CLIP = 'clip',
+  AMMO = 'box of bullets',
+  ROCK = 'rocket',
+  BROK = 'box of rockets',
+  CELL = 'cell',
+  CELP = 'cell pack',
+  SHEL = 'shells',
+  SBOX = 'box of shells',
+  BPAK = 'backpack',
+  BFUG = 'bfg',
+  MGUN = 'chaingun',
+  CSAW = 'chainsaw',
+  LAUN = 'rocket launcher',
+  PLAS = 'plasma rifle',
+  SHOT = 'shotgun',
+  SGN2 = 'super shotgun',
+  BKEY = 'blue key',
+  YKEY = 'yellow key',
+  RKEY = 'red key',
+  BSKU = 'blue skull key',
+  YSKU = 'yellow skull key',
+  RSKU = 'red skull key',
+}
+
 local function category(mo: any): string
   if mo.player then return 'player' end
 
@@ -274,11 +325,11 @@ function module.observe(slot: number, range: number?): any
         local dist = P.AproxDistance(other.x - mo.x, other.y - mo.y)
         if dist <= limit and P.CheckSight(mo, other) then
           local bearing = degrees((P.PointToAngle2(mo.x, mo.y, other.x, other.y) - mo.angle) % U32)
-          if bearing > 180 then bearing -= 360 end
+          if bearing > 180 then bearing = math.floor((bearing - 360) * 10 + 0.5) / 10 end
 
           table.insert(things, {
             kind = kind,
-            type = string.lower(string.sub(other.info.name, 4)),
+            type = if kind == 'item' then ItemNames[other.sprite] or other.sprite else string.lower(string.sub(other.info.name, 4)),
             slot = if other.player then other.player.index else nil,
             distance = dist // FRACUNIT,
             bearing = bearing,

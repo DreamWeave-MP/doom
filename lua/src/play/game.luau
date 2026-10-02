@@ -56,6 +56,8 @@ local function blankPlayer(player: any, index: number): ()
   player.didsecret = false
 end
 
+P.SetFastTables = setFastTables
+
 function P.PlayerReborn(index: number): ()
   blankPlayer(G.players[index], index)
 end
