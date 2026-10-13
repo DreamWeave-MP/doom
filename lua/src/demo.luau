@@ -64,14 +64,7 @@ local function readHeader(data: buffer): Header
         players = players,
     }
 
-    local active = 0
-    for _, yes in players do
-        if yes then
-            active += 1
-        end
-    end
-
-    if active == 0 then
+    if not any[for present in players => present] then
         fail('demo: no players')
     end
 

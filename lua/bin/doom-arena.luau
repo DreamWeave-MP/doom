@@ -41,10 +41,7 @@ for slot = 0, playerCount - 1 do
   recent[slot], deaths[slot], wasAlive[slot], lastFrags[slot] = {}, 0, true, { 0, 0, 0, 0 }
 end
 
-local everyone = {}
-for slot = 0, playerCount - 1 do
-  table.insert(everyone, slot)
-end
+local everyone = [for slot in range(0, playerCount - 1) => slot]
 
 local function note(slots: { number }, text: string): ()
   local line = `tic {game.gametic}: {text}`

@@ -176,14 +176,12 @@ end
 
 local function playerSummary(player: any): any
   local mo = player.mo
-  local ammo, weapons = {}, {}
+  local ammo = {}
   for index = 0, 3 do
     ammo[AmmoNames[index]] = player.ammo[index]
   end
 
-  for index = 0, 8 do
-    if player.weaponowned[index] then table.insert(weapons, WeaponNames[index]) end
-  end
+  local weapons = [for index in range(0, 8) if player.weaponowned[index] => WeaponNames[index]]
 
   return {
     slot = player.index,
@@ -205,10 +203,7 @@ local function playerSummary(player: any): any
 end
 
 function module.summary(): any
-  local players = {}
-  for index = 0, 3 do
-    if G.playeringame[index] then table.insert(players, playerSummary(G.players[index])) end
-  end
+  local players = [for index in range(0, 3) if G.playeringame[index] => playerSummary(G.players[index])]
 
   return {
     map = G.mapname,

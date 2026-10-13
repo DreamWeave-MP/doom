@@ -49,10 +49,7 @@ end
 
 -- Wire slots are 1 to 4; the simulation's are 0 to 3.
 local function copySlots(game: any): {number}
-    local result = {}
-    for slot = 1, MaxPlayers do
-        if game.playeringame[slot - 1] then table.insert(result, slot) end
-    end
+    local result = [for slot in range(1, MaxPlayers) if game.playeringame[slot - 1] => slot]
 
     if #result == 0 or #result > MaxPlayers then
         error('doom.netgame: game must have one to four active players', 2)
