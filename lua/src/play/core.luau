@@ -299,42 +299,36 @@ local function loadGeometry(wad: any, marker: string): ()
   local blockmap = data
 
   data = lump('VERTEXES')
-  local vertexes = table.create(buffer.len(data) // 4)
-  for at = 0, buffer.len(data) - 4, 4 do
-    table.insert(vertexes, { x = buffer.readi16(data, at) * FRACUNIT, y = buffer.readi16(data, at + 2) * FRACUNIT })
-  end
+  local vertexes = [for at in range(0, buffer.len(data) - 4, 4) => {
+    x = buffer.readi16(data, at) * FRACUNIT,
+    y = buffer.readi16(data, at + 2) * FRACUNIT,
+  }]
 
   data = lump('SECTORS')
-  local sectors = table.create(buffer.len(data) // 26)
-  for at = 0, buffer.len(data) - 26, 26 do
-    table.insert(sectors, {
-      index = #sectors,
-      floorheight = buffer.readi16(data, at) * FRACUNIT,
-      ceilingheight = buffer.readi16(data, at + 2) * FRACUNIT,
-      floorpic = name8(data, at + 4),
-      ceilingpic = name8(data, at + 12),
-      lightlevel = buffer.readi16(data, at + 20),
-      special = buffer.readi16(data, at + 22),
-      tag = buffer.readi16(data, at + 24),
-      soundtraversed = 0,
-      validcount = 0,
-      lines = {},
-      blockbox = { 0, 0, 0, 0 },
-    })
-  end
+  local sectors = [for at in range(0, buffer.len(data) - 26, 26) => {
+    index = at // 26,
+    floorheight = buffer.readi16(data, at) * FRACUNIT,
+    ceilingheight = buffer.readi16(data, at + 2) * FRACUNIT,
+    floorpic = name8(data, at + 4),
+    ceilingpic = name8(data, at + 12),
+    lightlevel = buffer.readi16(data, at + 20),
+    special = buffer.readi16(data, at + 22),
+    tag = buffer.readi16(data, at + 24),
+    soundtraversed = 0,
+    validcount = 0,
+    lines = {},
+    blockbox = { 0, 0, 0, 0 },
+  }]
 
   data = lump('SIDEDEFS')
-  local sides = table.create(buffer.len(data) // 30)
-  for at = 0, buffer.len(data) - 30, 30 do
-    table.insert(sides, {
-      textureoffset = buffer.readi16(data, at) * FRACUNIT,
-      rowoffset = buffer.readi16(data, at + 2) * FRACUNIT,
-      toptexture = P.TextureNum(name8(data, at + 4)),
-      bottomtexture = P.TextureNum(name8(data, at + 12)),
-      midtexture = P.TextureNum(name8(data, at + 20)),
-      sector = sectors[buffer.readi16(data, at + 28) + 1],
-    })
-  end
+  local sides = [for at in range(0, buffer.len(data) - 30, 30) => {
+    textureoffset = buffer.readi16(data, at) * FRACUNIT,
+    rowoffset = buffer.readi16(data, at + 2) * FRACUNIT,
+    toptexture = P.TextureNum(name8(data, at + 4)),
+    bottomtexture = P.TextureNum(name8(data, at + 12)),
+    midtexture = P.TextureNum(name8(data, at + 20)),
+    sector = sectors[buffer.readi16(data, at + 28) + 1],
+  }]
 
   data = lump('LINEDEFS')
   local lines = table.create(buffer.len(data) // 14)
@@ -372,22 +366,19 @@ local function loadGeometry(wad: any, marker: string): ()
   end
 
   data = lump('SSECTORS')
-  local subsectors = table.create(buffer.len(data) // 4)
-  for at = 0, buffer.len(data) - 4, 4 do
-    table.insert(subsectors, { numlines = buffer.readu16(data, at), firstline = buffer.readu16(data, at + 2) })
-  end
+  local subsectors = [for at in range(0, buffer.len(data) - 4, 4) => {
+    numlines = buffer.readu16(data, at),
+    firstline = buffer.readu16(data, at + 2),
+  }]
 
   data = lump('NODES')
-  local nodes = table.create(buffer.len(data) // 28)
-  for at = 0, buffer.len(data) - 28, 28 do
-    table.insert(nodes, {
-      x = buffer.readi16(data, at) * FRACUNIT,
-      y = buffer.readi16(data, at + 2) * FRACUNIT,
-      dx = buffer.readi16(data, at + 4) * FRACUNIT,
-      dy = buffer.readi16(data, at + 6) * FRACUNIT,
-      children = { buffer.readu16(data, at + 24), buffer.readu16(data, at + 26) },
-    })
-  end
+  local nodes = [for at in range(0, buffer.len(data) - 28, 28) => {
+    x = buffer.readi16(data, at) * FRACUNIT,
+    y = buffer.readi16(data, at + 2) * FRACUNIT,
+    dx = buffer.readi16(data, at + 4) * FRACUNIT,
+    dy = buffer.readi16(data, at + 6) * FRACUNIT,
+    children = { buffer.readu16(data, at + 24), buffer.readu16(data, at + 26) },
+  }]
 
   data = lump('SEGS')
   local segs = table.create(buffer.len(data) // 12)
