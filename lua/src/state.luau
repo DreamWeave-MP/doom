@@ -2,6 +2,8 @@
 -- Versioned, deterministic state values. This is intentionally a small binary
 -- format rather than JSON: map order is canonical and IEEE-754 numbers retain
 -- their exact Luau representation.
+local bytes = require '@dream/bytes'
+
 local module = {}
 
 export type Value = nil | boolean | number | string | buffer | {[any]: Value}
@@ -243,53 +245,13 @@ function module.decode(data: buffer): any
     return value
 end
 
-local function byteAt(data: buffer | string, at: number): number
-    if type(data) == 'string' then
-        local value = string.byte(data, at + 1)
-        if value == nil then
-            fail('state: invalid hash input')
-        end
-        return value
-    end
-    return buffer.readu8(data, at)
-end
-
-local function byteLength(data: buffer | string): number
-    return if type(data) == 'string' then #data else buffer.len(data)
-end
-
+-- FNV-1a as lower-case hexadecimal, the most significant digit first.
 local function fnv64(data: buffer | string): string
-    -- Four little-endian 16-bit limbs avoid lossy >2^53 multiplication.
-    local a0, a1, a2, a3 = 0x2325, 0x8422, 0x9ce4, 0xcbf2
-    for index = 0, byteLength(data) - 1 do
-        a0 = bit32.bxor(a0, byteAt(data, index))
-        local n0 = a0 * 0x1b3
-        local r0 = n0 % 0x10000
-        local carry = math.floor(n0 / 0x10000)
-        local n1 = a1 * 0x1b3 + carry
-        local r1 = n1 % 0x10000
-        carry = math.floor(n1 / 0x10000)
-        local n2 = a2 * 0x1b3 + a0 * 0x100 + carry
-        local r2 = n2 % 0x10000
-        carry = math.floor(n2 / 0x10000)
-        local n3 = a3 * 0x1b3 + a1 * 0x100 + carry
-        local r3 = n3 % 0x10000
-        a0, a1, a2, a3 = r0, r1, r2, r3
-    end
-    return string.format('%04x%04x%04x%04x', a3, a2, a1, a0)
+    return bytes.toHex(bytes.digest(data, 'fnv1a64'))
 end
 
 local function fnv32(data: buffer | string): string
-    local lo, hi = 0x9dc5, 0x811c
-    for index = 0, byteLength(data) - 1 do
-        lo = bit32.bxor(lo, byteAt(data, index))
-        local product = lo * 0x193
-        local nextLo = product % 0x10000
-        local carry = math.floor(product / 0x10000)
-        local nextHi = (hi * 0x193 + lo * 0x100 + carry) % 0x10000
-        lo, hi = nextLo, nextHi
-    end
-    return string.format('%04x%04x', hi, lo)
+    return string.format('%08x', bytes.fnv1a32(data))
 end
 
 function module.fnv1a64(data: buffer | string): string
