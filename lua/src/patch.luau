@@ -38,6 +38,9 @@ function module.draw(
   local originX = (left or 0) - patch.left
   local originY = (top or 0) - patch.top
   local data = patch.data
+  -- A post at a whole row of a screen with a whole height is clipped once. Anything else, a
+  -- fraction or no number at all, is tested a row at a time, as every post used to be.
+  local whole = originY % 1 == 0 and screenHeight % 1 == 0
   for column = 0, patch.width - 1 do
     local screenColumn = originX + column
     local at = buffer.readu32(data, 8 + column * 4)
@@ -55,9 +58,15 @@ function module.draw(
       at += 2 -- length, then the unused leading byte
       if at + length + 1 > buffer.len(data) then error('patch: truncated pixels', 2) end
 
-      if screenColumn >= 0 and screenColumn < screenWidth then
+      local postTop = originY + topDelta
+      local onScreen = screenColumn >= 0 and screenColumn < screenWidth
+      if onScreen and whole then
+        for row = math.max(0, -postTop), math.min(length - 1, screenHeight - 1 - postTop) do
+          buffer.writeu8(frame, (postTop + row) * screenWidth + screenColumn, buffer.readu8(data, at + row))
+        end
+      elseif onScreen then
         for row = 0, length - 1 do
-          local screenRow = originY + topDelta + row
+          local screenRow = postTop + row
           if screenRow >= 0 and screenRow < screenHeight then
             buffer.writeu8(frame, screenRow * screenWidth + screenColumn, buffer.readu8(data, at + row))
           end
