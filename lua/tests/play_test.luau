@@ -4,6 +4,7 @@
 -- needs no game data, and whole-demo playback on the IWADs when they sit in the
 -- working folder (they are never part of the package).
 local agent = require '@doom/agent'
+local bytes = require '@dream/bytes'
 local play = require '@doom/play'
 local test = require '@jess/test'
 local wadModule = require '@doom/wad'
@@ -360,6 +361,55 @@ suite.describe('play rules on a synthetic room', function()
     local game = play.new(roomWad { things = { { 256, 64, 90, 1 } } })
     expect(engine.PointInSubsector(400 * FRACUNIT, 30 * FRACUNIT)).toBe(game.subsectors[1])
     expect(sees(300, 250, 450, 262)).toBe(true)
+  end)
+
+  suite.it('writes a save as numbered tables, a table numbering its keyed part before its array part', function()
+    local path = roomWad { things = { { 256, 64, 90, 1 } } }
+    local game = play.new(path)
+    table.clear(game)
+
+    local shared = { 7 }
+    game[1], game[2], game[3], game[4] = 1.5, 'two', true, shared
+    game.only = { false, shared, buffer.fromstring 'raw' }
+
+    expect(bytes.toHex(play.save())).toBe(table.concat {
+      -- The magic and the count of tables.
+      '44504c5902',
+      '03000000',
+      -- The game, four in its array part and one keyed: 1.5, 'two', true and table 3, then
+      -- 'only', which is table 2 though `shared` comes before it here.
+      '04000000',
+      '01000000',
+      '01000000000000f83f',
+      '020300000074776f',
+      '03',
+      '0503000000',
+      '02040000006f6e6c79',
+      '0502000000',
+      -- `only`: false, table 3 and a buffer.
+      '03000000',
+      '00000000',
+      '04',
+      '0503000000',
+      '0603000000726177',
+      -- `shared`: 7.
+      '01000000',
+      '00000000',
+      '010000000000001c40',
+    })
+
+    game.unsaved = print
+    expect(function() play.save() end).toThrow 'doom save: cannot store a function'
+
+    game.unsaved = nil
+    local restored = play.load(path, play.save())
+    expect(restored).toBe(game)
+    expect({ restored[1], restored[2], restored[3] }).toEqual { 1.5, 'two', true }
+    expect(restored.only[2]).toBe(restored[4])
+    expect(buffer.tostring(restored.only[3])).toBe 'raw'
+    expect(restored[4][1]).toBe(7)
+
+    play.new(path)
   end)
 end)
 
