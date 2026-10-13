@@ -197,7 +197,7 @@ function P.PointInSubsector(x: number, y: number): any
         back = (lineDy < 0) ~= (dx < 0)
       else
         local right = FixedMul(dy, buffer.readf64(nodes, at + 32))
-        back = right >= FixedMul(buffer.readf64(nodes, at + 40), dx)
+        back = not (right < FixedMul(buffer.readf64(nodes, at + 40), dx))
       end
     end
 

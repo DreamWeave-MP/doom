@@ -916,23 +916,20 @@ function P.CheckSight(t1: any, t2: any): boolean
   local child = if count == 0 then 0x8000 else count - 1
   while true do
     -- P_CrossBSPNode: P_DivlineSide of the viewer and of the target against each partition, the
-    -- viewer's 2 (on the line) already taken for the front.
+    -- viewer's 2 (on the line) already taken for the front. Each comparison is P_DivlineSide's
+    -- own, in its order, so a NaN or an infinity takes the branch it took there.
     while child < 0x8000 do
       local at = child * 64
       local lineX, lineY = buffer.readf64(nodes, at), buffer.readf64(nodes, at + 8)
       local lineDx, lineDy = buffer.readf64(nodes, at + 16), buffer.readf64(nodes, at + 24)
       local side, across = 0, 2
       if lineDx == 0 then
-        if fromX < lineX then
-          side = if lineDy > 0 then 1 else 0
-        elseif fromX > lineX then
-          side = if lineDy < 0 then 1 else 0
+        if fromX ~= lineX then
+          if fromX <= lineX then side = if lineDy > 0 then 1 else 0 else side = if lineDy < 0 then 1 else 0 end
         end
 
-        if toX < lineX then
-          across = if lineDy > 0 then 1 else 0
-        elseif toX > lineX then
-          across = if lineDy < 0 then 1 else 0
+        if toX ~= lineX then
+          if toX <= lineX then across = if lineDy > 0 then 1 else 0 else across = if lineDy < 0 then 1 else 0 end
         end
       elseif lineDy == 0 then
         if fromX ~= lineY then
@@ -946,13 +943,13 @@ function P.CheckSight(t1: any, t2: any): boolean
         local wholeDx, wholeDy = buffer.readf64(nodes, at + 32), buffer.readf64(nodes, at + 40)
         local left = wholeDy * ((fromX - lineX) // 65536)
         local right = ((fromY - lineY) // 65536) * wholeDx
-        if right > left then side = 1 end
+        if not (right <= left) then side = 1 end
 
         left = wholeDy * ((toX - lineX) // 65536)
         right = ((toY - lineY) // 65536) * wholeDx
         if right < left then
           across = 0
-        elseif right > left then
+        elseif left ~= right then
           across = 1
         end
       end
@@ -983,7 +980,7 @@ function P.CheckSight(t1: any, t2: any): boolean
         local right = ((startY - fromY) // 65536) * wholeDeltaX
         if right < left then
           startSide = 0
-        elseif right > left then
+        elseif left ~= right then
           startSide = 1
         end
 
@@ -991,7 +988,7 @@ function P.CheckSight(t1: any, t2: any): boolean
         right = ((endY - fromY) // 65536) * wholeDeltaX
         if right < left then
           endSide = 0
-        elseif right > left then
+        elseif left ~= right then
           endSide = 1
         end
       else
