@@ -123,14 +123,15 @@ function module.load(wad: any, marker: string): Map
   local lc = records(ld, 14, "LINEDEFS", true)
   local sc = records(sd, 30, "SIDEDEFS", true)
   local secCount = records(secd, 26, "SECTORS", true)
-  local tc = records(td, 10, "THINGS", false)
+  records(td, 10, 'THINGS', false)
   local segCount = records(segd, 12, "SEGS", true)
   local ssc = records(ssd, 4, "SSECTORS", true)
   local nc = records(nd, 28, "NODES", false)
-  local vertices: { Vertex } = table.create(vc)
-  for at = 0, buffer.len(vd) - 4, 4 do
-    table.insert(vertices, { x = buffer.readi16(vd, at), y = buffer.readi16(vd, at + 2) })
-  end
+  local vertices: { Vertex } = [for at in range(0, buffer.len(vd) - 4, 4) => {
+    x = buffer.readi16(vd, at),
+    y = buffer.readi16(vd, at + 2),
+  }]
+
   local lines: { Line } = table.create(lc)
   for at = 0, buffer.len(ld) - 14, 14 do
     local v1, v2, right, left =
@@ -169,28 +170,25 @@ function module.load(wad: any, marker: string): Map
       sector = sector + 1,
     })
   end
-  local sectors: { Sector } = table.create(secCount)
-  for at = 0, buffer.len(secd) - 26, 26 do
-    table.insert(sectors, {
-      floor = buffer.readi16(secd, at),
-      ceiling = buffer.readi16(secd, at + 2),
-      floorTex = name8(secd, at + 4),
-      ceilingTex = name8(secd, at + 12),
-      light = buffer.readi16(secd, at + 20),
-      special = buffer.readi16(secd, at + 22),
-      tag = buffer.readi16(secd, at + 24),
-    })
-  end
-  local things: { Thing } = table.create(tc)
-  for at = 0, buffer.len(td) - 10, 10 do
-    table.insert(things, {
-      x = buffer.readi16(td, at),
-      y = buffer.readi16(td, at + 2),
-      angle = buffer.readi16(td, at + 4),
-      kind = buffer.readu16(td, at + 6),
-      flags = buffer.readu16(td, at + 8),
-    })
-  end
+
+  local sectors: { Sector } = [for at in range(0, buffer.len(secd) - 26, 26) => {
+    floor = buffer.readi16(secd, at),
+    ceiling = buffer.readi16(secd, at + 2),
+    floorTex = name8(secd, at + 4),
+    ceilingTex = name8(secd, at + 12),
+    light = buffer.readi16(secd, at + 20),
+    special = buffer.readi16(secd, at + 22),
+    tag = buffer.readi16(secd, at + 24),
+  }]
+
+  local things: { Thing } = [for at in range(0, buffer.len(td) - 10, 10) => {
+    x = buffer.readi16(td, at),
+    y = buffer.readi16(td, at + 2),
+    angle = buffer.readi16(td, at + 4),
+    kind = buffer.readu16(td, at + 6),
+    flags = buffer.readu16(td, at + 8),
+  }]
+
   local segs: { Seg } = table.create(segCount)
   for at = 0, buffer.len(segd) - 12, 12 do
     local v1, v2, line, side =
