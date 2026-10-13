@@ -21,78 +21,78 @@ jess run --package jpk/doom/lua --package-path jpk \
 - Date: 2026-10-13.
 - Binary: the verified release build of Jess 0.1.0 on l3i 2.0.2 (Luau 0.742), the same one for
   both sides.
-- Base: `b6218e7`, the package before the move, under this bench. Head: `68f257f`.
+- Base: `b6218e7`, the package before the move, under this bench. Head: `6d7e3ff`.
 - Protocol: the whole bench run against base, then head, three times over, back to back under one
   lock; each cell is the median of its three runs. A difference under 5 percent is called no
   change.
 
-These are the tables of a second run of the A/B, made when the move was reviewed. The ratios of
+These are the tables of a later run of the A/B, made when the move was reviewed. The ratios of
 the first run, taken the evening before at `a4cfda0`, are within 8 percent of the ones here,
 `wad: open` aside (1.51x then), which the paragraph under the table is about.
 
 | Workload | Base, µs | Head, µs | Base / head |
 |---|---:|---:|---:|
-| state: encode a snapshot | 2585.9 | 2638.0 | no change |
-| state: decode a snapshot | 3722.0 | 3842.9 | no change |
-| state: fnv1a64 of an encoded snapshot | 1282.5 | 80.7 | 15.89x |
-| state: fnv1a32 of an encoded snapshot | 1062.5 | 79.9 | 13.30x |
-| save: envelope round trip | 8963.4 | 6680.9 | 1.34x |
-| net: pack and unpack 64 tic bundles | 217.2 | 221.2 | no change |
-| wad: open | 7236.9 | 5393.8 | 1.34x |
-| wad: read 256 lumps | 227.0 | 227.6 | no change |
-| map: load E1M1 | 600.4 | 619.5 | no change |
-| map: sectorAt, 1024 points of E1M1 | 424.2 | 442.5 | no change |
-| demo: parse DEMO1 | 373.8 | 374.6 | no change |
-| texture: load every texture | 49944.6 | 18265.1 | 2.73x |
-| patch: draw the title | 905.3 | 504.1 | 1.80x |
-| palette: frame to PPM | 774.6 | 637.7 | 1.21x |
-| palette: nearest, 512 colours | 871.1 | 720.9 | 1.21x |
-| render: automap of E1M1 | 211.4 | 216.9 | no change |
-| render: view of E1M1 | 65649.5 | 2600.5 | 25.24x |
-| play: DEMO1, 1710 tics of E1M5 | 217798.6 | 154729.4 | 1.41x |
-| play: DEMO3, 3863 tics of E3M5 | 299073.1 | 211816.6 | 1.41x |
-| play: locate 4096 points of E1M5 | 1629.4 | 772.1 | 2.11x |
-| play: save at tic 800 | 19372.8 | 7739.0 | 2.50x |
-| play: load a save | 13165.5 | 13104.5 | no change |
-| play: hash | 97.7 | 97.5 | no change |
-| play: observe | 362.3 | 216.3 | 1.68x |
-| agent: describe | 369.3 | 226.1 | 1.63x |
-| render: view with things, E1M5 at tic 800 | 79320.0 | 8552.2 | 9.27x |
+| state: encode a snapshot | 2570.3 | 2587.9 | no change |
+| state: decode a snapshot | 3747.4 | 3781.6 | no change |
+| state: fnv1a64 of an encoded snapshot | 1277.0 | 79.7 | 16.02x |
+| state: fnv1a32 of an encoded snapshot | 1049.5 | 80.0 | 13.12x |
+| save: envelope round trip | 8934.6 | 6549.3 | 1.36x |
+| net: pack and unpack 64 tic bundles | 222.6 | 221.0 | no change |
+| wad: open | 7255.8 | 5644.5 | 1.29x |
+| wad: read 256 lumps | 232.4 | 230.5 | no change |
+| map: load E1M1 | 605.7 | 617.1 | no change |
+| map: sectorAt, 1024 points of E1M1 | 425.2 | 414.2 | no change |
+| demo: parse DEMO1 | 376.0 | 373.5 | no change |
+| texture: load every texture | 49558.0 | 18330.7 | 2.70x |
+| patch: draw the title | 916.0 | 502.9 | 1.82x |
+| palette: frame to PPM | 772.4 | 639.1 | 1.21x |
+| palette: nearest, 512 colours | 870.9 | 701.1 | 1.24x |
+| render: automap of E1M1 | 213.1 | 207.7 | no change |
+| render: view of E1M1 | 66500.8 | 2572.2 | 25.85x |
+| play: DEMO1, 1710 tics of E1M5 | 225902.0 | 154735.8 | 1.46x |
+| play: DEMO3, 3863 tics of E3M5 | 300184.1 | 213901.5 | 1.40x |
+| play: locate 4096 points of E1M5 | 1622.7 | 753.8 | 2.15x |
+| play: save at tic 800 | 19352.0 | 7503.2 | 2.58x |
+| play: load a save | 12989.8 | 13125.8 | no change |
+| play: hash | 98.0 | 98.3 | no change |
+| play: observe | 366.2 | 219.0 | 1.67x |
+| agent: describe | 377.0 | 227.8 | 1.65x |
+| render: view with things, E1M5 at tic 800 | 80523.0 | 8359.6 | 9.63x |
 
 `wad: open` reads a 13 MB file into a buffer, and base copies it into a second one: allocations
 of that size go to and from the system on every call, which is most of what the row costs and
-what makes it wander (its three head runs span 13 percent). The same A/B with
+what makes it wander from one run of the A/B to the next. The same A/B with
 `MALLOC_TRIM_THRESHOLD_=1073741824 MALLOC_MMAP_THRESHOLD_=1073741824` on both sides, which keeps
 those pages in the process:
 
 | Workload | Base, µs | Head, µs | Base / head |
 |---|---:|---:|---:|
-| state: encode a snapshot | 2575.5 | 2588.1 | no change |
-| state: decode a snapshot | 3771.1 | 3796.5 | no change |
-| state: fnv1a64 of an encoded snapshot | 1255.9 | 80.1 | 15.68x |
-| state: fnv1a32 of an encoded snapshot | 1038.7 | 80.4 | 12.91x |
-| save: envelope round trip | 8992.4 | 6555.7 | 1.37x |
-| net: pack and unpack 64 tic bundles | 217.9 | 223.7 | no change |
-| wad: open | 4015.3 | 2818.3 | 1.42x |
-| wad: read 256 lumps | 229.6 | 230.9 | no change |
-| map: load E1M1 | 619.8 | 623.2 | no change |
-| map: sectorAt, 1024 points of E1M1 | 428.6 | 432.6 | no change |
-| demo: parse DEMO1 | 374.9 | 379.2 | no change |
-| texture: load every texture | 50378.2 | 18350.7 | 2.75x |
-| patch: draw the title | 918.9 | 511.1 | 1.80x |
-| palette: frame to PPM | 781.2 | 640.0 | 1.22x |
-| palette: nearest, 512 colours | 872.6 | 721.1 | 1.21x |
-| render: automap of E1M1 | 209.1 | 212.4 | no change |
-| render: view of E1M1 | 65476.0 | 2627.6 | 24.92x |
-| play: DEMO1, 1710 tics of E1M5 | 220636.6 | 153597.1 | 1.44x |
-| play: DEMO3, 3863 tics of E3M5 | 293021.5 | 212795.6 | 1.38x |
-| play: locate 4096 points of E1M5 | 1600.3 | 775.2 | 2.06x |
-| play: save at tic 800 | 19250.7 | 7778.8 | 2.47x |
-| play: load a save | 13154.2 | 13093.9 | no change |
-| play: hash | 96.7 | 97.9 | no change |
-| play: observe | 360.2 | 216.3 | 1.67x |
-| agent: describe | 372.3 | 229.8 | 1.62x |
-| render: view with things, E1M5 at tic 800 | 80166.0 | 8537.2 | 9.39x |
+| state: encode a snapshot | 2575.3 | 2585.0 | no change |
+| state: decode a snapshot | 3724.1 | 3763.5 | no change |
+| state: fnv1a64 of an encoded snapshot | 1281.1 | 79.5 | 16.11x |
+| state: fnv1a32 of an encoded snapshot | 1052.0 | 80.0 | 13.15x |
+| save: envelope round trip | 9070.9 | 6497.3 | 1.40x |
+| net: pack and unpack 64 tic bundles | 218.9 | 218.2 | no change |
+| wad: open | 3996.4 | 2825.1 | 1.41x |
+| wad: read 256 lumps | 229.6 | 227.1 | no change |
+| map: load E1M1 | 611.9 | 613.1 | no change |
+| map: sectorAt, 1024 points of E1M1 | 439.8 | 431.1 | no change |
+| demo: parse DEMO1 | 373.9 | 382.1 | no change |
+| texture: load every texture | 49409.3 | 18001.8 | 2.74x |
+| patch: draw the title | 916.3 | 495.2 | 1.85x |
+| palette: frame to PPM | 781.6 | 633.5 | 1.23x |
+| palette: nearest, 512 colours | 872.5 | 714.0 | 1.22x |
+| render: automap of E1M1 | 211.9 | 207.7 | no change |
+| render: view of E1M1 | 66542.1 | 2609.0 | 25.50x |
+| play: DEMO1, 1710 tics of E1M5 | 222387.4 | 153370.0 | 1.45x |
+| play: DEMO3, 3863 tics of E3M5 | 297050.3 | 211151.8 | 1.41x |
+| play: locate 4096 points of E1M5 | 1609.4 | 773.3 | 2.08x |
+| play: save at tic 800 | 19285.7 | 7497.5 | 2.57x |
+| play: load a save | 13168.7 | 12987.9 | no change |
+| play: hash | 98.0 | 98.5 | no change |
+| play: observe | 370.0 | 218.5 | 1.69x |
+| agent: describe | 377.9 | 222.4 | 1.70x |
+| render: view with things, E1M5 at tic 800 | 78983.4 | 8337.7 | 9.47x |
 
 ## Commit by commit
 
@@ -117,7 +117,9 @@ each run against their parent, by the same protocol, over the rows they reach:
 | `a4cfda0`, vertices bounded once | render: view with things, E1M5 at tic 800 | 9963.4 | 9025.4 | 1.10x |
 
 The view was already down from 66 ms to 34 ms before `f632e18`: base composed every texture for
-each view, so the compositor's `a6668b9` reached it too.
+each view, so the compositor's `a6668b9` reached it too. `6d7e3ff`, which put the two walks'
+comparisons back in the original's order for the sake of a NaN, moved no `play:` row against its
+parent.
 
 ## What moved, and what did not
 
