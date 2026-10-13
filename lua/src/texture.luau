@@ -49,6 +49,7 @@ local function blitPatch(wad: any, patchName: string, target: Texture, originX: 
     error(`texture: patch '{patchName}' has invalid dimensions`, 2)
   end
 
+  local targetWidth, targetHeight, pixels, opaque = target.width, target.height, target.pixels, target.opaque
   for column = 0, width - 1 do
     local targetColumn, at = originX + column, buffer.readu32(data, 8 + column * 4)
     if at < 8 or at >= length then error(`texture: patch '{patchName}' has an invalid column offset`, 2) end
@@ -68,14 +69,14 @@ local function blitPatch(wad: any, patchName: string, target: Texture, originX: 
       at += 2
       if at + count + 1 > length then error(`texture: patch '{patchName}' has truncated pixels`, 2) end
 
-      if targetColumn >= 0 and targetColumn < target.width then
-        for row = 0, count - 1 do
-          local targetRow = originY + top + row
-          if targetRow < 0 or targetRow >= target.height then continue end
-
-          local offset = targetRow * target.width + targetColumn
-          buffer.writeu8(target.pixels, offset, buffer.readu8(data, at + row))
-          buffer.writeu8(target.opaque, offset, 1)
+      if targetColumn >= 0 and targetColumn < targetWidth then
+        -- The rows of the post that land on the texture, walked down one of its columns.
+        local first = math.max(0, -(originY + top))
+        local offset = (originY + top + first) * targetWidth + targetColumn
+        for row = first, math.min(count - 1, targetHeight - 1 - (originY + top)) do
+          buffer.writeu8(pixels, offset, buffer.readu8(data, at + row))
+          buffer.writeu8(opaque, offset, 1)
+          offset += targetWidth
         end
       end
 
