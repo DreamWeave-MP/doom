@@ -19,7 +19,7 @@ DOOM source.
 - Save games (`play.save`, `play.load`) store the whole game graph and restore to the same future.
 - `@doom/agent` and `bin/doom-arena.luau` run a live deathmatch for players that plan rather than
   press keys: each slot reads a text observation and writes short timed plans.
-- `@doom/net` and `@doom/netgame` are the tic-command protocol over dream.net: an authoritative
+- `@doom/net` and `@doom/netgame` are the tic-command protocol over dream.udp: an authoritative
   host, clients that replay the same tics, and a world hash to compare.
 - WAD, map, palette, patch, and texture readers, and a headless indexed renderer for the title,
   the automap, and a first-person view.
@@ -99,5 +99,8 @@ player and remove them afterwards.
 
     jess package test lua
     jess run lua/bin/doom-stylecheck.luau
+    jess run --package lua --capability filesystem.read --capability network.transport \
+      lua/bench/bench.luau
 
-The demo tests run only when the IWADs sit in the working folder.
+The demo tests run only when the IWADs sit in the working folder. The benchmark needs
+`doom.wad` there and a release build of Jess; `BENCHMARKS.md` holds what it last measured.
