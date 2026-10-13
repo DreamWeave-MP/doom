@@ -332,6 +332,27 @@ suite.describe('deterministic core', function()
     expect(state.decode(encoded)).toEqual(value)
     expect(save.load(save.save(value))).toEqual(value)
   end)
+
+  suite.it('hashes bytes as FNV-1a, in hexadecimal from the most significant digit', function()
+    expect(state.fnv1a64 '').toBe 'cbf29ce484222325'
+    expect(state.fnv1a32 '').toBe '811c9dc5'
+    expect(state.fnv1a64 'a').toBe 'af63dc4c8601ec8c'
+    expect(state.fnv1a32 'a').toBe 'e40c292c'
+    expect(state.fnv1a64 'foobar').toBe '85944171f73967e8'
+    expect(state.fnv1a32 'foobar').toBe 'bf9cf968'
+    expect(state.fnv1a64 'doom\0\255').toBe 'a599c67856a743a9'
+    expect(state.fnv1a32 'doom\0\255').toBe '7a1436a9'
+
+    -- A digest keeps its leading zeros.
+    expect(state.fnv1a64 'tic 400').toBe '02e8d0cdd28490fb'
+    expect(state.fnv1a32 'tic 118').toBe '00331dfd'
+
+    -- A buffer hashes as the string of its bytes does.
+    expect(state.fnv1a64(buffer.fromstring 'doom\0\255')).toBe 'a599c67856a743a9'
+    expect(state.fnv1a32(buffer.fromstring 'doom\0\255')).toBe '7a1436a9'
+    expect(state.fnv1a64(buffer.create(0))).toBe 'cbf29ce484222325'
+    expect(state.hash32 { 1, 2, 3 }).toBe(state.fnv1a32(state.encode { 1, 2, 3 }))
+  end)
 end)
 
 suite.describe('lookup tables', function()
