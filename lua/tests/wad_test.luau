@@ -165,6 +165,36 @@ suite.describe('WAD directories', function()
     expect(function() open(bad) end).toThrow 'lump 1 is outside the file'
     expect(function() wadModule.open(TestPath .. '.missing') end).toThrow 'cannot read'
   end)
+
+  suite.it('lays an overlay after the first file, where its lumps win by name', function()
+    local base = writeFixture(fixture())
+    local overlay = TestPath .. '.overlay'
+    fs.write(overlay, wadBytes('IWAD', { { name = 'PAYLOAD', data = 'third' }, { name = 'EXTRA', data = 'more' } }))
+
+    local baseLength = fs.size(base)
+    local wad = wadModule.open(base, { overlay })
+    fs.remove(overlay)
+
+    expect(wad.kind).toBe 'PWAD'
+    expect(wad.path).toBe(`{base};{overlay}`)
+    expect(wad.paths).toEqual { base, overlay }
+    expect(#wad.lumps).toBe(16)
+    expect(buffer.len(wad.data)).toBe(baseLength + 12 + 5 + 4 + 32)
+    expect(wad:find 'payload' :: wadModule.Lump).toEqual {
+      index = 15,
+      name = 'PAYLOAD',
+      offset = baseLength + 12,
+      size = 5,
+    }
+    expect(#wad:all 'payload').toBe(3)
+    expect(buffer.tostring(wad:read 'PAYLOAD')).toBe 'third'
+    expect(buffer.tostring(wad:read('payload', 1))).toBe 'first'
+    expect(buffer.tostring(wad:read 'extra')).toBe 'more'
+    expect(buffer.tostring(wad:read 'DEMO1')).toBe(buffer.tostring(wadModule.open(base):read 'DEMO1'))
+    expect(#wadModule.open({ base }).lumps).toBe(14)
+    expect(function() wadModule.open({ base }, { base }) end).toThrow 'overlays cannot follow a path list'
+    expect(function() wadModule.open({}) end).toThrow 'no files supplied'
+  end)
 end)
 
 suite.describe('demos', function()
