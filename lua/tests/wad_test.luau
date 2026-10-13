@@ -6,11 +6,13 @@ local doom = require '@doom'
 local fixed = require '@doom/fixed'
 local mapModule = require '@doom/map'
 local paletteModule = require '@doom/palette'
+local patchModule = require '@doom/patch'
 local random = require '@doom/random'
 local save = require '@doom/save'
 local state = require '@doom/state'
 local tables = require '@doom/tables'
 local test = require '@jess/test'
+local textureModule = require '@doom/texture'
 local wadModule = require '@doom/wad'
 local expect = test.expect
 local suite = test.new()
@@ -128,6 +130,57 @@ local function fingerprint(data: buffer): string
   return string.format('%08x', hash)
 end
 
+type Post = { top: number, pixels: string }
+
+-- A patch in the column format: each column is its posts, and a post is a run of pixels down
+-- from a row.
+local function patchBytes(width: number, height: number, left: number, top: number, columns: { { Post } }): string
+  local offsets, bodies = {}, {}
+  local offset = 8 + width * 4
+
+  for index, posts in columns do
+    local body = {}
+    for _, post in posts do
+      table.insert(body, string.char(post.top, #post.pixels, 0) .. post.pixels .. '\0')
+    end
+
+    table.insert(body, '\255')
+    bodies[index] = table.concat(body)
+    offsets[index] = string.pack('<I4', offset)
+    offset += #bodies[index]
+  end
+
+  return string.pack('<i2i2i2i2', width, height, left, top) .. table.concat(offsets) .. table.concat(bodies)
+end
+
+-- Three columns of four pixels from row 1, numbered by column and row, and one more pixel at
+-- row 5 of the middle column.
+local function numberedPatch(left: number, top: number): string
+  return patchBytes(3, 6, left, top, {
+    { { top = 1, pixels = '\10\11\12\13' } },
+    { { top = 1, pixels = '\20\21\22\23' }, { top = 5, pixels = '\99' } },
+    { { top = 1, pixels = '\30\31\32\33' } },
+  })
+end
+
+-- A TEXTURE lump of one texture: the first PNAMES entry, laid at each origin in turn.
+local function textureLump(name: string, width: number, height: number, origins: { { number } }): string
+  local patches = {}
+  for _, origin in origins do
+    table.insert(patches, string.pack('<i2i2i2i2i2', origin[1], origin[2], 0, 1, 0))
+  end
+
+  return string.pack('<i4i4', 1, 8)
+    .. name8(name)
+    .. string.pack('<i4i2i2i4i2', 0, width, height, 0, #origins)
+    .. table.concat(patches)
+end
+
+-- The numbered patch laid with its corner at (-1, -2) and again at (2, 1) on four by four pixels:
+-- the first loses its left column and its top row, the second its right column and every row
+-- below its second.
+local Overhung = '\21\31\0\0\22\32\0\0\23\33\10\20\99\0\11\21'
+
 suite.beforeEach(function() fs.remove(TestPath) end)
 suite.afterEach(function() fs.remove(TestPath) end)
 
@@ -240,6 +293,53 @@ suite.describe('palettes', function()
     expect(
       function() paletteModule.toPpm(buffer.create(1), 2, 1, paletteModule.fromPlaypal(playpal)) end
     ).toThrow 'framebuffer is too small'
+  end)
+end)
+
+suite.describe('patches and textures', function()
+  suite.it('draws a patch from its own origin, clipped to the screen', function()
+    local patch = patchModule.open(buffer.fromstring(numberedPatch(1, 1)))
+    local frame = buffer.create(16)
+    patchModule.draw(frame, 4, 4, patch, 0, -1)
+    patchModule.draw(frame, 4, 4, patch, 3, 2)
+
+    expect({ patch.width, patch.height, patch.left, patch.top }).toEqual { 3, 6, 1, 1 }
+    expect(buffer.tostring(frame)).toBe(Overhung)
+
+    local corner = buffer.create(16)
+    patchModule.draw(corner, 4, 4, patch)
+    expect(buffer.tostring(corner)).toBe '\20\30\0\0\21\31\0\0\22\32\0\0\23\33\0\0'
+
+    local missed = buffer.create(16)
+    for _, spot in { { -3, 0 }, { 5, 0 }, { 0, -6 }, { 0, 4 } } do
+      patchModule.draw(missed, 4, 4, patch, spot[1], spot[2])
+    end
+
+    expect(buffer.tostring(missed)).toBe(string.rep('\0', 16))
+  end)
+
+  suite.it('tests a post row by row when the row it starts on is a fraction', function()
+    local patch = patchModule.open(buffer.fromstring(numberedPatch(1, 1)))
+    local frame = buffer.create(20)
+    patchModule.draw(frame, 4, 4, patch, 1, 1.5)
+
+    -- Half a row is two pixels further along a four pixel row.
+    expect(buffer.tostring(frame)).toBe '\0\0\0\0\0\0\10\20\30\0\11\21\31\0\12\22\32\0\0\0'
+  end)
+
+  suite.it('composes a texture from patches that hang over its edges', function()
+    local wad = wadModule.open(writeFixture(wadBytes('PWAD', {
+      { name = 'PNAMES', data = string.pack('<i4', 1) .. name8 'POSTS' },
+      { name = 'TEXTURE1', data = textureLump('EDGES', 4, 4, { { -1, -2 }, { 2, 1 } }) },
+      { name = 'POSTS', data = numberedPatch(0, 0) },
+    })))
+    local bank = textureModule.load(wad)
+    local texture = bank:get 'edges' :: textureModule.Texture
+
+    expect({ texture.name, texture.width, texture.height }).toEqual { 'EDGES', 4, 4 }
+    expect(buffer.tostring(texture.pixels)).toBe(Overhung)
+    expect(buffer.tostring(texture.opaque)).toBe '\1\1\0\0\1\1\0\0\1\1\1\1\1\0\1\1'
+    expect(bank:get 'MISSING').toBe(nil)
   end)
 end)
 
