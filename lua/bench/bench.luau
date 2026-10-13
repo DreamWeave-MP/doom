@@ -56,6 +56,7 @@ local Pinned: { [string]: number | string } = {
   ['render: view with things, E1M5 at tic 800'] = 2574146364,
   ['play: DEMO1, 1710 tics of E1M5'] = '6c20fbaa',
   ['play: DEMO3, 3863 tics of E3M5'] = '7dd89ed9',
+  ['play: locate 4096 points of E1M5'] = 2196458,
   ['play: save at tic 800'] = 916994,
   ['play: load a save'] = 'f418ff4f',
   ['play: hash'] = 'f418ff4f',
@@ -345,6 +346,30 @@ local function playWorkloads(wad: wadModule.Wad)
       return play.playDemo(wad, 'DEMO3').summary.hash
     end
   end, Pinned['play: DEMO3, 3863 tics of E3M5'])
+
+  -- A demo locates some 27,000 points among its other work; this is the walk alone, over a grid
+  -- laid on the level's bounds.
+  workload('play: locate 4096 points of E1M5', function()
+    local game = play.new(wad, { mapName = 'E1M5', nomonsters = true })
+    local engine = play.engine
+    local west, east, south, north = math.huge, -math.huge, math.huge, -math.huge
+    for _, vertex in game.vertexes do
+      west, east = math.min(west, vertex.x), math.max(east, vertex.x)
+      south, north = math.min(south, vertex.y), math.max(north, vertex.y)
+    end
+
+    local stepEast, stepNorth = (east - west) // 64, (north - south) // 64
+    return function(): unknown
+      local total = 0
+      for row = 0, 63 do
+        for column = 0, 63 do
+          total += engine.PointInSubsector(west + column * stepEast, south + row * stepNorth).firstline
+        end
+      end
+
+      return total
+    end
+  end, Pinned['play: locate 4096 points of E1M5'])
 
   -- The workloads below share one game: DEMO1 stopped at tic 800, mid-fight.
   local function midDemo()
