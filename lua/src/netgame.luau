@@ -1,5 +1,5 @@
 --!strict
--- Luau-owned Doom deathmatch orchestration over dream.net's opaque transport handles.
+-- Luau-owned Doom deathmatch orchestration over dream.udp's opaque transport handles.
 local wire = require './net'
 local play = require './play/api'
 

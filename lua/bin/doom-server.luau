@@ -1,6 +1,6 @@
 --!strict
 -- Luau-owned headless DOOM deathmatch server. Each slot's token is an opaque credential;
--- the native dream.net userdata retains the signing key, while all simulation remains here.
+-- the native dream.udp userdata retains the signing key, while all simulation remains here.
 local play = require '@doom/play'
 local net = require '@doom/net'
 local netgame = require '@doom/netgame'
