@@ -36,8 +36,8 @@ function P.Save(): buffer
     ids[item] = count
   end
 
-  local function grow(bytes: number)
-    capacity = math.max(size + bytes, capacity * 2)
+  local function grow(needed: number)
+    capacity = math.max(size + needed, capacity * 2)
 
     local grown = buffer.create(capacity)
     buffer.copy(grown, 0, out, 0, size)
