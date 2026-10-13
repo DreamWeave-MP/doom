@@ -75,7 +75,7 @@ P.weaponinfo = {
   weapon(1, S.S_DSGUNUP, S.S_DSGUNDOWN, S.S_DSGUN, S.S_DSGUN1, S.S_DSGUNFLASH1),
 }
 
-local finesine, finetangent, tantoangle = tables.finesine, tables.finetangent, tables.tantoangle
+local {finesine, finetangent, tantoangle} = tables
 
 P.finesine, P.finetangent, P.tantoangle = finesine, finetangent, tantoangle
 

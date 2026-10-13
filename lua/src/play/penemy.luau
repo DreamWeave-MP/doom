@@ -7,7 +7,7 @@ local P: any = require('./core')
 
 local G = P.G
 local FixedMul, idiv = P.FixedMul, P.idiv
-local finesine, mobjinfo = P.finesine, P.mobjinfo
+local {finesine, mobjinfo} = P
 local MT, S = P.MT, P.S
 local actions = P.actions
 local FRACUNIT, U32 = 65536, 4294967296

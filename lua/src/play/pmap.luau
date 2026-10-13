@@ -908,7 +908,7 @@ function P.CheckSight(t1: any, t2: any): boolean
   local deltaX, deltaY = toX - fromX, toY - fromY
   local wholeDeltaX, wholeDeltaY = deltaX // 65536, deltaY // 65536
   local slanted = deltaX ~= 0 and deltaY ~= 0
-  local subsectors, segs = G.subsectors, G.segs
+  local {subsectors, segs} = G
   local count = #G.nodes
   local nodes = flat.nodes(G.nodes)
   local lineEnds, segLines = flat.segs(segs)

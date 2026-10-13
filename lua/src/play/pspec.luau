@@ -532,7 +532,7 @@ end
 
 -- Doors.
 function think.door(door: any): ()
-  local direction, type = door.direction, door.type
+  local {direction, type} = door
   if direction == 0 then
     door.topcountdown -= 1
     if door.topcountdown ~= 0 then return end

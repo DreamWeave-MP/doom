@@ -6,7 +6,7 @@ local P: any = require('./core')
 
 local G = P.G
 local FixedMul, idiv, i32 = P.FixedMul, P.idiv, P.i32
-local finesine, states, mobjinfo = P.finesine, P.states, P.mobjinfo
+local {finesine, states, mobjinfo} = P
 local MT, S = P.MT, P.S
 local FRACUNIT, U32 = 65536, 4294967296
 local band, bor, bnot = bit32.band, bit32.bor, bit32.bnot
@@ -810,7 +810,7 @@ local function calcHeight(player: any): ()
 end
 
 local function movePlayer(player: any): ()
-  local cmd, mo = player.cmd, player.mo
+  local {cmd, mo} = player
   mo.angle = (mo.angle + cmd.angleturn * 65536) % U32
   onground = mo.z <= mo.floorz
 
@@ -852,7 +852,7 @@ local function deathThink(player: any): ()
 end
 
 function P.PlayerThink(player: any): ()
-  local mo, cmd = player.mo, player.cmd
+  local {mo, cmd} = player
   if band(player.cheats, P.CF_NOCLIP) ~= 0 then
     mo.flags = bor(mo.flags, P.MF_NOCLIP)
   else
