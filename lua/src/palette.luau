@@ -11,13 +11,14 @@ local PaletteMethods = {}
 PaletteMethods.__index = PaletteMethods
 
 function PaletteMethods:nearest(red: number, green: number, blue: number): number
+  local rgb = self.rgb
   local best = 0
   local bestDistance = math.huge
   for index = 0, 255 do
     local at = index * 3
-    local redOff = buffer.readu8(self.rgb, at) - red
-    local greenOff = buffer.readu8(self.rgb, at + 1) - green
-    local blueOff = buffer.readu8(self.rgb, at + 2) - blue
+    local redOff = buffer.readu8(rgb, at) - red
+    local greenOff = buffer.readu8(rgb, at + 1) - green
+    local blueOff = buffer.readu8(rgb, at + 2) - blue
     local distance = redOff * redOff + greenOff * greenOff + blueOff * blueOff
     if not (distance < bestDistance) then continue end
 
@@ -46,12 +47,13 @@ function module.toPpm(indexed: buffer, width: number, height: number, palette: P
   local out = buffer.create(#header + width * height * 3)
   buffer.writestring(out, 0, header)
 
+  local rgb = palette.rgb
   local offset = #header
   for index = 0, width * height - 1 do
     local color = buffer.readu8(indexed, index) * 3
-    buffer.writeu8(out, offset, buffer.readu8(palette.rgb, color))
-    buffer.writeu8(out, offset + 1, buffer.readu8(palette.rgb, color + 1))
-    buffer.writeu8(out, offset + 2, buffer.readu8(palette.rgb, color + 2))
+    buffer.writeu8(out, offset, buffer.readu8(rgb, color))
+    buffer.writeu8(out, offset + 1, buffer.readu8(rgb, color + 1))
+    buffer.writeu8(out, offset + 2, buffer.readu8(rgb, color + 2))
     offset += 3
   end
 
