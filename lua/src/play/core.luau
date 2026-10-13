@@ -4,6 +4,7 @@
 -- simulation (m_fixed.c, m_random.c, tables.c, r_main.c, p_setup.c, p_tick.c).
 -- Every other play module adds its functions to the table returned here, the
 -- way the C sources share one set of globals.
+local flat = require('./flat')
 local info = require('./info')
 local tables = require('../tables')
 local randomModule = require('../random')
@@ -174,38 +175,36 @@ function P.PointToAngle2(x1: number, y1: number, x2: number, y2: number): number
   return 0xC0000000 - 1 - tantoangle[slopeDiv(x, y) + 1]
 end
 
-local function pointOnSide(x: number, y: number, node: any): number
-  if node.dx == 0 then
-    if x <= node.x then return if node.dy > 0 then 1 else 0 end
-    return if node.dy < 0 then 1 else 0
-  end
-
-  if node.dy == 0 then
-    if y <= node.y then return if node.dx < 0 then 1 else 0 end
-    return if node.dx > 0 then 1 else 0
-  end
-
-  local dx, dy = x - node.x, y - node.y
-  if (node.dy < 0) ~= (node.dx < 0) ~= (dx < 0) ~= (dy < 0) then
-    return if (node.dy < 0) ~= (dx < 0) then 1 else 0
-  end
-
-  local left, right = FixedMul(node.dy // 65536, dx), FixedMul(dy, node.dx // 65536)
-  return if right < left then 0 else 1
-end
-
+-- R_PointInSubsector over the flat BSP (see ./flat for a node's layout), with R_PointOnSide
+-- written into the walk: `back` is its answer of 1.
 function P.PointInSubsector(x: number, y: number): any
-  local nodes = G.nodes
-  local count = #nodes
+  local count = #G.nodes
   if count == 0 then return G.subsectors[1] end
 
-  local nodenum = count - 1
-  while nodenum < 0x8000 do
-    local node = nodes[nodenum + 1]
-    nodenum = node.children[pointOnSide(x, y, node) + 1]
+  local nodes = flat.nodes(G.nodes)
+  local child = count - 1
+  while child < 0x8000 do
+    local at = child * 64
+    local lineDx, lineDy = buffer.readf64(nodes, at + 16), buffer.readf64(nodes, at + 24)
+    local back
+    if lineDx == 0 then
+      if x <= buffer.readf64(nodes, at) then back = lineDy > 0 else back = lineDy < 0 end
+    elseif lineDy == 0 then
+      if y <= buffer.readf64(nodes, at + 8) then back = lineDx < 0 else back = lineDx > 0 end
+    else
+      local dx, dy = x - buffer.readf64(nodes, at), y - buffer.readf64(nodes, at + 8)
+      if (lineDy < 0) ~= (lineDx < 0) ~= (dx < 0) ~= (dy < 0) then
+        back = (lineDy < 0) ~= (dx < 0)
+      else
+        local right = FixedMul(dy, buffer.readf64(nodes, at + 32))
+        back = right >= FixedMul(buffer.readf64(nodes, at + 40), dx)
+      end
+    end
+
+    child = buffer.readf64(nodes, if back then at + 56 else at + 48)
   end
 
-  return G.subsectors[nodenum - 0x8000 + 1]
+  return G.subsectors[child - 0x8000 + 1]
 end
 
 -- Thinkers form the original doubly linked ring around a sentinel. A removed
