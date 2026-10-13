@@ -6,6 +6,7 @@
 -- part followed by its keyed part, with references by number. Level geometry
 -- is part of the graph, so a save restores without re-reading the map lumps.
 local P: any = require('./core')
+local bytes = require('@dream/bytes')
 
 local G = P.G
 local Magic = 'DPLY\2'
@@ -16,30 +17,71 @@ local RootSkip = { wad = true, textures = true }
 
 local TagNumber, TagString, TagTrue, TagFalse, TagRef, TagBuffer = 1, 2, 3, 4, 5, 6
 
+-- What is written by value. Anything else is a table, written as a reference, or refused.
+local Plain = { number = true, string = true, boolean = true, buffer = true }
+
 function P.Save(): buffer
   local ids: { [any]: number }, nodes = { [G] = 1 }, { G }
-  local out = {}
+  local count = 1
+  local out = buffer.create(65536)
+  local capacity, size = 65536, #Magic + 4
 
-  local function value(item: any): string
-    local kind = type(item)
-    if kind == 'number' then return string.pack('<Bd', TagNumber, item) end
-    if kind == 'string' then return string.pack('<Bs4', TagString, item) end
-    if kind == 'boolean' then return string.char(if item then TagTrue else TagFalse) end
-    if kind == 'buffer' then return string.pack('<Bs4', TagBuffer, buffer.tostring(item)) end
-    if kind ~= 'table' then error(`doom save: cannot store a {kind}`) end
+  -- Numbers a table on first sight, and refuses what a save cannot hold.
+  local function visit(item: unknown)
+    if type(item) ~= 'table' then error(`doom save: cannot store a {type(item)}`) end
+    if ids[item] then return end
 
-    local id = ids[item]
-    if not id then
-      table.insert(nodes, item)
-      id = #nodes
-      ids[item] = id
+    count += 1
+    nodes[count] = item
+    ids[item] = count
+  end
+
+  local function grow(bytes: number)
+    capacity = math.max(size + bytes, capacity * 2)
+
+    local grown = buffer.create(capacity)
+    buffer.copy(grown, 0, out, 0, size)
+    out = grown
+  end
+
+  local function write(item: unknown)
+    if type(item) == 'number' then
+      if size + 9 > capacity then grow(9) end
+
+      buffer.writeu8(out, size, TagNumber)
+      buffer.writef64(out, size + 1, item)
+      size += 9
+    elseif type(item) == 'string' then
+      if size + 5 + #item > capacity then grow(5 + #item) end
+
+      buffer.writeu8(out, size, TagString)
+      buffer.writeu32(out, size + 1, #item)
+      buffer.writestring(out, size + 5, item)
+      size += 5 + #item
+    elseif type(item) == 'boolean' then
+      if size + 1 > capacity then grow(1) end
+
+      buffer.writeu8(out, size, if item then TagTrue else TagFalse)
+      size += 1
+    elseif type(item) == 'buffer' then
+      local length = buffer.len(item)
+      if size + 5 + length > capacity then grow(5 + length) end
+
+      buffer.writeu8(out, size, TagBuffer)
+      buffer.writeu32(out, size + 1, length)
+      buffer.copy(out, size + 5, item, 0, length)
+      size += 5 + length
+    else
+      if size + 5 > capacity then grow(5) end
+
+      buffer.writeu8(out, size, TagRef)
+      buffer.writeu32(out, size + 1, ids[item])
+      size += 5
     end
-
-    return string.pack('<BI4', TagRef, id)
   end
 
   local index = 1
-  while index <= #nodes do
+  while index <= count do
     local node = nodes[index]
     local isMobj = node.think == 'mobj'
     local length = 0
@@ -47,25 +89,46 @@ function P.Save(): buffer
       length += 1
     end
 
-    local keyed = {}
+    -- The tables a node refers to are numbered keyed part first, then array part, though the
+    -- array part is written first: the order the format has always numbered them in.
+    local keyed = 0
+    for key, item in node do
+      if type(key) == 'number' and key >= 1 and key <= length and key % 1 == 0 then continue end
+      if (index == 1 and RootSkip[key]) or (isMobj and key == 'info') then continue end
+      if not Plain[type(key)] then visit(key) end
+      if not Plain[type(item)] then visit(item) end
+
+      keyed += 1
+    end
+
+    for slot = 1, length do
+      local item = node[slot]
+      if not Plain[type(item)] then visit(item) end
+    end
+
+    if size + 8 > capacity then grow(8) end
+
+    buffer.writeu32(out, size, length)
+    buffer.writeu32(out, size + 4, keyed)
+    size += 8
+    for slot = 1, length do
+      write(node[slot])
+    end
+
     for key, item in node do
       if type(key) == 'number' and key >= 1 and key <= length and key % 1 == 0 then continue end
       if (index == 1 and RootSkip[key]) or (isMobj and key == 'info') then continue end
 
-      table.insert(keyed, value(key))
-      table.insert(keyed, value(item))
+      write(key)
+      write(item)
     end
 
-    table.insert(out, string.pack('<I4I4', length, #keyed // 2))
-    for slot = 1, length do
-      table.insert(out, value(node[slot]))
-    end
-
-    table.insert(out, table.concat(keyed))
     index += 1
   end
 
-  return buffer.fromstring(Magic .. string.pack('<I4', #nodes) .. table.concat(out))
+  buffer.writestring(out, 0, Magic)
+  buffer.writeu32(out, #Magic, count)
+  return bytes.slice(out, 0, size)
 end
 
 function P.Restore(wad: any, data: buffer): ()
