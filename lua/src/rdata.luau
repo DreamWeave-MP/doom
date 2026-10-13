@@ -34,24 +34,38 @@ function module.load(wad: any): Data
   return { palette = palette, colormap = colormap, textures = textures, wad = wad }
 end
 
-function module.flat(data: Data, wad: any, name: string, column: number, row: number): number?
+--- Where the flat `name` starts in the WAD's bytes, or nil for the sky and for a lump that is
+--- no flat.
+function module.flatOffset(wad: any, name: string): number?
   if name == 'F_SKY1' then return nil end
 
   local lump = wad:find(name)
   if not lump or lump.size < 4096 then return nil end
 
-  local flatColumn = bit32.band(math.floor(column), 63)
-  local flatRow = bit32.band(-math.floor(row), 63)
-  return buffer.readu8(wad.data, lump.offset + flatRow * 64 + flatColumn)
+  return lump.offset
 end
 
-function module.light(data: Data, color: number, light: number, distance: number): number
+function module.flat(data: Data, wad: any, name: string, column: number, row: number): number?
+  local offset = module.flatOffset(wad, name)
+  if not offset then return nil end
+
+  local flatColumn = bit32.band(math.floor(column), 63)
+  local flatRow = bit32.band(-math.floor(row), 63)
+  return buffer.readu8(wad.data, offset + flatRow * 64 + flatColumn)
+end
+
+--- Where the light table for `light` at `distance` starts in the COLORMAP.
+function module.shade(data: Data, light: number, distance: number): number
   -- Vanilla uses a light-level table selected by projected distance. The
   -- compact table below preserves that ordering while retaining the original
   -- 32 COLORMAP levels instead of converting through RGB.
   local level = math.floor((255 - light) / 16) + math.floor(distance / 80)
   level = math.clamp(level, 0, math.floor(buffer.len(data.colormap) / 256) - 1)
-  return buffer.readu8(data.colormap, level * 256 + bit32.band(color, 255))
+  return level * 256
+end
+
+function module.light(data: Data, color: number, light: number, distance: number): number
+  return buffer.readu8(data.colormap, module.shade(data, light, distance) + bit32.band(color, 255))
 end
 
 return module

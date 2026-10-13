@@ -73,6 +73,22 @@ local function clipDepth(
   return startDepth, startRight, finishDepth, finishRight
 end
 
+-- What every pixel of a screen column shares in a view, four doubles a column: the cosine and
+-- the sine of the column's ray, the cosine of the ray's angle off the view's axis, and that
+-- cosine kept from zero for the planes, which divide by it.
+local rays = buffer.create(Width * 32)
+
+local function castRays(angle: number)
+  for column = 0, Width - 1 do
+    local delta = math.atan((column + 0.5 - CenterX) / Focal)
+    local at = column * 32
+    buffer.writef64(rays, at, math.cos(angle + delta))
+    buffer.writef64(rays, at + 8, math.sin(angle + delta))
+    buffer.writef64(rays, at + 16, math.cos(delta))
+    buffer.writef64(rays, at + 24, math.max(0.01, math.cos(delta)))
+  end
+end
+
 local function textureName(name: string): string?
   if name == '' or name == '-' then return nil end
 
@@ -101,30 +117,44 @@ local function drawTier(
   local bottom = math.min(Height - 1, math.ceil(CenterY - (bottomZ - eye) * Focal / depth))
   if top > bottom then return end
 
-  local textureX = 0
-  if tex then textureX = math.floor(texU + 0.5) % tex.width end
+  local pixels, colormap = frame.pixels, data.colormap
+  -- The light table is the same down the tier; it is looked up when the first pixel is drawn, as
+  -- it was for every pixel.
+  local shade = -1
+  if not tex then
+    for row = top, bottom do
+      local offset = row * Width + column
+      if not (depth < zbuffer[offset + 1]) then continue end
+      if shade < 0 then shade = rdata.shade(data, light, depth) end
 
+      buffer.writeu8(pixels, offset, buffer.readu8(colormap, shade + bit32.band(fallback, 255)))
+      zbuffer[offset + 1] = depth
+    end
+
+    return
+  end
+
+  local texWidth, texHeight, texPixels, texOpaque = tex.width, tex.height, tex.pixels, tex.opaque
+  local textureX = math.floor(texU + 0.5) % texWidth
   for row = top, bottom do
     local offset = row * Width + column
     if not (depth < zbuffer[offset + 1]) then continue end
 
-    local color = fallback
-    local opaque = true
-    if tex then
-      local worldZ = eye + (CenterY - row) * depth / Focal
-      local textureY = math.floor(texTop - worldZ) % tex.height
-      if textureY < 0 then textureY += tex.height end
+    local worldZ = eye + (CenterY - row) * depth / Focal
+    local textureY = math.floor(texTop - worldZ) % texHeight
+    if textureY < 0 then textureY += texHeight end
 
-      local textureOffset = textureY * tex.width + textureX
-      opaque = buffer.readu8(tex.opaque, textureOffset) ~= 0
-      if opaque then color = buffer.readu8(tex.pixels, textureOffset) end
+    local textureOffset = textureY * texWidth + textureX
+    local color = fallback
+    if buffer.readu8(texOpaque, textureOffset) ~= 0 then
+      color = buffer.readu8(texPixels, textureOffset)
+    elseif not solid then
+      continue
     end
 
-    if not opaque and not solid then continue end
-    if not opaque then color = fallback end
+    if shade < 0 then shade = rdata.shade(data, light, depth) end
 
-    color = rdata.light(data, color, light, depth)
-    buffer.writeu8(frame.pixels, offset, color)
+    buffer.writeu8(pixels, offset, buffer.readu8(colormap, shade + bit32.band(color, 255)))
     zbuffer[offset + 1] = depth
   end
 end
@@ -139,17 +169,16 @@ local function drawSeg(
   viewY: number,
   eye: number,
   angle: number,
-  seg: any
+  seg: any,
+  fallback: number
 )
   local start, finish = map.vertices[seg.v1], map.vertices[seg.v2]
   local cosAngle, sinAngle = math.cos(angle), math.sin(angle)
-  local function camera(vertex: any): (number, number)
-    local dx, dy = vertex.x - viewX, vertex.y - viewY
-    return dx * cosAngle + dy * sinAngle, -dx * sinAngle + dy * cosAngle
-  end
+  local dx, dy = start.x - viewX, start.y - viewY
+  local startDepth, startRight = dx * cosAngle + dy * sinAngle, -dx * sinAngle + dy * cosAngle
+  dx, dy = finish.x - viewX, finish.y - viewY
 
-  local startDepth, startRight = camera(start)
-  local finishDepth, finishRight = camera(finish)
+  local finishDepth, finishRight = dx * cosAngle + dy * sinAngle, -dx * sinAngle + dy * cosAngle
   local clippedStartDepth, clippedStartRight, clippedFinishDepth, clippedFinishRight =
     clipDepth(startDepth, startRight, finishDepth, finishRight)
   if not clippedStartDepth or not clippedStartRight or not clippedFinishDepth or not clippedFinishRight then
@@ -181,16 +210,22 @@ local function drawSeg(
   local middle = data.textures:get(textureName(frontSide.middle) or '')
   local upper = data.textures:get(textureName(frontSide.upper) or '')
   local lower = data.textures:get(textureName(frontSide.lower) or '')
-  local fallback = data.palette:nearest(96, 80, 64)
 
   for column = first, last do
-    local delta = math.atan((column + 0.5 - CenterX) / Focal)
-    local rayAngle = angle + delta
-    local along, across =
-      raySegment(viewX, viewY, math.cos(rayAngle), math.sin(rayAngle), start.x, start.y, finish.x, finish.y)
+    local ray = column * 32
+    local along, across = raySegment(
+      viewX,
+      viewY,
+      buffer.readf64(rays, ray),
+      buffer.readf64(rays, ray + 8),
+      start.x,
+      start.y,
+      finish.x,
+      finish.y
+    )
     if not along or not across then continue end
 
-    local depth = along * math.cos(delta)
+    local depth = along * buffer.readf64(rays, ray + 16)
     if not (depth > Near) then continue end
 
     local texU = across * lineLength + frontSide.xOffset
@@ -284,30 +319,30 @@ local function drawPlanes(
   sector: any,
   viewX: number,
   viewY: number,
-  eye: number,
-  angle: number
+  eye: number
 )
+  local pixels, colormap, flats = frame.pixels, data.colormap, wad.data
   for row = 0, Height - 1 do
     if row == CenterY then continue end
 
-    local plane = if row > CenterY then sector.floor else sector.ceiling
+    -- A row lies on one plane at one distance, so it has one flat and one light table.
+    local below = row > CenterY
+    local plane = if below then sector.floor else sector.ceiling
     local distance = math.abs((eye - plane) * Focal / (row - CenterY))
-    for column = 0, Width - 1 do
-      local delta = math.atan((column + 0.5 - CenterX) / Focal)
-      local ray = angle + delta
-      local rayDistance = distance / math.max(0.01, math.cos(delta))
-      local worldX, worldY = viewX + math.cos(ray) * rayDistance, viewY + math.sin(ray) * rayDistance
-      local name = if row > CenterY then sector.floorTex else sector.ceilingTex
-      local color = rdata.flat(data, wad, name, worldX, worldY)
-      if color == nil then
-        color = data.palette:nearest(
-          if row > CenterY then 48 else 32,
-          if row > CenterY then 40 else 32,
-          if row > CenterY then 32 else 48
-        )
-      end
+    local flat = rdata.flatOffset(wad, if below then sector.floorTex else sector.ceilingTex)
+    if not flat then
+      local color = data.palette:nearest(if below then 48 else 32, if below then 40 else 32, if below then 32 else 48)
+      buffer.fill(pixels, row * Width, rdata.light(data, color, sector.light, distance), Width)
+      continue
+    end
 
-      buffer.writeu8(frame.pixels, row * Width + column, rdata.light(data, color, sector.light, distance))
+    local shade = rdata.shade(data, sector.light, distance)
+    for column = 0, Width - 1 do
+      local rayDistance = distance / buffer.readf64(rays, column * 32 + 24)
+      local worldX = viewX + buffer.readf64(rays, column * 32) * rayDistance
+      local worldY = viewY + buffer.readf64(rays, column * 32 + 8) * rayDistance
+      local texel = bit32.band(-math.floor(worldY), 63) * 64 + bit32.band(math.floor(worldX), 63)
+      buffer.writeu8(pixels, row * Width + column, buffer.readu8(colormap, shade + buffer.readu8(flats, flat + texel)))
     end
   end
 end
@@ -322,7 +357,8 @@ local function renderSubsector(
   viewY: number,
   eye: number,
   angle: number,
-  index: number
+  index: number,
+  fallback: number
 )
   local subsector = map.subsectors[index]
   if not subsector then return end
@@ -335,7 +371,7 @@ local function renderSubsector(
     -- Segs are oriented with their rendered/front sector on the right,
     -- just as R_AddLine's span >= ANG180 back-face test assumes.
     local side = cross(finish.x - start.x, finish.y - start.y, viewX - start.x, viewY - start.y)
-    if side <= 0 then drawSeg(frame, data, wad, map, zbuffer, viewX, viewY, eye, angle, seg) end
+    if side <= 0 then drawSeg(frame, data, wad, map, zbuffer, viewX, viewY, eye, angle, seg, fallback) end
   end
 end
 
@@ -362,12 +398,15 @@ function module.view(map: any, wad: any, x: number, y: number, angleDegrees: num
   local sector = mapModule.sectorAt(map, x, y)
   local eye = sector.floor + 41
   local angle = math.rad(angleDegrees)
-  drawPlanes(frame, data, wad, sector, x, y, eye, angle)
+  castRays(angle)
+  drawPlanes(frame, data, wad, sector, x, y, eye)
 
+  -- What an untextured wall is drawn in.
+  local fallback = data.palette:nearest(96, 80, 64)
   local zbuffer: { number } = table.create(Width * Height, math.huge)
   local function visit(child: number)
     if bit32.band(child, 0x8000) ~= 0 then
-      renderSubsector(frame, data, wad, map, zbuffer, x, y, eye, angle, bit32.band(child, 0x7fff) + 1)
+      renderSubsector(frame, data, wad, map, zbuffer, x, y, eye, angle, bit32.band(child, 0x7fff) + 1, fallback)
       return
     end
 
@@ -380,7 +419,7 @@ function module.view(map: any, wad: any, x: number, y: number, angleDegrees: num
   end
 
   if #map.nodes == 0 then
-    renderSubsector(frame, data, wad, map, zbuffer, x, y, eye, angle, 1)
+    renderSubsector(frame, data, wad, map, zbuffer, x, y, eye, angle, 1, fallback)
   else
     visit(#map.nodes - 1)
   end
