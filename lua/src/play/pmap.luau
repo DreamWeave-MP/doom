@@ -4,6 +4,7 @@
 -- movement clipping, sliding, hitscan, radius damage, sector height changes,
 -- and line of sight.
 local P: any = require('./core')
+local flat = require('./flat')
 
 local G = P.G
 local FixedMul, FixedDiv, idiv = P.FixedMul, P.FixedDiv, P.idiv
@@ -855,81 +856,38 @@ function P.ChangeSector(sector: any, crunch: boolean): boolean
   return nofit
 end
 
--- Line of sight (p_sight.c).
-local sightzstart, t2x, t2y = 0, 0, 0
-local strace = { x = 0, y = 0, dx = 0, dy = 0 }
-local divl = { x = 0, y = 0, dx = 0, dy = 0 }
+-- Line of sight (p_sight.c). P_CrossBSPNode's walk runs over the flat BSP (see ./flat): the
+-- near side of each partition first, the far side only when the target lies across it, and the
+-- far sides still owed wait on a stack instead of the call stack.
+local farSides: { number } = table.create(64, 0)
 
-local function divlineSide(x: number, y: number, node: any): number
-  if node.dx == 0 then
-    if x == node.x then return 2 end
-    if x <= node.x then return if node.dy > 0 then 1 else 0 end
-    return if node.dy < 0 then 1 else 0
+-- P_DivlineSide for a line passed as scalars: 0 in front, 1 behind, 2 on it.
+local function divlineSide(
+  pointX: number,
+  pointY: number,
+  lineX: number,
+  lineY: number,
+  lineDx: number,
+  lineDy: number
+): number
+  if lineDx == 0 then
+    if pointX == lineX then return 2 end
+    if pointX <= lineX then return if lineDy > 0 then 1 else 0 end
+    return if lineDy < 0 then 1 else 0
   end
 
-  if node.dy == 0 then
-    -- The original compares x against node.y here.
-    if x == node.y then return 2 end
-    if y <= node.y then return if node.dx < 0 then 1 else 0 end
-    return if node.dx > 0 then 1 else 0
+  if lineDy == 0 then
+    -- The original compares x against the line's y here.
+    if pointX == lineY then return 2 end
+    if pointY <= lineY then return if lineDx < 0 then 1 else 0 end
+    return if lineDx > 0 then 1 else 0
   end
 
-  local left = (node.dy // 65536) * ((x - node.x) // 65536)
-  local right = ((y - node.y) // 65536) * (node.dx // 65536)
+  local left = (lineDy // 65536) * ((pointX - lineX) // 65536)
+  local right = ((pointY - lineY) // 65536) * (lineDx // 65536)
   if right < left then return 0 end
   if left == right then return 2 end
   return 1
-end
-
-local function crossSubsector(num: number): boolean
-  local sub = G.subsectors[num + 1]
-  local segs, validcount = G.segs, G.validcount
-  for index = sub.firstline + 1, sub.firstline + sub.numlines do
-    local seg = segs[index]
-    local line = seg.linedef
-    if line.validcount == validcount then continue end
-
-    line.validcount = validcount
-    local v1, v2 = line.v1, line.v2
-    if divlineSide(v1.x, v1.y, strace) == divlineSide(v2.x, v2.y, strace) then continue end
-
-    divl.x, divl.y, divl.dx, divl.dy = v1.x, v1.y, v2.x - v1.x, v2.y - v1.y
-    if divlineSide(strace.x, strace.y, divl) == divlineSide(t2x, t2y, divl) then continue end
-    if band(line.flags, 4) == 0 then return false end
-
-    local front, back = seg.frontsector, seg.backsector
-    if front.floorheight == back.floorheight and front.ceilingheight == back.ceilingheight then continue end
-
-    local opentop = if front.ceilingheight < back.ceilingheight then front.ceilingheight else back.ceilingheight
-    local openbottom = if front.floorheight > back.floorheight then front.floorheight else back.floorheight
-    if openbottom >= opentop then return false end
-
-    local frac = interceptVector(strace.x, strace.y, strace.dx, strace.dy, divl.x, divl.y, divl.dx, divl.dy)
-    if front.floorheight ~= back.floorheight then
-      local slope = FixedDiv(openbottom - sightzstart, frac)
-      if slope > bottomslope then bottomslope = slope end
-    end
-
-    if front.ceilingheight ~= back.ceilingheight then
-      local slope = FixedDiv(opentop - sightzstart, frac)
-      if slope < topslope then topslope = slope end
-    end
-
-    if topslope <= bottomslope then return false end
-  end
-
-  return true
-end
-
-local function crossBSPNode(bspnum: number): boolean
-  if bspnum >= 0x8000 then return crossSubsector(bspnum - 0x8000) end
-
-  local bsp = G.nodes[bspnum + 1]
-  local side = divlineSide(strace.x, strace.y, bsp)
-  if side == 2 then side = 0 end
-  if not crossBSPNode(bsp.children[side + 1]) then return false end
-  if side == divlineSide(t2x, t2y, bsp) then return true end
-  return crossBSPNode(bsp.children[2 - side])
 end
 
 function P.CheckSight(t1: any, t2: any): boolean
@@ -940,14 +898,141 @@ function P.CheckSight(t1: any, t2: any): boolean
   end
 
   G.validcount += 1
-  sightzstart = t1.z + t1.height - t1.height // 4
-  topslope = t2.z + t2.height - sightzstart
-  bottomslope = t2.z - sightzstart
-  strace.x, strace.y = t1.x, t1.y
-  t2x, t2y = t2.x, t2.y
-  strace.dx, strace.dy = t2.x - t1.x, t2.y - t1.y
-  if #G.nodes == 0 then return crossSubsector(0) end
-  return crossBSPNode(#G.nodes - 1)
+
+  local validcount = G.validcount
+  local eye = t1.z + t1.height - t1.height // 4
+  topslope = t2.z + t2.height - eye
+  bottomslope = t2.z - eye
+
+  local fromX, fromY, toX, toY = t1.x, t1.y, t2.x, t2.y
+  local deltaX, deltaY = toX - fromX, toY - fromY
+  local wholeDeltaX, wholeDeltaY = deltaX // 65536, deltaY // 65536
+  local slanted = deltaX ~= 0 and deltaY ~= 0
+  local subsectors, segs = G.subsectors, G.segs
+  local count = #G.nodes
+  local nodes = flat.nodes(G.nodes)
+  local lineEnds, segLines = flat.segs(segs)
+  local owed = 0
+  local child = if count == 0 then 0x8000 else count - 1
+  while true do
+    -- P_CrossBSPNode: P_DivlineSide of the viewer and of the target against each partition, the
+    -- viewer's 2 (on the line) already taken for the front.
+    while child < 0x8000 do
+      local at = child * 64
+      local lineX, lineY = buffer.readf64(nodes, at), buffer.readf64(nodes, at + 8)
+      local lineDx, lineDy = buffer.readf64(nodes, at + 16), buffer.readf64(nodes, at + 24)
+      local side, across = 0, 2
+      if lineDx == 0 then
+        if fromX < lineX then
+          side = if lineDy > 0 then 1 else 0
+        elseif fromX > lineX then
+          side = if lineDy < 0 then 1 else 0
+        end
+
+        if toX < lineX then
+          across = if lineDy > 0 then 1 else 0
+        elseif toX > lineX then
+          across = if lineDy < 0 then 1 else 0
+        end
+      elseif lineDy == 0 then
+        if fromX ~= lineY then
+          if fromY <= lineY then side = if lineDx < 0 then 1 else 0 else side = if lineDx > 0 then 1 else 0 end
+        end
+
+        if toX ~= lineY then
+          if toY <= lineY then across = if lineDx < 0 then 1 else 0 else across = if lineDx > 0 then 1 else 0 end
+        end
+      else
+        local wholeDx, wholeDy = buffer.readf64(nodes, at + 32), buffer.readf64(nodes, at + 40)
+        local left = wholeDy * ((fromX - lineX) // 65536)
+        local right = ((fromY - lineY) // 65536) * wholeDx
+        if right > left then side = 1 end
+
+        left = wholeDy * ((toX - lineX) // 65536)
+        right = ((toY - lineY) // 65536) * wholeDx
+        if right < left then
+          across = 0
+        elseif right > left then
+          across = 1
+        end
+      end
+
+      if across ~= side then
+        owed += 1
+        farSides[owed] = buffer.readf64(nodes, at + 56 - side * 8)
+      end
+
+      child = buffer.readf64(nodes, at + 48 + side * 8)
+    end
+
+    -- P_CrossSubsector.
+    local sub = subsectors[child - 0x8000 + 1]
+    local first = sub.firstline
+    for index = first + 1, first + sub.numlines do
+      local line = segLines[index]
+      if line.validcount == validcount then continue end
+
+      line.validcount = validcount
+
+      local at = (index - 1) * 32
+      local startX, startY = buffer.readf64(lineEnds, at), buffer.readf64(lineEnds, at + 8)
+      local endX, endY = buffer.readf64(lineEnds, at + 16), buffer.readf64(lineEnds, at + 24)
+      local startSide, endSide = 2, 2
+      if slanted then
+        local left = wholeDeltaY * ((startX - fromX) // 65536)
+        local right = ((startY - fromY) // 65536) * wholeDeltaX
+        if right < left then
+          startSide = 0
+        elseif right > left then
+          startSide = 1
+        end
+
+        left = wholeDeltaY * ((endX - fromX) // 65536)
+        right = ((endY - fromY) // 65536) * wholeDeltaX
+        if right < left then
+          endSide = 0
+        elseif right > left then
+          endSide = 1
+        end
+      else
+        startSide = divlineSide(startX, startY, fromX, fromY, deltaX, deltaY)
+        endSide = divlineSide(endX, endY, fromX, fromY, deltaX, deltaY)
+      end
+
+      if startSide == endSide then continue end
+
+      local lineDx, lineDy = endX - startX, endY - startY
+      local viewerSide = divlineSide(fromX, fromY, startX, startY, lineDx, lineDy)
+      if viewerSide == divlineSide(toX, toY, startX, startY, lineDx, lineDy) then continue end
+      if band(line.flags, 4) == 0 then return false end
+
+      local seg = segs[index]
+      local front, back = seg.frontsector, seg.backsector
+      if front.floorheight == back.floorheight and front.ceilingheight == back.ceilingheight then continue end
+
+      local opentop = if front.ceilingheight < back.ceilingheight then front.ceilingheight else back.ceilingheight
+      local openbottom = if front.floorheight > back.floorheight then front.floorheight else back.floorheight
+      if openbottom >= opentop then return false end
+
+      local frac = interceptVector(fromX, fromY, deltaX, deltaY, startX, startY, lineDx, lineDy)
+      if front.floorheight ~= back.floorheight then
+        local slope = FixedDiv(openbottom - eye, frac)
+        if slope > bottomslope then bottomslope = slope end
+      end
+
+      if front.ceilingheight ~= back.ceilingheight then
+        local slope = FixedDiv(opentop - eye, frac)
+        if slope < topslope then topslope = slope end
+      end
+
+      if topslope <= bottomslope then return false end
+    end
+
+    if owed == 0 then return true end
+
+    child = farSides[owed]
+    owed -= 1
+  end
 end
 
 return P
