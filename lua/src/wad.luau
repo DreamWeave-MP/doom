@@ -156,12 +156,14 @@ function module.open(paths: string | { string }, overlays: { string }?): Wad
     total += buffer.len(data)
   end
 
-  local combined = buffer.create(total)
+  -- One file is its own image; several are laid end to end in a new one.
+  local combined = if #files == 1 then files[1].data else buffer.create(total)
   local lumps: { Lump } = {}
   local byName: { [string]: { Lump } } = {}
   local base = 0
   for _, file in files do
-    buffer.copy(combined, base, file.data, 0, buffer.len(file.data))
+    if #files > 1 then buffer.copy(combined, base, file.data, 0, buffer.len(file.data)) end
+
     for _, old in file.lumps do
       local lump: Lump = { index = #lumps + 1, name = old.name, offset = base + old.offset, size = old.size }
       table.insert(lumps, lump)
