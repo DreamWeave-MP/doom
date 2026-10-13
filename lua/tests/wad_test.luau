@@ -8,6 +8,7 @@ local mapModule = require '@doom/map'
 local paletteModule = require '@doom/palette'
 local patchModule = require '@doom/patch'
 local random = require '@doom/random'
+local render = require '@doom/render'
 local save = require '@doom/save'
 local state = require '@doom/state'
 local tables = require '@doom/tables'
@@ -181,6 +182,87 @@ end
 -- below its second.
 local Overhung = '\21\31\0\0\22\32\0\0\23\33\10\20\99\0\11\21'
 
+-- A corner to look into: a textured wall to the north with a window standing before it, a bare
+-- wall to the east, a flat underfoot and the sky overhead. The wall texture is eight pixels
+-- square with a gap in one column, and `tint` is added to each of its pixels.
+local function viewWad(tint: number): buffer
+  local playpal, colormap = buffer.create(768), buffer.create(34 * 256)
+  for index = 0, 255 do
+    buffer.writeu8(playpal, index * 3, index)
+    buffer.writeu8(playpal, index * 3 + 1, 255 - index)
+    buffer.writeu8(playpal, index * 3 + 2, index * 7 % 256)
+  end
+
+  -- Each light table turns the palette a little further, so a pixel shows which one lit it.
+  for level = 0, 33 do
+    for index = 0, 255 do
+      buffer.writeu8(colormap, level * 256 + index, (index + level * 5) % 256)
+    end
+  end
+
+  local floor = buffer.create(4096)
+  for offset = 0, 4095 do
+    buffer.writeu8(floor, offset, 64 + (offset % 64 + offset // 64 * 3) % 64)
+  end
+
+  local columns = {}
+  for column = 1, 8 do
+    local pixels = {}
+    for row = 1, 8 do
+      pixels[row] = string.char(tint + column * 8 + row)
+    end
+
+    columns[column] = { { top = 0, pixels = table.concat(pixels) } }
+  end
+
+  columns[4] = { { top = 2, pixels = string.char(tint + 1, tint + 2, tint + 3, tint + 4) } }
+
+  local function side(column: number, row: number, upper: string, lower: string, middle: string, sector: number): string
+    return string.pack('<i2i2', column, row) .. name8(upper) .. name8(lower) .. name8(middle) .. string.pack('<I2', sector)
+  end
+
+  local function sector(floorHeight: number, ceilingHeight: number, ceiling: string, light: number): string
+    return string.pack('<i2i2', floorHeight, ceilingHeight)
+      .. name8 'FLOOR0'
+      .. name8(ceiling)
+      .. string.pack('<i2i2i2', light, 0, 0)
+  end
+
+  return wadBytes('PWAD', {
+    { name = 'PLAYPAL', data = buffer.tostring(playpal) },
+    { name = 'COLORMAP', data = buffer.tostring(colormap) },
+    { name = 'PNAMES', data = string.pack('<i4', 1) .. name8 'POSTS' },
+    { name = 'TEXTURE1', data = textureLump('MID', 8, 8, { { 0, 0 } }) },
+    { name = 'POSTS', data = patchBytes(8, 8, 0, 0, columns) },
+    { name = 'FLOOR0', data = buffer.tostring(floor) },
+    { name = 'E1M1', data = '' },
+    { name = 'VERTEXES', data = string.pack('<i2i2i2i2i2i2i2i2i2i2', -64, 64, 64, 64, 64, -64, -32, 32, 32, 32) },
+    {
+      name = 'LINEDEFS',
+      data = string.pack('<I2I2I2I2I2I2I2', 0, 1, 1, 0, 0, 0, 0xffff)
+        .. string.pack('<I2I2I2I2I2I2I2', 1, 2, 1, 0, 0, 1, 0xffff)
+        .. string.pack('<I2I2I2I2I2I2I2', 3, 4, 4, 0, 0, 2, 3),
+    },
+    {
+      name = 'SIDEDEFS',
+      data = side(0, 0, '-', '-', 'MID', 0)
+        .. side(0, 0, '-', '-', '-', 0)
+        .. side(3, -4, 'MID', 'MID', '-', 0)
+        .. side(0, 0, '-', '-', '-', 1),
+    },
+    { name = 'SECTORS', data = sector(0, 72, 'F_SKY1', 192) .. sector(16, 56, 'FLOOR0', 128) },
+    { name = 'THINGS', data = string.pack('<i2i2i2I2I2', -48, -48, 45, 1, 7) },
+    {
+      name = 'SEGS',
+      data = string.pack('<I2I2i2I2I2i2', 0, 1, 0, 0, 0, 0)
+        .. string.pack('<I2I2i2I2I2i2', 1, 2, 0, 1, 0, 0)
+        .. string.pack('<I2I2i2I2I2i2', 3, 4, 0, 2, 0, 0),
+    },
+    { name = 'SSECTORS', data = string.pack('<I2I2', 3, 0) },
+    { name = 'NODES', data = string.pack('<i2i2i2i2', 0, 0, 0, 1) .. string.rep('\0', 16) .. string.pack('<I2I2', 0x8000, 0x8000) },
+  })
+end
+
 suite.beforeEach(function() fs.remove(TestPath) end)
 suite.afterEach(function() fs.remove(TestPath) end)
 
@@ -340,6 +422,25 @@ suite.describe('patches and textures', function()
     expect(buffer.tostring(texture.pixels)).toBe(Overhung)
     expect(buffer.tostring(texture.opaque)).toBe '\1\1\0\0\1\1\0\0\1\1\1\1\1\0\1\1'
     expect(bank:get 'MISSING').toBe(nil)
+  end)
+end)
+
+suite.describe('views', function()
+  suite.it('draws walls, a window, a flat and the sky, each WAD in its own textures', function()
+    local first = wadModule.open(writeFixture(viewWad(0)))
+    local map = mapModule.load(first, 'E1M1')
+    local start = mapModule.playerStart(map, 1)
+    local frame, palette = render.view(map, first, start.x, start.y, start.angle)
+
+    expect({ frame.width, frame.height, buffer.len(frame.pixels) }).toEqual { 320, 200, 64000 }
+    expect(buffer.tostring(palette.rgb)).toBe(buffer.tostring(first:read 'PLAYPAL'))
+    expect(fingerprint(frame.pixels)).toBe 'e4091966'
+    expect(fingerprint((render.view(map, first, 8, -8, 100)).pixels)).toBe '3683b4a3'
+
+    -- Other textures written to the same path are another WAD, and the first keeps its own.
+    local second = wadModule.open(writeFixture(viewWad(100)))
+    expect(fingerprint((render.view(map, second, start.x, start.y, start.angle)).pixels)).toBe '00916ce2'
+    expect(fingerprint((render.view(map, first, start.x, start.y, start.angle)).pixels)).toBe 'e4091966'
   end)
 end)
 
