@@ -22,6 +22,20 @@ type Room = {
   sectorSpecial: number?,
 }
 
+-- Writes { name, bytes } lumps as the test WAD and returns its path.
+local function writeWad(lumps: { { string } }): string
+  local parts, directory = {}, {}
+  local offset = 12
+  for _, lump in lumps do
+    table.insert(directory, string.pack('<i4i4', offset, #lump[2]) .. name8(lump[1]))
+    table.insert(parts, lump[2])
+    offset += #lump[2]
+  end
+
+  fs.write(TestPath, 'PWAD' .. string.pack('<i4i4', #lumps, offset) .. table.concat(parts) .. table.concat(directory))
+  return TestPath
+end
+
 -- One 512 by 512 room with its corner at the origin: four one-sided walls
 -- (line 0 west, 1 north, 2 east, 3 south), one sector, one subsector, no nodes.
 local function roomWad(room: Room): string
@@ -45,7 +59,7 @@ local function roomWad(room: Room): string
   end
   table.insert(blockmap, string.pack('<i2i2i2i2i2i2', 0, 0, 1, 2, 3, -1))
 
-  local lumps = {
+  return writeWad {
     { 'E1M1', '' },
     { 'THINGS', table.concat(things) },
     { 'LINEDEFS', table.concat(lines) },
@@ -58,17 +72,56 @@ local function roomWad(room: Room): string
     { 'REJECT', '\0' },
     { 'BLOCKMAP', table.concat(blockmap) },
   }
+end
 
-  local parts, directory = {}, {}
-  local offset = 12
-  for _, lump in lumps do
-    table.insert(directory, string.pack('<i4i4', offset, #lump[2]) .. name8(lump[1]))
-    table.insert(parts, lump[2])
-    offset += #lump[2]
+-- The same room cut in two by a partition running north along x 256, with a one-sided wall
+-- standing in the east half along x 384 from y 128 to y 448 (line 4). The west half is one
+-- subsector and the east half, which holds the wall's seg, the other; `eastFirst` numbers the
+-- east half and its segs first. The player starts in the west half.
+local function splitRoomWad(eastFirst: boolean): string
+  local vertexes, lines, sides, segs = {}, {}, {}, {}
+  for _, spot in { { 0, 0 }, { 0, 512 }, { 512, 512 }, { 512, 0 }, { 256, 512 }, { 256, 0 }, { 384, 128 }, { 384, 448 } } do
+    table.insert(vertexes, string.pack('<i2i2', spot[1], spot[2]))
   end
 
-  fs.write(TestPath, 'PWAD' .. string.pack('<i4i4', #lumps, offset) .. table.concat(parts) .. table.concat(directory))
-  return TestPath
+  for index, ends in { { 0, 1 }, { 1, 2 }, { 2, 3 }, { 3, 0 }, { 6, 7 } } do
+    table.insert(lines, string.pack('<I2I2I2I2I2i2i2', ends[1], ends[2], 1, 0, 0, index - 1, -1))
+    table.insert(sides, string.pack('<i2i2', 0, 0) .. name8 '-' .. name8 '-' .. name8 'WALL' .. string.pack('<I2', 0))
+  end
+
+  -- Each seg is { first vertex, last vertex, line }.
+  local west = { { 0, 1, 0 }, { 1, 4, 1 }, { 5, 0, 3 } }
+  local east = { { 4, 2, 1 }, { 2, 3, 2 }, { 3, 5, 3 }, { 6, 7, 4 } }
+  local halves = if eastFirst then { east, west } else { west, east }
+  for _, half in halves do
+    for _, seg in half do
+      table.insert(segs, string.pack('<I2I2i2I2I2i2', seg[1], seg[2], 0, seg[3], 0, 0))
+    end
+  end
+
+  local blockmap = { string.pack('<i2i2i2i2', 0, 0, 5, 5) }
+  for _ = 1, 25 do
+    table.insert(blockmap, string.pack('<I2', 29))
+  end
+
+  table.insert(blockmap, string.pack('<i2i2i2i2i2i2i2', 0, 0, 1, 2, 3, 4, -1))
+
+  -- East of a partition that runs north is its front, the first child.
+  local eastChild = if eastFirst then 0x8000 else 0x8001
+  local westChild = if eastFirst then 0x8001 else 0x8000
+  return writeWad {
+    { 'E1M1', '' },
+    { 'THINGS', string.pack('<i2i2i2I2I2', 100, 256, 0, 1, 7) },
+    { 'LINEDEFS', table.concat(lines) },
+    { 'SIDEDEFS', table.concat(sides) },
+    { 'VERTEXES', table.concat(vertexes) },
+    { 'SEGS', table.concat(segs) },
+    { 'SSECTORS', if eastFirst then string.pack('<I2I2I2I2', 4, 0, 3, 4) else string.pack('<I2I2I2I2', 3, 0, 4, 3) },
+    { 'NODES', string.pack('<i2i2i2i2', 256, 0, 0, 512) .. string.rep('\0', 16) .. string.pack('<I2I2', eastChild, westChild) },
+    { 'SECTORS', string.pack('<i2i2', 0, 128) .. name8 'FLOOR' .. name8 'CEIL' .. string.pack('<i2i2i2', 160, 0, 0) },
+    { 'REJECT', '\0' },
+    { 'BLOCKMAP', table.concat(blockmap) },
+  }
 end
 
 local function run(tics: number, action: play.Action?): ()
@@ -238,6 +291,75 @@ suite.describe('play rules on a synthetic room', function()
     expect(game.gametic).toBe(90)
     run(200, { turn = 3, attack = true })
     expect(play.hash()).toBe(expected)
+  end)
+
+  suite.it('finds subsectors and checks sight through the BSP of whichever level is current', function()
+    local engine = play.engine
+
+    -- What CheckSight reads of a thing, standing at a spot given in map units.
+    local function stand(east: number, north: number): any
+      local thing: any = { height = 56 * FRACUNIT }
+      thing.x, thing.y, thing.z = east * FRACUNIT, north * FRACUNIT, 0
+      thing.subsector = engine.PointInSubsector(thing.x, thing.y)
+      return thing
+    end
+
+    local function sees(fromEast: number, fromNorth: number, toEast: number, toNorth: number): boolean
+      return engine.CheckSight(stand(fromEast, fromNorth), stand(toEast, toNorth))
+    end
+
+    local function expectTheSplitRoom(eastFirst: boolean)
+      local game = play.game
+      local west = game.subsectors[if eastFirst then 2 else 1]
+      local east = game.subsectors[if eastFirst then 1 else 2]
+
+      expect({ #game.nodes, #game.subsectors, #game.segs, west.numlines, east.numlines }).toEqual { 1, 2, 7, 3, 4 }
+      expect(engine.PointInSubsector(100 * FRACUNIT, 256 * FRACUNIT)).toBe(west)
+      expect(engine.PointInSubsector(400 * FRACUNIT, 30 * FRACUNIT)).toBe(east)
+      expect(engine.PointInSubsector(257 * FRACUNIT, 500 * FRACUNIT)).toBe(east)
+      expect(engine.PointInSubsector(256 * FRACUNIT, 40 * FRACUNIT)).toBe(west)
+      expect(game.players[0].mo.subsector).toBe(west)
+
+      -- The wall hides what lies across it, from inside its own half and from the other one.
+      expect(sees(300, 250, 450, 262)).toBe(false)
+      expect(sees(450, 262, 300, 250)).toBe(false)
+      expect(sees(100, 250, 450, 262)).toBe(false)
+      expect(sees(450, 400, 100, 100)).toBe(false)
+      expect(sees(300, 200, 450, 200)).toBe(false)
+
+      -- Past its ends, short of it, and beside it, nothing is hidden.
+      expect(sees(300, 60, 450, 70)).toBe(true)
+      expect(sees(450, 460, 300, 455)).toBe(true)
+      expect(sees(100, 20, 450, 100)).toBe(true)
+      expect(sees(100, 250, 300, 262)).toBe(true)
+      expect(sees(100, 100, 110, 400)).toBe(true)
+      expect(sees(300, 100, 310, 400)).toBe(true)
+      expect(sees(400, 100, 400, 400)).toBe(true)
+
+      -- P_DivlineSide compares a point's x with a level line's y, so a look due east along
+      -- y 384 takes both ends of the wall at x 384 to be on it, and sees through.
+      expect(sees(300, 384, 450, 384)).toBe(true)
+    end
+
+    -- Each level numbers its subsectors and segs the other way round from the one before it.
+    local saves = {}
+    for round, eastFirst in { false, true, false } do
+      local wad = wadModule.open(splitRoomWad(eastFirst))
+      play.new(wad, { nomonsters = true })
+      expectTheSplitRoom(eastFirst)
+      saves[round] = { wad = wad, eastFirst = eastFirst, data = play.save() }
+    end
+
+    -- A restored game brings its own level back, whatever was walked last.
+    for _, saved in { saves[2], saves[1], saves[3], saves[2] } do
+      play.load(saved.wad, saved.data)
+      expectTheSplitRoom(saved.eastFirst)
+    end
+
+    -- A level with no nodes at all is its one subsector.
+    local game = play.new(roomWad { things = { { 256, 64, 90, 1 } } })
+    expect(engine.PointInSubsector(400 * FRACUNIT, 30 * FRACUNIT)).toBe(game.subsectors[1])
+    expect(sees(300, 250, 450, 262)).toBe(true)
   end)
 end)
 
