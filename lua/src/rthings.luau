@@ -277,14 +277,24 @@ local function lit(data: any, color: number, light: number, distance: number, fu
     return rdataModule.light(data, color, light, distance)
 end
 
-local function sectorLight(map: any, x: number, y: number): number
+type Bounds = { minX: number, maxX: number, minY: number, maxY: number }
+
+-- The box around a map's vertices. One render asks for it once, however many things it lights.
+local function mapBounds(map: mapModule.Map): Bounds
     local minX, maxX, minY, maxY = math.huge, -math.huge, math.huge, -math.huge
     for _, vertex in map.vertices do
         minX, maxX = math.min(minX, vertex.x), math.max(maxX, vertex.x)
         minY, maxY = math.min(minY, vertex.y), math.max(maxY, vertex.y)
     end
-    if minX == math.huge or x < minX or x > maxX or y < minY or y > maxY then return 160 end
-    local sector = mapModule.sectorAt(map, x, y)
+
+    return { minX = minX, maxX = maxX, minY = minY, maxY = maxY }
+end
+
+local function sectorLight(map: any, bounds: Bounds, east: number, north: number): number
+    if bounds.minX == math.huge then return 160 end
+    if east < bounds.minX or east > bounds.maxX or north < bounds.minY or north > bounds.maxY then return 160 end
+
+    local sector = mapModule.sectorAt(map, east, north)
     if type(sector) == "table" and type(sector.light) == "number" then return sector.light end
     return 160
 end
@@ -356,6 +366,7 @@ function module.render(
     if focal <= 0 then error("rthings: focal length must be positive", 2) end
 
     local index = spriteIndex(data)
+    local bounds: Bounds? = nil
     local projected: { Projected } = {}
     for order, object in mobjs do
         if not object.removed then
@@ -379,7 +390,13 @@ function module.render(
                             local topY = centerY - (objectZ + patch.top - viewZ) * scale
                             local edgeRight = originX + patch.width * scale
                             if edgeRight >= 0 and originX < frame.width then
-                                local light = if type(object.light) == "number" then object.light else (settings.light or sectorLight(map, objectCoordinate(object.x, settings), objectCoordinate(object.y, settings)))
+                                local light = if type(object.light) == 'number' then object.light else settings.light
+                                if not light then
+                                    local east, north = objectCoordinate(object.x, settings), objectCoordinate(object.y, settings)
+                                    bounds = bounds or mapBounds(map)
+                                    light = sectorLight(map, bounds, east, north)
+                                end
+
                                 table.insert(projected, {
                                     object = object,
                                     patch = patch,
