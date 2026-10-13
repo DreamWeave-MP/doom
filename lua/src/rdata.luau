@@ -2,9 +2,10 @@
 --!native
 -- Renderer data preparation. This is the small Luau equivalent of R_InitData:
 -- keep the WAD's palette, light tables, flats, and composited wall textures in
--- one immutable view-local object.
+-- one immutable object a view. The textures are shared by every view of a WAD.
 local paletteModule = require('@doom/palette')
 local textureModule = require('@doom/texture')
+local wadModule = require('@doom/wad')
 
 local module = {}
 
@@ -15,16 +16,22 @@ export type Data = {
   wad: any,
 }
 
+-- A WAD's composited textures, kept for as long as the WAD is. Composing them is most of what
+-- a view costs, a WAD never changes once it is open, and no bank leaves the renderer.
+local banks = setmetatable({} :: { [wadModule.Wad]: textureModule.Bank }, { __mode = 'k' })
+
 function module.load(wad: any): Data
   local colormap = wad:read('COLORMAP')
   if buffer.len(colormap) < 256 then error('rdata: COLORMAP is truncated', 2) end
 
-  return {
-    palette = paletteModule.fromPlaypal(wad:read('PLAYPAL'), 0),
-    colormap = colormap,
-    textures = textureModule.load(wad),
-    wad = wad,
-  }
+  local palette = paletteModule.fromPlaypal(wad:read('PLAYPAL'), 0)
+  local textures = banks[wad]
+  if not textures then
+    textures = textureModule.load(wad)
+    banks[wad] = textures
+  end
+
+  return { palette = palette, colormap = colormap, textures = textures, wad = wad }
 end
 
 function module.flat(data: Data, wad: any, name: string, column: number, row: number): number?
