@@ -149,7 +149,12 @@ end
 function module.remaining(plan: Plan?): number
   if not plan then return 0 end
 
-  return math.max(plan.left, 0) + sum[for index in range(plan.at + 1, #plan.steps) => plan.steps[index].tics]
+  local total = math.max(plan.left, 0)
+  for index = plan.at + 1, #plan.steps do
+    total += plan.steps[index].tics
+  end
+
+  return total
 end
 
 local SpecialNames = { [11] = 'exit switch', [51] = 'secret exit switch', [52] = 'exit line', [124] = 'secret exit line' }
