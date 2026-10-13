@@ -3,19 +3,19 @@
 --
 -- The transport owns no Doom state and retains no Luau buffers: sendEvent copies its
 -- payload and pollInto fills a caller-owned buffer. Luau creates and drives servers;
--- dream.net keeps the signing key private inside server userdata.
+-- dream.udp keeps the signing key private inside server userdata.
 
 local bytes = require("@dream/bytes")
 
 type NetModule = {
-    schema: (options: { version: number, maxMessagesPerPacket: number?, channels: { { [string]: any } }, events: { { [string]: any } } }) -> dream_net_Schema,
-    client: (options: { schema: dream_net_Schema, bind: string? }) -> dream_net_Client,
-    server: (options: { schema: dream_net_Schema, address: string, protocolId: integer, maxClients: number? }) -> dream_net_Server,
+    schema: (options: { version: number, maxMessagesPerPacket: number?, channels: { { [string]: any } }, events: { { [string]: any } } }) -> dream_udp_Schema,
+    client: (options: { schema: dream_udp_Schema, bind: string? }) -> dream_udp_Client,
+    server: (options: { schema: dream_udp_Schema, address: string, protocolId: integer, maxClients: number? }) -> dream_udp_Server,
 }
 
--- Jess 0.1.0/l3i 1.3 exposes this bridge as @dream/net. A missing transport
+-- l3i 2.0 exposes this bridge as @dream/udp. A missing transport
 -- is an environment error and must remain visible to the caller.
-local net = require("@dream/net") :: NetModule
+local net = require("@dream/udp") :: NetModule
 local module = {}
 
 export type EventName = "TICCMD" | "TIC_BUNDLE" | "STATE_HASH"
@@ -42,7 +42,7 @@ export type EventIds = {
     STATE_HASH: integer,
 }
 export type Protocol = {
-    schema: dream_net_Schema,
+    schema: dream_udp_Schema,
     events: EventIds,
 }
 export type ClientOptions = {
@@ -54,11 +54,11 @@ export type ServerOptions = {
     maxClients: number?,
 }
 export type Client = {
-    handle: dream_net_Client,
+    handle: dream_udp_Client,
     protocol: Protocol,
 }
 export type Server = {
-    handle: dream_net_Server,
+    handle: dream_udp_Server,
     protocol: Protocol,
 }
 export type ClientEvent =
@@ -284,7 +284,7 @@ function module.unpackStateHash(source: buffer | string): StateHash
     return hash
 end
 
-local function eventIds(schema: dream_net_Schema): EventIds
+local function eventIds(schema: dream_udp_Schema): EventIds
     local tic = schema:eventId("TICCMD")
     local bundle = schema:eventId("TIC_BUNDLE")
     local state = schema:eventId("STATE_HASH")
@@ -327,7 +327,7 @@ function module.newServer(protocol: Protocol, options: ServerOptions): Server
     return module.wrapServer(handle, protocol)
 end
 
-function module.wrapServer(handle: dream_net_Server, protocol: Protocol): Server
+function module.wrapServer(handle: dream_udp_Server, protocol: Protocol): Server
     return { handle = handle, protocol = protocol }
 end
 
@@ -337,11 +337,11 @@ local function eventName(protocol: Protocol, id: integer): EventName
     fail("transport returned an unknown Doom event id " .. tostring(id))
 end
 
-local function clientSend(handle: dream_net_Client, id: integer, payload: buffer): ()
+local function clientSend(handle: dream_udp_Client, id: integer, payload: buffer): ()
     handle:sendEvent(id, payload)
 end
 
-local function serverSend(handle: dream_net_Server, peer: integer, id: integer, payload: buffer): ()
+local function serverSend(handle: dream_udp_Server, peer: integer, id: integer, payload: buffer): ()
     handle:sendEvent(peer, id, payload)
 end
 
