@@ -1,6 +1,6 @@
 # Doom benchmarks
 
-`bench/bench.luau` times the package through its public API: the WAD, map, texture and patch
+`bench/bench.jsl` times the package through its public API: the WAD, map, texture and patch
 readers, the indexed renderer, demo playback, play saves, observations, the canonical state
 encoder, and the wire codec. Each workload is warmed up, sized to a batch of about a tenth of a
 second, and reported as the median of seven batches, with a full collection between them. Every
@@ -12,7 +12,7 @@ result held to its own first call. Without a `doom.wad` only the state and wire 
 ```sh
 jess run --package jpk/doom/lua --package-path jpk \
   --capability filesystem.read --capability network.transport \
-  jpk/doom/lua/bench/bench.luau <folder holding doom.wad> [filter] [pin]
+  jpk/doom/lua/bench/bench.jsl <folder holding doom.wad> [filter] [pin]
 ```
 
 ## The move onto l3i 2.0, base against head

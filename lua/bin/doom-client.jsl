@@ -13,7 +13,7 @@ local ticCount = tonumber(arg[5] or '700') or 700
 local playerCount = tonumber(arg[6] or '4') or 4
 local sessionDir = arg[7]
 if not wadPath or not tokenPath then
-    error('usage: doom-client.luau <IWAD> <MAP> <tokens.txt> <slot> [tics] [players] [agent-session-dir]')
+    error('usage: doom-client.jsl <IWAD> <MAP> <tokens.txt> <slot> [tics] [players] [agent-session-dir]')
 end
 
 if playerCount < 1 or playerCount > 4 or playerCount ~= math.floor(playerCount) then
@@ -66,7 +66,7 @@ while game.gametic < ticCount do
     end
     local now = os.clock()
     if now >= nextTic then
-        -- With a session folder the slot is driven by plans from doom-agent.luau and
+        -- With a session folder the slot is driven by plans from doom-agent.jsl and
         -- reports what it sees there; without one it runs the canned patrol.
         local command
         if sessionDir then

@@ -4,7 +4,7 @@
 -- renderer, demo playback, play saves, observations, the canonical state encoder, and the wire
 -- codec. Run on a release build as
 --   jess run --package lua --package-path .. --capability filesystem.read
---     --capability network.transport lua/bench/bench.luau [wad folder] [filter] [pin]
+--     --capability network.transport lua/bench/bench.jsl [wad folder] [filter] [pin]
 -- It prints one line per workload: its name, a tab, and the seconds one call takes. The WAD
 -- workloads need `doom.wad` in the folder given (the working folder by default) and are left out
 -- without it. Every workload's result is checked: against the value pinned below when the WAD is

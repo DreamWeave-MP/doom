@@ -1,11 +1,11 @@
 --!nonstrict
--- One player's side of a doom-arena.luau session: join, look, and act.
+-- One player's side of a doom-arena.jsl session: join, look, and act.
 local fs = require('@jess/fs')
 local agent = require('@doom/agent')
 
 local dir, slot, verb = arg[1], tonumber(arg[2] or ''), arg[3]
 if not dir or not slot or not verb then
-  print('usage: doom-agent.luau <session-dir> <slot> join|look|act <step> [<step> ...]')
+  print('usage: doom-agent.jsl <session-dir> <slot> join|look|act <step> [<step> ...]')
   print('  a step is words like: forward=50 side=-20 turn=45 attack use weapon=shotgun for=20')
   print('  forward/side run -50 to 50; turn is degrees over the whole step, positive left; for is tics')
   return

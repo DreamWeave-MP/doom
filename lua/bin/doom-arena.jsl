@@ -1,6 +1,6 @@
 --!nonstrict
 -- A live deathmatch for players that plan instead of pressing keys. The host
--- runs the game at a chosen tic rate; each slot's player (see doom-agent.luau)
+-- runs the game at a chosen tic rate; each slot's player (see doom-agent.jsl)
 -- reads its observation file and writes plans, whenever it likes. A slot with
 -- no plan left stands still, so a slow thinker never stalls the others.
 local fs = require('@jess/fs')
@@ -14,7 +14,7 @@ local ticLimit = tonumber(arg[6] or '21000') or 21000
 local fragLimit = tonumber(arg[7] or '20') or 20
 local waitSeconds = tonumber(arg[8] or '600') or 600
 if not wadPath or not mapName or not dir then
-  error('usage: doom-arena.luau <IWAD> <MAP> <session-dir> [players=4] [tics-per-second=10] [tic-limit=21000] [frag-limit=20] [ready-wait-seconds=600]')
+  error('usage: doom-arena.jsl <IWAD> <MAP> <session-dir> [players=4] [tics-per-second=10] [tic-limit=21000] [frag-limit=20] [ready-wait-seconds=600]')
 end
 
 if playerCount < 1 or playerCount > 4 or rate <= 0 or rate > 35 then error('players must be 1 to 4 and the rate 1 to 35 tics per second') end
@@ -88,7 +88,7 @@ local function writeObservations(): ()
 end
 
 -- Every command is kept in the vanilla demo format, so the match replays here
--- (`doom.luau demo`) and in any port that plays version 1.9 demos.
+-- (`doom.jsl demo`) and in any port that plays version 1.9 demos.
 local skill = 3
 local demo = { string.char(109, skill, game.gameepisode, game.gamemap, 1, 0, 0, 1, 0) }
 for slot = 0, 3 do
