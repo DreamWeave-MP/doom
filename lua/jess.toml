@@ -4,7 +4,7 @@ manifest_version = 1
 id = "org.dreamweave.doom"
 version = "0.1.0"
 jess_api = "1"
-include = ["src", "bin", "README.md", "LICENSE.TXT"]
+include = ["src", "bin", "tests", "README.md", "LICENSE.TXT"]
 tests = ["tests/wad_test.jsl", "tests/net_test.jsl", "tests/play_test.jsl"]
 
 [modules]
