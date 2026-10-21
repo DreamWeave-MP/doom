@@ -1,0 +1,49 @@
+{
+  "schema_version": "3",
+  "document": "lock",
+  "project": "70f3f079-226d-48ac-be5a-73fb327eb7c0",
+  "note": "Written by CI when a release tag is pushed: what each published release's archive contains. Do not edit.",
+  "releases": [
+    {
+      "version": "0.1.0",
+      "locked_from": "5569e4625d534608a9a339d68c4fbc3ef51e9e1b",
+      "artifacts": [
+        {
+          "id": "jpk",
+          "format": "jpk",
+          "filename": "org.dreamweave.doom-0.1.0.jpk",
+          "media_type": "application/vnd.jess.jpk",
+          "size": 251404,
+          "digests": {
+            "sha256": "39cdd9d741ebc0844b3d01c5f77aba7f39d36877c76ddc9be1248fbf02a5f524"
+          },
+          "jess": {
+            "package": "org.dreamweave.doom",
+            "jess_api": "1",
+            "content_digest": "ec39bcb4c02fd165455d9dfa1a22bae2d105740f286edaa414482eccf54db8f4",
+            "dependencies": {}
+          }
+        }
+      ],
+      "runtimes": {},
+      "platforms": [],
+      "provides": [],
+      "relationships": [],
+      "components": [
+        {
+          "id": "main",
+          "name": "DOOM for Jess",
+          "path": ".",
+          "required": true,
+          "default": true,
+          "requires": [],
+          "conflicts": [],
+          "suggested_with": []
+        }
+      ],
+      "groups": [],
+      "extensions": {},
+      "critical_extensions": []
+    }
+  ]
+}
