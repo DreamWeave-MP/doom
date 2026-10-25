@@ -129,15 +129,15 @@ function module.show(spectator: any, game: any): boolean
   local palette = nil
   for slot = 0, spectator.slots - 1 do
     local player = game.players[slot]
-    if player and player.mo then
-      local x, y, angle, things = viewOf(game, slot)
-      local frame, colors = render.view(spectator.map, game.wad, x, y, angle, things)
-      palette = colors
-      local left = (slot % spectator.columns) * FrameWidth
-      local top = (slot // spectator.columns) * FrameHeight
-      for row = 0, FrameHeight - 1 do
-        buffer.copy(spectator.pixels, (top + row) * stride + left, frame.pixels, row * FrameWidth, FrameWidth)
-      end
+    if not (player and player.mo) then continue end
+
+    local east, north, angle, things = viewOf(game, slot)
+    local frame, colors = render.view(spectator.map, game.wad, east, north, angle, things)
+    palette = colors
+    local left = (slot % spectator.columns) * FrameWidth
+    local top = (slot // spectator.columns) * FrameHeight
+    for row = 0, FrameHeight - 1 do
+      buffer.copy(spectator.pixels, (top + row) * stride + left, frame.pixels, row * FrameWidth, FrameWidth)
     end
   end
 
