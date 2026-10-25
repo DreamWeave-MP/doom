@@ -17,11 +17,21 @@ local textureModule = require '@doom/texture'
 local wadModule = require '@doom/wad'
 local expect = test.expect
 local suite = test.new()
-local fs = jess.fs
+local fs = require('@dream/fs')
 
 type LumpSpec = { name: string, data: string }
 
-local TestPath = fs.join(fs.cwd(), 'target', 'doom-tests', 'synthetic.wad')
+local TestFolder = fs.join(fs.cwd() :: string, 'target', 'doom-tests')
+local TestPath = fs.join(TestFolder, 'synthetic.wad')
+
+--- Writes `data` to `path`, raising what went wrong.
+local function write(path: string, data: string | buffer)
+  local written, problem = fs.writeFile(path, data)
+  assert(written, problem)
+end
+
+local made, unmade = fs.mkdir(TestFolder, { recursive = true })
+assert(made, unmade)
 
 local function name8(name: string): string return string.sub(name .. string.rep('\0', 8), 1, 8) end
 
@@ -47,7 +57,7 @@ local function wadBytes(kind: string, lumps: { LumpSpec }): buffer
 end
 
 local function writeFixture(data: buffer): string
-  fs.write(TestPath, data)
+  write(TestPath, data)
   return TestPath
 end
 
@@ -304,9 +314,10 @@ suite.describe('WAD directories', function()
   suite.it('lays an overlay after the first file, where its lumps win by name', function()
     local base = writeFixture(fixture())
     local overlay = TestPath .. '.overlay'
-    fs.write(overlay, wadBytes('IWAD', { { name = 'PAYLOAD', data = 'third' }, { name = 'EXTRA', data = 'more' } }))
+    write(overlay, wadBytes('IWAD', { { name = 'PAYLOAD', data = 'third' }, { name = 'EXTRA', data = 'more' } }))
 
-    local baseLength = fs.size(base)
+    local stat, problem = fs.stat(base)
+    local baseLength = assert(stat, problem).size
     local wad = wadModule.open(base, { overlay })
     fs.remove(overlay)
 

@@ -2,7 +2,7 @@
 --!native
 -- p_spec.c, p_doors.c, p_floor.c, p_ceilng.c, p_plats.c, p_lights.c,
 -- p_switch.c, and p_telept.c: sector movers, lights, and every line special.
-local P: any = require('./core')
+local P: any = require('./core').shared
 
 local G = P.G
 local MT = P.MT
@@ -1246,4 +1246,4 @@ function P.SpawnSpecials(): ()
   end
 end
 
-return P
+return { shared = P }

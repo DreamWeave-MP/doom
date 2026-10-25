@@ -34,8 +34,8 @@ end
 local folder: string?, filter: string?, mode: string? = ...
 local only = if filter and filter ~= '' then filter else nil
 local pinning = mode == 'pin'
-local fs = jess.fs
-local wadPath = fs.join(folder or fs.cwd(), 'doom.wad')
+local fs = require('@dream/fs')
+local wadPath = fs.join(folder or fs.cwd() :: string, 'doom.wad')
 
 -- The size of the 2024 re-release's doom.wad, the one the pinned results below were taken from.
 local KnownSize = 12996515
@@ -439,7 +439,8 @@ netWorkloads()
 
 if fs.exists(wadPath) then
   -- Another doom.wad is still timed; its results are only held to their own first call.
-  if fs.size(wadPath) ~= KnownSize then table.clear(Pinned) end
+  local stat, problem = fs.stat(wadPath)
+  if assert(stat, problem).size ~= KnownSize then table.clear(Pinned) end
 
   local wad = wadModule.open(wadPath)
   readerWorkloads(wad)

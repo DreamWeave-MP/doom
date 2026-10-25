@@ -10,9 +10,11 @@ local test = require '@jess/test'
 local wadModule = require '@doom/wad'
 local expect = test.expect
 local suite = test.new()
-local fs = jess.fs
+local fs = require('@dream/fs')
 
-local TestPath = fs.join(fs.cwd(), 'target', 'doom-tests', 'play.wad')
+local TestFolder = fs.join(fs.cwd(), 'target', 'doom-tests')
+local TestPath = fs.join(TestFolder, 'play.wad')
+assert(fs.mkdir(TestFolder, { recursive = true }))
 local FRACUNIT = 65536
 
 local function name8(name: string): string return string.sub(name .. string.rep('\0', 8), 1, 8) end
@@ -33,7 +35,7 @@ local function writeWad(lumps: { { string } }): string
     offset += #lump[2]
   end
 
-  fs.write(TestPath, 'PWAD' .. string.pack('<i4i4', #lumps, offset) .. table.concat(parts) .. table.concat(directory))
+  assert(fs.writeFile(TestPath, 'PWAD' .. string.pack('<i4i4', #lumps, offset) .. table.concat(parts) .. table.concat(directory)))
   return TestPath
 end
 
@@ -474,7 +476,7 @@ suite.describe('IWAD demos', function()
       expect(result.summary.map).toBe(demo[4])
       expect(result.tics).toBe(demo[5])
       expect(player.alive).toBe(false)
-      if fs.size(path) == demo[2] then expect(result.summary.hash).toBe(demo[6]) end
+      if assert(fs.stat(path)).size == demo[2] then expect(result.summary.hash).toBe(demo[6]) end
     end
   end)
 

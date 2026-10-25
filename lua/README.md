@@ -32,8 +32,9 @@ relies on one of those can drift.
 
 ## Running
 
-Every command is `jess run --package doom.jpk --capability network.transport doom.jsl ...` (or
-`--package lua lua/bin/doom.jsl` from this repository):
+Every command is `jess run --package doom.jpk --capability network.transport --capability
+filesystem.read --capability filesystem.write doom.jsl ...` (or `--package lua
+lua/bin/doom.jsl` from this repository):
 
     doom.jsl info      DOOM.WAD
     doom.jsl demo      DOOM.WAD DEMO1          # play a demo lump or a .lmp file, print the outcome
@@ -67,7 +68,8 @@ can walk in ten directions. One game runs per Jess runtime.
 The host runs the match at a chosen speed and never waits for anyone: a slot with no plan
 stands still.
 
-    jess run --package lua --capability network.transport lua/bin/doom-arena.jsl \
+    jess run --package lua --capability network.transport --capability filesystem.read \
+      --capability filesystem.write lua/bin/doom-arena.jsl \
       doom2.wad MAP01 session 4 10 6000 10
 
 That is four players, ten tics per second, a 6000-tic limit, and a frag limit of ten. Each

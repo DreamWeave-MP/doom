@@ -3,7 +3,7 @@
 -- runs the game at a chosen tic rate; each slot's player (see doom-agent.jsl)
 -- reads its observation file and writes plans, whenever it likes. A slot with
 -- no plan left stands still, so a slow thinker never stalls the others.
-local fs = require('@jess/fs')
+local fs = require('@dream/fs')
 local play = require('@doom/play')
 local agent = require('@doom/agent')
 
@@ -19,7 +19,7 @@ end
 
 if playerCount < 1 or playerCount > 4 or rate <= 0 or rate > 35 then error('players must be 1 to 4 and the rate 1 to 35 tics per second') end
 
-fs.createDir(dir)
+assert(fs.mkdir(dir, { recursive = true }))
 for _, name in fs.list(dir) do
   if string.match(name, '^slot%d%.') or name == 'stop' or name == 'status.txt' or name == 'events.log' then fs.remove(fs.join(dir, name)) end
 end
@@ -75,15 +75,15 @@ local function writeStatus(phase: string): ()
     )
   end
 
-  fs.replace(fs.join(dir, 'status.txt'), table.concat(lines, '\n') .. '\n')
-  fs.replace(fs.join(dir, 'events.log'), table.concat(events, '\n') .. '\n')
+  agent.replace(fs.join(dir, 'status.txt'), table.concat(lines, '\n') .. '\n')
+  agent.replace(fs.join(dir, 'events.log'), table.concat(events, '\n') .. '\n')
 end
 
 local function writeObservations(): ()
   for slot = 0, playerCount - 1 do
     local extra = table.clone(recent[slot])
     table.insert(extra, `plan tics left {agent.remaining(plans[slot])}; game runs {rate} tics per second`)
-    fs.replace(agent.observationPath(dir, slot), agent.describe(slot, extra))
+    agent.replace(agent.observationPath(dir, slot), agent.describe(slot, extra))
   end
 end
 
@@ -96,7 +96,7 @@ for slot = 0, 3 do
 end
 
 local function writeDemo(): ()
-  fs.replace(fs.join(dir, 'match.lmp'), table.concat(demo) .. '\128')
+  agent.replace(fs.join(dir, 'match.lmp'), table.concat(demo) .. '\128')
 end
 
 -- The start barrier: every slot's player says it is ready, or the wait ends.
@@ -185,4 +185,4 @@ writeObservations()
 writeStatus('finished')
 writeDemo()
 print(`final state hash {play.hash()}; the whole match is in {fs.join(dir, 'match.lmp')}`)
-print(fs.read(fs.join(dir, 'status.txt')))
+print(fs.readFileString(fs.join(dir, 'status.txt')))

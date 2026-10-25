@@ -1,4 +1,5 @@
 --!nonstrict
+local fs = require('@dream/fs')
 local doom = require('@doom')
 
 local function usage(): ()
@@ -55,7 +56,7 @@ elseif command == 'run' then
 elseif command == 'demo' then
   -- A demo is a lump name, or a .lmp file such as an arena match.
   local name = arg[3] or 'DEMO1'
-  local result = doom.play.playDemo(wad, if jess.fs.isFile(name) then jess.fs.readBuffer(name) :: buffer else name)
+  local result = doom.play.playDemo(wad, if fs.isFile(name) then assert(fs.readFile(name)) :: buffer else name)
   print(`played {result.tics} of {result.length} demo tics`)
   report()
 elseif command == 'trace' then

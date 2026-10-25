@@ -1,7 +1,7 @@
 --!nonstrict
 -- @doom: the host-facing root. Opens WADs, runs the play simulation headless,
 -- and draws the title, automap, and first-person view to indexed frames.
-local fs = require('@jess/fs')
+local fs = require('@dream/fs')
 local wadModule = require('@doom/wad')
 local mapModule = require('@doom/map')
 local render = require('@doom/render')
@@ -22,7 +22,7 @@ end
 function module.renderTitle(path: string, output: string): any
   local wad = wadModule.open(path)
   local frame, palette = render.title(wad)
-  fs.write(output, render.ppm(frame, palette))
+  assert(fs.writeFile(output, render.ppm(frame, palette)))
   return { output = output, width = frame.width, height = frame.height, lump = 'TITLEPIC' }
 end
 
@@ -69,12 +69,12 @@ module.summary = play.summary
 
 function module.save(path: string?): buffer
   local data = play.save()
-  if path then fs.write(path, data) end
+  if path then assert(fs.writeFile(path, data)) end
   return data
 end
 
 function module.load(path: string, source: string | buffer): any
-  local data = if type(source) == 'string' then fs.readBuffer(source) else source
+  local data = if type(source) == 'string' then assert(fs.readFile(source)) else source
   if not data then error(`doom: cannot read save '{source}'`, 2) end
 
   play.load(path, data)
@@ -106,7 +106,7 @@ function module.render(output: string?): any
   local x, y, angle = consoleView(game)
   local map = mapModule.load(game.wad, game.mapname)
   local frame, palette = render.view(map, game.wad, x, y, angle, mobjList(game))
-  if output then fs.write(output, render.ppm(frame, palette)) end
+  if output then assert(fs.writeFile(output, render.ppm(frame, palette))) end
   return { output = output, map = game.mapname, x = x, y = y, angle = angle, width = frame.width, height = frame.height, frame = frame, palette = palette }
 end
 
@@ -134,7 +134,7 @@ function module.renderMap(path: string, mapName: string, output: string, demoNam
   end
 
   local frame, palette = render.automap(map, wad, trace)
-  fs.write(output, render.ppm(frame, palette))
+  assert(fs.writeFile(output, render.ppm(frame, palette)))
   return {
     output = output,
     map = mapName,

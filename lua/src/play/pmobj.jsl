@@ -2,7 +2,7 @@
 --!native
 -- p_mobj.c, p_inter.c, p_user.c, and p_pspr.c: map objects, damage and
 -- pickups, player movement, and the weapon state machine.
-local P: any = require('./core')
+local P: any = require('./core').shared
 
 local G = P.G
 local FixedMul, idiv, i32 = P.FixedMul, P.idiv, P.i32
@@ -1261,4 +1261,4 @@ function P.MovePsprites(player: any): ()
   psprites[1].sx, psprites[1].sy = psprites[0].sx, psprites[0].sy
 end
 
-return P
+return { shared = P }

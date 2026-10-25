@@ -1,11 +1,11 @@
 --!strict
 -- Generates src/play/info.jsl from Linux Doom 1.10's info.h and info.c:
 --   jess run lua/tools/geninfo.jsl DOOM-master/linuxdoom-1.10 lua/src/play/info.jsl
-local fs = require('@jess/fs')
+local fs = require('@dream/fs')
 
 local sourceDir, output = ...
-local header = fs.read(`{sourceDir}/info.h`) :: string
-local source = fs.read(`{sourceDir}/info.c`) :: string
+local header = fs.readFileString(`{sourceDir}/info.h`) :: string
+local source = fs.readFileString(`{sourceDir}/info.c`) :: string
 
 local Flags = {
   MF_SPECIAL = 1,
@@ -149,6 +149,8 @@ end
 if typeCount ~= #typeNames then error(`geninfo: parsed {typeCount} types for {#typeNames} names`) end
 
 table.insert(out, '}\n\nreturn { S = S, MT = MT, states = states, mobjinfo = mobjinfo }\n')
-fs.createDir(string.match(output, '^(.*)/[^/]*$') :: string)
-fs.write(output, table.concat(out))
+local made, unmade = fs.mkdir(string.match(output, '^(.*)/[^/]*$') :: string, { recursive = true })
+assert(made, unmade)
+local written, problem = fs.writeFile(output, table.concat(out))
+assert(written, problem)
 print(`wrote {stateCount} states and {typeCount} mobj types to {output}`)

@@ -2,7 +2,7 @@
 --!native
 -- @doom/play: the Linux Doom 1.10 play simulation. One game per runtime, held
 -- in `play.game`; the functions here are the host-facing surface over it.
-local P: any = require('./core')
+local P: any = require('./core').shared
 require('./pmap')
 require('./pmobj')
 require('./penemy')

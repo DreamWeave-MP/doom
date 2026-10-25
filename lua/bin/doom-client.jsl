@@ -1,5 +1,6 @@
 --!strict
 -- Separate-process Luau deathmatch client for the headless Doom harness.
+local fs = require('@dream/fs')
 local play = require '@doom/play'
 local agent = require '@doom/agent'
 local net = require '@doom/net'
@@ -25,7 +26,7 @@ if player < 1 or player > playerCount or player ~= math.floor(player) then
 end
 
 local tokenLines = {}
-local tokenText = jess.fs.read(tokenPath)
+local tokenText = fs.readFileString(tokenPath)
 if not tokenText then
     error(`cannot read connect-token file {tokenPath}`)
 end
@@ -84,7 +85,7 @@ while game.gametic < ticCount do
                 chat = 0,
                 buttons = if cmd then cmd.buttons else 0,
             }
-            jess.fs.replace(agent.observationPath(sessionDir, player - 1), agent.describe(player - 1))
+            agent.replace(agent.observationPath(sessionDir, player - 1), agent.describe(player - 1))
         else
             command = net.botCommand(game.gametic, { period = 35, attackEvery = 7 })
         end

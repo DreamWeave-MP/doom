@@ -3,7 +3,7 @@
 -- p_enemy.c: monster movement, targeting, and every monster state action.
 -- Sound calls are gone, but the P_Random draws that picked a sound stay, since
 -- they advance the shared random stream.
-local P: any = require('./core')
+local P: any = require('./core').shared
 
 local G = P.G
 local FixedMul, idiv = P.FixedMul, P.idiv
@@ -804,4 +804,4 @@ end
 
 actions.A_SpawnFly, actions.A_SpawnSound = spawnFly, spawnFly
 
-return P
+return { shared = P }

@@ -5,7 +5,7 @@
 -- into one ticcmd per tic and falls back to standing still when it runs out.
 -- Plans and observations cross between processes as small files in a session
 -- folder, one pair per slot.
-local fs = require('@jess/fs')
+local fs = require('@dream/fs')
 local play = require('./play/api')
 
 local module = {}
@@ -82,6 +82,14 @@ function module.observationPath(dir: string, slot: number): string
   return fs.join(dir, `slot{slot}.obs`)
 end
 
+-- Writes `contents` to `path` whole, through a file beside it renamed over it, so a reader in
+-- another process sees the old file or the new one and never half of either.
+function module.replace(path: string, contents: string): ()
+  local staged = `{path}.writing`
+  assert(fs.writeFile(staged, contents))
+  assert(fs.rename(staged, path))
+end
+
 function module.readyPath(dir: string, slot: number): string
   return fs.join(dir, `slot{slot}.ready`)
 end
@@ -93,12 +101,12 @@ function module.writePlan(dir: string, slot: number, seq: number, steps: { Step 
     table.insert(lines, `{step.tics} {step.forward} {step.side} {step.turn} {step.buttons}`)
   end
 
-  fs.replace(planPath(dir, slot), table.concat(lines, '\n') .. '\n')
+  module.replace(planPath(dir, slot), table.concat(lines, '\n') .. '\n')
 end
 
 -- Returns the slot's plan when it is newer than `lastSeq`.
 function module.readPlan(dir: string, slot: number, lastSeq: number?): Plan?
-  local text = fs.read(planPath(dir, slot))
+  local text = fs.readFileString(planPath(dir, slot))
   if not text then return nil end
 
   local seq = tonumber(string.match(text, '^seq (%d+)'))

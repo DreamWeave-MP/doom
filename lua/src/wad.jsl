@@ -2,7 +2,7 @@
 --!native
 -- DOOM WAD directory/lump reader. Files are loaded in order; later lumps
 -- override earlier names, matching W_InitMultipleFiles/W_CheckNumForName.
-local fs = require('@jess/fs')
+local fs = require('@dream/fs')
 local bytes = require('@dream/bytes')
 
 export type Lump = { index: number, name: string, offset: number, size: number }
@@ -148,7 +148,7 @@ function module.open(paths: string | { string }, overlays: { string }?): Wad
   local files: { { path: string, kind: string, data: buffer, lumps: { Lump } } } = {}
   local total = 0
   for _, path in requested do
-    local data = fs.readBuffer(path)
+    local data = fs.readFile(path)
     if not data then error(`wad: cannot read '{path}'`, 2) end
 
     local kind, lumps = parseFile(data, path)

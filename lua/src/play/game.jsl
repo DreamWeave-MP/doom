@@ -3,7 +3,7 @@
 -- g_game.c and p_tick.c: the game loop around the play simulation. New games,
 -- level loading, player rebirth and deathmatch spawns, level exits, the
 -- intermission, and map progression.
-local P: any = require('./core')
+local P: any = require('./core').shared
 
 local G = P.G
 local S, MT = P.S, P.MT
@@ -376,4 +376,4 @@ function P.InitNew(wad: any, options: Options?): ()
   doLoadLevel()
 end
 
-return P
+return { shared = P }

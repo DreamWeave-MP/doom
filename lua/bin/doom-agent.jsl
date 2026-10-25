@@ -1,6 +1,6 @@
 --!nonstrict
 -- One player's side of a doom-arena.jsl session: join, look, and act.
-local fs = require('@jess/fs')
+local fs = require('@dream/fs')
 local agent = require('@doom/agent')
 
 local dir, slot, verb = arg[1], tonumber(arg[2] or ''), arg[3]
@@ -12,11 +12,11 @@ if not dir or not slot or not verb then
 end
 
 local function look(): ()
-  print(fs.read(agent.observationPath(dir, slot)) or 'no observation yet: the arena host has not started')
+  print(fs.readFileString(agent.observationPath(dir, slot)) or 'no observation yet: the arena host has not started')
 end
 
 if verb == 'join' then
-  fs.replace(agent.readyPath(dir, slot), 'ready\n')
+  agent.replace(agent.readyPath(dir, slot), 'ready\n')
   print(`slot {slot} is ready`)
   look()
 elseif verb == 'look' then
@@ -29,8 +29,8 @@ elseif verb == 'act' then
 
   local steps = agent.parseSteps(texts)
   local seqPath = fs.join(dir, `slot{slot}.seq`)
-  local seq = (tonumber(fs.read(seqPath) or '') or 0) + 1
-  fs.replace(seqPath, `{seq}\n`)
+  local seq = (tonumber(fs.readFileString(seqPath) or '') or 0) + 1
+  agent.replace(seqPath, `{seq}\n`)
   agent.writePlan(dir, slot, seq, steps)
   print(`plan {seq} queued: {#steps} steps, {agent.planTics(steps)} tics; it replaces any plan still running`)
 else

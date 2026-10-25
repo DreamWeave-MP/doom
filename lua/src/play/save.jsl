@@ -5,7 +5,7 @@
 -- graph: every table numbered in discovery order, each written as its array
 -- part followed by its keyed part, with references by number. Level geometry
 -- is part of the graph, so a save restores without re-reading the map lumps.
-local P: any = require('./core')
+local P: any = require('./core').shared
 local bytes = require('@dream/bytes')
 
 local G = P.G
@@ -193,4 +193,4 @@ function P.Restore(wad: any, data: buffer): ()
   P.SetFastTables(G.fastparm or G.gameskill == 4)
 end
 
-return P
+return { shared = P }

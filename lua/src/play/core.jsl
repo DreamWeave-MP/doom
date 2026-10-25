@@ -2,8 +2,9 @@
 --!native
 -- Shared state, arithmetic, and level setup for the Linux Doom 1.10 play
 -- simulation (m_fixed.c, m_random.c, tables.c, r_main.c, p_setup.c, p_tick.c).
--- Every other play module adds its functions to the table returned here, the
--- way the C sources share one set of globals.
+-- Every other play module adds its functions to `shared`, the way the C sources
+-- share one set of globals. A package module's export is frozen; the table
+-- inside it isn't.
 local flat = require('./flat')
 local info = require('./info')
 local tables = require('../tables')
@@ -512,4 +513,4 @@ function P.SetupLevel(marker: string): ()
   P.SpawnSpecials()
 end
 
-return P
+return { shared = P }

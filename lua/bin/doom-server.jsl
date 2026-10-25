@@ -1,6 +1,7 @@
 --!strict
 -- Luau-owned headless DOOM deathmatch server. Each slot's token is an opaque credential;
 -- the native dream.udp userdata retains the signing key, while all simulation remains here.
+local fs = require('@dream/fs')
 local play = require '@doom/play'
 local net = require '@doom/net'
 local netgame = require '@doom/netgame'
@@ -47,7 +48,8 @@ local tokens = {}
 for slot = 1, playerCount do
     tokens[slot] = netgame.connectToken(host, slot)
 end
-jess.fs.write(tokenPath, table.concat(tokens, '\n') .. '\n')
+local written, problem = fs.writeFile(tokenPath, table.concat(tokens, '\n') .. '\n')
+assert(written, problem)
 print(`DOOM host {game.mapname} at {host.server.handle.address}; {playerCount} tokens written to {tokenPath}`)
 
 local connectDeadline = os.clock() + 30
