@@ -45,6 +45,11 @@ lua/bin/doom.jsl` from this repository):
     doom.jsl title     DOOM.WAD title.ppm
     doom.jsl map       DOOM.WAD E1M5 map.ppm DEMO1
     doom.jsl view      DOOM.WAD E1M1 view.ppm
+    doom.jsl watch     DOOM.WAD DEMO1          # play a demo in a window, live
+
+`watch` opens a window, so it needs a Jess built with windows (the `window` feature). The
+software renderer draws each frame as it always has, into DOOM's 8-bit indexed frame; the GPU
+colors it through the palette at the window's size.
 
 From Luau:
 
@@ -81,9 +86,11 @@ player then drives one slot:
 
 A plan is up to sixteen steps; each step holds `forward=`, `back=`, `side=` (-50 to 50),
 `turn=` (degrees over the step, positive left), `attack`, `use`, `weapon=`, and `for=` (tics).
-A new plan replaces the one running. The session folder also holds `status.txt` (the
-scoreboard), `events.log` (kills and respawns), and `match.lmp`: the whole match as a version
-1.9 demo, which `doom.jsl demo doom2.wad session/match.lmp` replays to the same state hash.
+A new plan replaces the one running. Ending the arena's arguments with `watch` opens a window
+showing every player's view, two across, updated every tic. The session folder also holds
+`status.txt` (the scoreboard), `events.log` (kills and respawns), and `match.lmp`: the whole
+match as a version 1.9 demo, which `doom.jsl demo doom2.wad session/match.lmp` replays to the
+same state hash.
 
 ## Network deathmatch
 

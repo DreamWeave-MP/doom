@@ -8,6 +8,7 @@ local function usage(): ()
   print('  title     <IWAD> <out.ppm>')
   print('  map       <IWAD> <E1M1|MAP01> <out.ppm> [DEMO1]')
   print('  view      <IWAD> <E1M1|MAP01> <out.ppm> [DEMO1] [tics]')
+  print('  watch     <IWAD> [DEMO1] [tics]       (a window, live)')
   print('  run       <IWAD> <MAP> [tics] [DEMO1]')
   print('  demo      <IWAD> <DEMO1|file.lmp>')
   print('  trace     <IWAD> <MAP> [DEMO1] [tics]')
@@ -44,6 +45,15 @@ elseif command == 'title' then
 elseif command == 'view' then
   local result = doom.renderView(wad, arg[3] or 'E1M1', arg[4] or 'doom-view.ppm', arg[5], tonumber(arg[6] or ''))
   print(`wrote {result.output}: {result.map} at ({result.x}, {result.y}) angle {result.angle}, {result.demoTics} demo tics`)
+elseif command == 'watch' then
+  -- A demo played in a window, from the console player's eyes, at the speed the window draws.
+  local spectator = require('@doom/spectator')
+  local watching = nil
+  doom.run(wad, nil, tonumber(arg[4] or ''), arg[3] or 'DEMO1', function(game: any): ()
+    watching = watching or spectator.open(1, 2, `DOOM: {arg[3] or 'DEMO1'}`)
+    if not spectator.show(watching, game) then error('the window was closed', 0) end
+  end)
+  report()
 elseif command == 'map' then
   local result = doom.renderMap(wad, arg[3] or 'E1M1', arg[4] or 'doom-map.ppm', arg[5])
   print(

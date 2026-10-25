@@ -6,6 +6,7 @@
 local fs = require('@dream/fs')
 local play = require('@doom/play')
 local agent = require('@doom/agent')
+local spectatorModule = require('@doom/spectator')
 
 local wadPath, mapName, dir = arg[1], arg[2], arg[3]
 local playerCount = tonumber(arg[4] or '4') or 4
@@ -13,8 +14,9 @@ local rate = tonumber(arg[5] or '10') or 10
 local ticLimit = tonumber(arg[6] or '21000') or 21000
 local fragLimit = tonumber(arg[7] or '20') or 20
 local waitSeconds = tonumber(arg[8] or '600') or 600
+local watching = arg[9] == 'watch'
 if not wadPath or not mapName or not dir then
-  error('usage: doom-arena.jsl <IWAD> <MAP> <session-dir> [players=4] [tics-per-second=10] [tic-limit=21000] [frag-limit=20] [ready-wait-seconds=600]')
+  error('usage: doom-arena.jsl <IWAD> <MAP> <session-dir> [players=4] [tics-per-second=10] [tic-limit=21000] [frag-limit=20] [ready-wait-seconds=600] [watch]')
 end
 
 if playerCount < 1 or playerCount > 4 or rate <= 0 or rate > 35 then error('players must be 1 to 4 and the rate 1 to 35 tics per second') end
@@ -123,6 +125,7 @@ local step = 1 / rate
 local nextTic = os.clock()
 local cmds = {}
 local winner: number? = nil
+local spectator = nil
 while game.gametic < ticLimit and not winner and not fs.exists(fs.join(dir, 'stop')) do
   if os.clock() < nextTic then continue end
 
@@ -145,6 +148,11 @@ while game.gametic < ticLimit and not winner and not fs.exists(fs.join(dir, 'sto
   end
 
   play.tick(cmds)
+  -- Every player's view, live, for as long as the window is open; closing it stops nothing.
+  if watching then
+    spectator = spectator or spectatorModule.open(playerCount, if playerCount > 2 then 1 else 2, `DOOM: {mapName}`)
+    if not spectatorModule.show(spectator, game) then watching = false end
+  end
 
   if game.gamestate ~= 'level' then
     note(everyone, 'the level was exited')

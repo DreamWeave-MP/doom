@@ -26,6 +26,7 @@ tests = ["tests/wad_test.jsl", "tests/net_test.jsl", "tests/play_test.jsl"]
 "@doom/rthings" = "src/rthings.jsl"
 "@doom/play" = "src/play/api.jsl"
 "@doom/agent" = "src/agent.jsl"
+"@doom/spectator" = "src/spectator.jsl"
 "@doom" = "src/init.jsl"
 
 [[layer]]
@@ -49,6 +50,7 @@ exports = [
   "@doom/rthings",
   "@doom/play",
   "@doom/agent",
+  "@doom/spectator",
   "@doom",
 ]
 
