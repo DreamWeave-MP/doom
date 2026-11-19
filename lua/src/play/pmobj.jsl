@@ -333,6 +333,7 @@ function P.SpawnPlayer(mthing: any): ()
   player.mo = mobj
   player.playerstate = P.PST_LIVE
   player.refire = 0
+  player.message = nil
   player.damagecount, player.bonuscount = 0, 0
   player.extralight, player.fixedcolormap = 0, 0
   player.viewheight = VIEWHEIGHT
@@ -576,6 +577,50 @@ local Ammo = {
 local Weapons = { BFUG = 6, MGUN = 3, CSAW = 7, LAUN = 4, PLAS = 5, SHOT = 2, SGN2 = 8 }
 local DropAware = { MGUN = true, SHOT = true, SGN2 = true }
 
+-- The GOT* strings of d_englsh.h, by sprite. A key's is set only by the first of its colour.
+local PickupMessages = {
+  ARM1 = 'Picked up the armor.',
+  ARM2 = 'Picked up the MegaArmor!',
+  BON1 = 'Picked up a health bonus.',
+  BON2 = 'Picked up an armor bonus.',
+  SOUL = 'Supercharge!',
+  MEGA = 'MegaSphere!',
+  BKEY = 'Picked up a blue keycard.',
+  YKEY = 'Picked up a yellow keycard.',
+  RKEY = 'Picked up a red keycard.',
+  BSKU = 'Picked up a blue skull key.',
+  YSKU = 'Picked up a yellow skull key.',
+  RSKU = 'Picked up a red skull key.',
+  STIM = 'Picked up a stimpack.',
+  MEDI = 'Picked up a medikit.',
+  PINV = 'Invulnerability!',
+  PSTR = 'Berserk!',
+  PINS = 'Partial Invisibility',
+  SUIT = 'Radiation Shielding Suit',
+  PMAP = 'Computer Area Map',
+  PVIS = 'Light Amplification Visor',
+  CLIP = 'Picked up a clip.',
+  AMMO = 'Picked up a box of bullets.',
+  ROCK = 'Picked up a rocket.',
+  BROK = 'Picked up a box of rockets.',
+  CELL = 'Picked up an energy cell.',
+  CELP = 'Picked up an energy cell pack.',
+  SHEL = 'Picked up 4 shotgun shells.',
+  SBOX = 'Picked up a box of shotgun shells.',
+  BPAK = 'Picked up a backpack full of ammo!',
+  BFUG = 'You got the BFG9000!  Oh, yes.',
+  MGUN = 'You got the chaingun!',
+  CSAW = 'A chainsaw!  Find some meat!',
+  LAUN = 'You got the rocket launcher!',
+  PLAS = 'You got the plasma gun!',
+  SHOT = 'You got the shotgun!',
+  SGN2 = 'You got the super shotgun!',
+}
+
+-- GOTMEDINEED, which p_inter.c tests for after the medikit has healed, so it shows only when
+-- 25 health still leaves the player under 25: never.
+local MedikitNeeded = 'Picked up a medikit that you REALLY need!'
+
 function P.TouchSpecialThing(special: any, toucher: any): ()
   local delta = special.z - toucher.z
   if delta > toucher.height or delta < -8 * FRACUNIT then return end
@@ -607,6 +652,7 @@ function P.TouchSpecialThing(special: any, toucher: any): ()
   elseif Cards[sprite] then
     local card = Cards[sprite]
     if not player.cards[card] then
+      player.message = PickupMessages[sprite]
       player.bonuscount = 6
       player.cards[card] = true
     end
@@ -641,6 +687,8 @@ function P.TouchSpecialThing(special: any, toucher: any): ()
     error(`P_SpecialThing: unknown gettable thing {sprite}`)
   end
 
+  local needed = sprite == 'MEDI' and player.health < 25
+  if not Cards[sprite] then player.message = if needed then MedikitNeeded else PickupMessages[sprite] end
   if band(special.flags, P.MF_COUNTITEM) ~= 0 then player.itemcount += 1 end
   P.RemoveMobj(special)
   player.bonuscount += 6
