@@ -1,0 +1,478 @@
+--!nonstrict
+-- The three multiplayer rulesets and the mod registry, on synthetic rooms: what each mode does
+-- to damage, keys, inventory, frags, teams, spawns and exits, and what a mod may register.
+local modApi = require('@doom/mod')
+local play = require('@doom/play')
+local rules = require('@doom/rules')
+local setup = require('@doom/setup')
+local test = require('@jess/test')
+local rooms = require('./support/rooms')
+
+local expect = test.expect
+local suite = test.new()
+
+local TestName = 'rules.wad'
+local FracUnit = 65536
+local engine = play.engine
+
+-- Two to four players along the south wall, facing north, with deathmatch starts in the corners.
+local function arena(extra: { { number } }?): string
+  local things = {
+    { 128, 64, 90, 1 },
+    { 384, 64, 90, 2 },
+    { 128, 448, 270, 3 },
+    { 384, 448, 270, 4 },
+    { 64, 64, 0, 11 },
+    { 448, 64, 0, 11 },
+    { 64, 448, 0, 11 },
+    { 448, 448, 0, 11 },
+  }
+
+  for _, thing in extra or {} do
+    table.insert(things, thing)
+  end
+
+  return rooms.roomWad(TestName, { things = things }, { { 'E1M2', { things = things } } })
+end
+
+local function present(count: number): { boolean }
+  return [for slot in range(1, 4) => slot <= count]
+end
+
+local function settings(mode: rules.Mode, changes: { [string]: any }?): rules.Settings
+  local chosen = rules.defaults(mode)
+  for key, value in changes or {} do
+    (chosen :: any)[key] = value
+  end
+
+  return chosen
+end
+
+local function start(mode: rules.Mode, count: number, changes: { [string]: any }?, extra: { { number } }?, mods: { modApi.Definition }?): any
+  local game = setup.start(arena(extra), {
+    mode = mode,
+    settings = settings(mode, changes),
+    players = present(count),
+    nomonsters = true,
+    mods = mods,
+    intermissionTics = 3,
+  })
+  return game
+end
+
+-- Each slot's command for one tic; slots left out stand still.
+local function tic(commands: { [number]: play.Action }?): ()
+  local cmds = {}
+  for slot, action in commands or {} do
+    cmds[slot] = play.command(action)
+  end
+
+  play.tick(cmds)
+end
+
+local function face(game: any, slot: number, east: number, north: number): ()
+  local mo = game.players[slot].mo
+  mo.angle = engine.PointToAngle2(mo.x, mo.y, east, north)
+end
+
+-- `shooter` faces `victim` and fires until the victim dies or `limit` tics pass.
+local function shootUntilDead(game: any, shooter: number, victim: number, limit: number?): boolean
+  for _ = 1, limit or 700 do
+    local target = game.players[victim]
+    if target.playerstate ~= engine.PST_LIVE then return true end
+
+    face(game, shooter, target.mo.x, target.mo.y)
+    tic { [shooter] = { attack = true } }
+  end
+
+  return game.players[victim].playerstate ~= engine.PST_LIVE
+end
+
+suite.afterEach(function() rooms.remove(TestName) end)
+
+suite.describe('cooperative rules', function()
+  suite.it('spawns every player at their own start and keeps friendly fire off by default', function()
+    local game = start('coop', 4)
+    for slot = 0, 3 do
+      expect(game.playeringame[slot]).toBe(true)
+    end
+
+    expect(game.players[0].mo.x).toBe(128 * FracUnit)
+    expect(game.players[1].mo.x).toBe(384 * FracUnit)
+    expect(game.players[2].mo.y).toBe(448 * FracUnit)
+    expect(game.deathmatch).toBe(0)
+
+    local before = game.players[1].health
+    for _ = 1, 140 do
+      face(game, 0, game.players[1].mo.x, game.players[1].mo.y)
+      tic { [0] = { attack = true } }
+    end
+
+    expect(game.players[1].health).toBe(before)
+    expect(game.players[0].ammo[0] < 50).toBe(true)
+  end)
+
+  suite.it('lets friendly fire through when the host turns team damage on, and credits the kill', function()
+    local game = start('coop', 2, { teamDamage = true })
+    expect(shootUntilDead(game, 0, 1)).toBe(true)
+    expect(game.players[0].frags[1]).toBe(1)
+    expect(game.players[1].frags[1]).toBe(0)
+  end)
+
+  suite.it('gives a key one player picks up to every player, or only to them', function()
+    local game = start('coop', 3, nil, { { 128, 160, 0, 5 } })
+    for _ = 1, 30 do
+      tic { [0] = { forward = 25 } }
+    end
+
+    for slot = 0, 2 do
+      expect(game.players[slot].cards[0]).toBe(true)
+    end
+
+    game = start('coop', 3, { sharedKeys = false }, { { 128, 160, 0, 5 } })
+    for _ = 1, 30 do
+      tic { [0] = { forward = 25 } }
+    end
+
+    expect(game.players[0].cards[0]).toBe(true)
+    expect(game.players[1].cards[0]).toBe(false)
+  end)
+
+  suite.it('respawns the dead at their own start, with their weapons when the host keeps inventory', function()
+    for _, keep in { false, true } do
+      local game = start('coop', 2, { teamDamage = true, keepInventory = keep }, { { 384, 160, 0, 2001 } })
+      for _ = 1, 30 do
+        tic { [1] = { forward = 25 } }
+      end
+
+      expect(game.players[1].weaponowned[2]).toBe(true)
+      expect(shootUntilDead(game, 0, 1)).toBe(true)
+      for _ = 1, 40 do
+        tic {}
+      end
+
+      tic { [1] = { use = true } }
+      tic {}
+      local reborn = game.players[1]
+      expect(reborn.playerstate).toBe(engine.PST_LIVE)
+      expect(reborn.health).toBe(100)
+      expect(reborn.mo.x).toBe(384 * FracUnit)
+      expect(reborn.mo.y).toBe(64 * FracUnit)
+      expect(reborn.weaponowned[2]).toBe(keep)
+    end
+  end)
+
+  suite.it('takes everyone through the exit one player used, to the next map together', function()
+    local game = start('coop', 3)
+    local carried = game.players[2]
+    carried.ammo[0] = 77
+    engine.ExitLevel()
+    tic {}
+    expect(game.gamestate).toBe('intermission')
+    for _ = 1, 8 do
+      tic {}
+    end
+
+    expect(game.mapname).toBe('E1M2')
+    expect(game.gamestate).toBe('level')
+    for slot = 0, 2 do
+      expect(game.players[slot].mo ~= nil).toBe(true)
+      expect(game.players[slot].playerstate).toBe(engine.PST_LIVE)
+    end
+
+    expect(game.players[2].ammo[0]).toBe(77)
+  end)
+end)
+
+suite.describe('free-for-all deathmatch', function()
+  suite.it('credits exact kills: hitscan, a barrel the killer shot, and a suicide', function()
+    local game = start('ffa', 2, { fragLimit = 0 })
+    expect(game.deathmatch).toBe(1)
+    expect(shootUntilDead(game, 0, 1)).toBe(true)
+    expect(game.players[0].frags[1]).toBe(1)
+    expect(rules.frags(game, 0)).toBe(1)
+
+    -- A barrel's explosion is credited to whoever set it off.
+    game = start('ffa', 2, { fragLimit = 0 })
+    local victim = game.players[1].mo
+    local barrel = engine.SpawnMobj(victim.x + 40 * FracUnit, victim.y, engine.ONFLOORZ, engine.MT.MT_BARREL)
+    game.players[1].health, victim.health = 10, 10
+    for _ = 1, 200 do
+      if barrel.health <= 0 and game.players[1].playerstate ~= engine.PST_LIVE then break end
+
+      face(game, 0, barrel.x, barrel.y)
+      tic { [0] = { attack = true } }
+    end
+
+    expect(game.players[1].playerstate ~= engine.PST_LIVE).toBe(true)
+    expect(game.players[0].frags[1]).toBe(1)
+    expect(game.players[1].frags[1]).toBe(0)
+
+    -- Death with no killer is the victim's own frag, which the scoreboard counts against them.
+    game = start('ffa', 2, { fragLimit = 0 })
+    engine.DamageMobj(game.players[0].mo, nil, nil, 10000)
+    expect(game.players[0].frags[0]).toBe(1)
+    expect(rules.frags(game, 0)).toBe(-1)
+  end)
+
+  suite.it('ends the level when a player reaches the frag limit, and names the winner', function()
+    local game = start('ffa', 2, { fragLimit = 1 })
+    expect(shootUntilDead(game, 1, 0)).toBe(true)
+    tic {}
+    tic {}
+    expect(game.gamestate).toBe('intermission')
+    expect(game.rules.winner).toBe(1)
+  end)
+
+  suite.it('respawns a fragged player at a deathmatch start with only a pistol', function()
+    local game = start('ffa', 2, { fragLimit = 0 }, { { 128, 160, 0, 2001 } })
+    for _ = 1, 30 do
+      tic { [0] = { forward = 25 } }
+    end
+
+    expect(shootUntilDead(game, 1, 0)).toBe(true)
+    for _ = 1, 40 do
+      tic {}
+    end
+
+    tic { [0] = { use = true } }
+    tic {}
+    local mo = game.players[0].mo
+    local spot = (mo.x // FracUnit) .. ',' .. (mo.y // FracUnit)
+    expect(table.find({ '64,64', '448,64', '64,448', '448,448' }, spot) ~= nil).toBe(true)
+    expect(game.players[0].weaponowned[2]).toBe(false)
+  end)
+end)
+
+suite.describe('team deathmatch', function()
+  local function teamGame(changes: { [string]: any }?): any
+    local chosen = { teams = rules.assignTeams({ 0, 1, 2, 3 }, { [0] = 1, [1] = 1, [2] = 1 }) }
+    for key, value in changes or {} do
+      chosen[key] = value
+    end
+
+    return start('tdm', 4, chosen)
+  end
+
+  suite.it('splits four players two against two, honoring what they asked while there is room', function()
+    local teams = rules.assignTeams({ 0, 1, 2, 3 }, { [0] = 1, [1] = 1, [2] = 1 })
+    expect(teams).toEqual { [0] = 1, [1] = 1, [2] = 2, [3] = 2 }
+    expect(rules.assignTeams({ 3, 0 }, {})).toEqual { [0] = 1, [3] = 2 }
+  end)
+
+  suite.it('colors each team, protects teammates, and scores kills of the other team', function()
+    local game = teamGame { fragLimit = 0 }
+    local shift = engine.MF_TRANSSHIFT
+    for slot = 0, 3 do
+      local translation = bit32.band(bit32.rshift(game.players[slot].mo.flags, shift), 3)
+      expect(translation).toBe(if game.rules.teams[slot] == 1 then 3 else 1)
+    end
+
+    local before = game.players[1].health
+    for _ = 1, 105 do
+      face(game, 0, game.players[1].mo.x, game.players[1].mo.y)
+      tic { [0] = { attack = true } }
+    end
+
+    expect(game.players[1].health).toBe(before)
+
+    expect(shootUntilDead(game, 0, 2)).toBe(true)
+    expect(rules.teamScore(game, 1)).toBe(1)
+    expect(rules.teamScore(game, 2)).toBe(0)
+  end)
+
+  suite.it('counts a team kill against the team when friendly fire is on', function()
+    local game = teamGame { fragLimit = 0, teamDamage = true }
+    expect(shootUntilDead(game, 0, 1)).toBe(true)
+    expect(rules.teamScore(game, 1)).toBe(-1)
+  end)
+
+  suite.it('respawns a player at the deathmatch start farthest from the enemy', function()
+    local game = teamGame { fragLimit = 0 }
+    -- The blue team stands in the north-west corner; red's dead respawn to the south-east.
+    for _, slot in { 2, 3 } do
+      local mo = game.players[slot].mo
+      engine.UnsetThingPosition(mo)
+      mo.x, mo.y = 100 * FracUnit, (400 + slot * 30) * FracUnit
+      engine.SetThingPosition(mo)
+    end
+
+    engine.DamageMobj(game.players[1].mo, nil, nil, 10000)
+    for _ = 1, 40 do
+      tic {}
+    end
+
+    tic { [1] = { use = true } }
+    tic {}
+    local mo = game.players[1].mo
+    expect(mo.x // FracUnit).toBe(448)
+    expect(mo.y // FracUnit).toBe(64)
+  end)
+
+  suite.it('ends the level when a team reaches the score limit', function()
+    local game = teamGame { fragLimit = 1 }
+    expect(shootUntilDead(game, 2, 0)).toBe(true)
+    tic {}
+    tic {}
+    expect(game.gamestate).toBe('intermission')
+    expect(game.rules.winner).toBe(2)
+  end)
+end)
+
+suite.describe('players joining and leaving', function()
+  suite.it('brings a joining player in at their start on the next tic, and takes a leaving one out', function()
+    local game = start('coop', 2)
+    engine.PlayerJoin(2)
+    tic {}
+    expect(game.playeringame[2]).toBe(true)
+    expect(game.players[2].mo.x).toBe(128 * FracUnit)
+    expect(game.players[2].mo.y).toBe(448 * FracUnit)
+    expect(game.players[2].health).toBe(100)
+
+    local body = game.players[1].mo
+    engine.PlayerLeave(1)
+    tic {}
+    expect(game.playeringame[1]).toBe(false)
+    expect(body.player).toBe(nil)
+    local found = false
+    local thinker = game.thinkercap.next
+    while thinker ~= game.thinkercap do
+      if thinker == body then found = true end
+      thinker = thinker.next
+    end
+
+    expect(found).toBe(false)
+  end)
+end)
+
+suite.describe('the mod registry', function()
+  local function definition(changes: { [string]: any }): modApi.DefinitionInput
+    local input: any = {
+      id = 'org.example.test',
+      version = '1.0.0',
+      api = 1,
+      capabilities = { 'rules' },
+      register = function() end,
+    }
+
+    for key, value in changes do
+      input[key] = value
+    end
+
+    return input
+  end
+
+  suite.it('refuses definitions that are malformed or written for a newer API', function()
+    expect(function() modApi.define(definition { id = 'NoDots' }) end).toThrow('reverse-domain')
+    expect(function() modApi.define(definition { version = '1' }) end).toThrow('semantic version')
+    expect(function() modApi.define(definition { api = 99 }) end).toThrow('needs @doom/mod API 99')
+    expect(function() modApi.define(definition { capabilities = { 'teleportation' } }) end).toThrow("unknown capability 'teleportation'")
+    expect(function() modApi.define(definition { capabilities = {} }) end).toThrow('capabilities must list')
+    expect(modApi.define(definition {}).simulation).toBe(true)
+    expect(modApi.define(definition { capabilities = { 'hud' } }).simulation).toBe(false)
+  end)
+
+  suite.it('stops a mod using a capability it did not declare', function()
+    local sneaky = modApi.define(definition {
+      capabilities = { 'hud' },
+      register = function(registry: modApi.Registry)
+        registry.hook('damage', function(): number return 0 end)
+      end,
+    })
+    expect(function() start('single', 1, nil, nil, { sneaky }) end).toThrow("without declaring the 'rules' capability")
+  end)
+
+  suite.it('registers actors, spawn tables, replacements and encounters that run in the tic order', function()
+    local zoo = modApi.define(definition {
+      id = 'org.example.zoo',
+      capabilities = { 'actors', 'spawns', 'encounters' },
+      register = function(registry: modApi.Registry)
+        registry.actor {
+          name = 'MT_TOUGHIMP',
+          base = 'MT_TROOP',
+          doomednum = 30001,
+          info = { spawnhealth = 300 },
+        }
+        registry.replace('MT_POSSESSED', 'MT_SHOTGUY')
+        registry.encounter {
+          map = 'E1M1',
+          tic = 10,
+          spawn = { { thing = 'MT_TOUGHIMP', x = 256, y = 300 } },
+          message = 'they came',
+        }
+      end,
+    })
+
+    local game = setup.start(arena { { 256, 256, 0, 30001 }, { 300, 256, 0, 3004 } }, {
+      mode = 'single',
+      mods = { zoo },
+      players = present(1),
+    })
+    local counts: { [string]: number } = {}
+    local function census()
+      table.clear(counts)
+      local thinker = game.thinkercap.next
+      while thinker ~= game.thinkercap do
+        if thinker.think == 'mobj' then counts[thinker.info.name] = (counts[thinker.info.name] or 0) + 1 end
+        thinker = thinker.next
+      end
+    end
+
+    census()
+    expect(counts.MT_TOUGHIMP).toBe(1)
+    expect(counts.MT_SHOTGUY).toBe(1)
+    expect(counts.MT_POSSESSED).toBe(nil)
+    expect(game.totalkills).toBe(2)
+
+    for _ = 1, 12 do
+      tic {}
+    end
+
+    census()
+    expect(counts.MT_TOUGHIMP).toBe(2)
+    expect(game.players[0].message).toBe('they came')
+
+    -- The next game without the mod has the built-in tables back.
+    start('single', 1)
+    expect(engine.MT.MT_TOUGHIMP).toBe(nil)
+  end)
+
+  suite.it('runs mods in the order they were composed, and saves refuse other content', function()
+    local order = {}
+    local function recorder(id: string): modApi.Definition
+      return modApi.define(definition {
+        id = id,
+        register = function(registry: modApi.Registry)
+          registry.hook('levelStart', function() table.insert(order, id) end)
+        end,
+      })
+    end
+
+    local first, second = recorder('org.example.first'), recorder('org.example.second')
+    local path = arena()
+    setup.start(path, { mode = 'coop', players = present(2), mods = { first, second } })
+    expect(order).toEqual { 'org.example.first', 'org.example.second' }
+
+    local content = setup.content { mode = 'coop', mods = { first, second } }
+    expect(#content).toBe(3)
+    expect(string.find(content[1], 'org.dreamweave.doom.rules.coop@1.0.0#', 1, true) ~= nil).toBe(true)
+    expect(string.find(content[3], 'org.example.second@1.0.0#', 1, true) ~= nil).toBe(true)
+
+    local saved = play.save()
+    expect(function() setup.load(path, saved, { mode = 'coop', mods = { second, first } }) end).toThrow('this save was made with')
+    local game = setup.load(path, saved, { mode = 'coop', mods = { first, second } })
+    expect(game.playeringame[1]).toBe(true)
+  end)
+
+  suite.it('composes the mod list as each package overrides the one before it', function()
+    local first = modApi.define(definition { id = 'org.example.first' })
+    local second = modApi.define(definition { id = 'org.example.second' })
+    local earlier = modApi.provide(first)
+    local later = modApi.provide(second)
+    later.on.host.interfaceOverride(earlier.interface)
+    expect([for mod in later.interface.list => mod.id]).toEqual { 'org.example.first', 'org.example.second' }
+    expect(function() modApi.provide(first).on.host.interfaceOverride(earlier.interface) end).toThrow('provided twice')
+  end)
+end)
+
+return suite

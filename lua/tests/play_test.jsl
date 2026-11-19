@@ -12,69 +12,18 @@ local expect = test.expect
 local suite = test.new()
 local fs = require('@dream/fs')
 
-local TestFolder = fs.join(fs.cwd(), 'target', 'doom-tests')
-local TestPath = fs.join(TestFolder, 'play.wad')
-assert(fs.mkdir(TestFolder, { recursive = true }))
+local rooms = require('./support/rooms')
+local TestName = 'play.wad'
 local FRACUNIT = 65536
 
-local function name8(name: string): string return string.sub(name .. string.rep('\0', 8), 1, 8) end
+local name8 = rooms.name8
 
-type Room = {
-  things: { { number } },
-  lineSpecials: { [number]: number }?,
-  sectorSpecial: number?,
-}
-
--- Writes { name, bytes } lumps as the test WAD and returns its path.
 local function writeWad(lumps: { { string } }): string
-  local parts, directory = {}, {}
-  local offset = 12
-  for _, lump in lumps do
-    table.insert(directory, string.pack('<i4i4', offset, #lump[2]) .. name8(lump[1]))
-    table.insert(parts, lump[2])
-    offset += #lump[2]
-  end
-
-  assert(fs.writeFile(TestPath, 'PWAD' .. string.pack('<i4i4', #lumps, offset) .. table.concat(parts) .. table.concat(directory)))
-  return TestPath
+  return rooms.writeWad(TestName, lumps)
 end
 
--- One 512 by 512 room with its corner at the origin: four one-sided walls
--- (line 0 west, 1 north, 2 east, 3 south), one sector, one subsector, no nodes.
-local function roomWad(room: Room): string
-  local corners = { { 0, 0 }, { 0, 512 }, { 512, 512 }, { 512, 0 } }
-  local vertexes, lines, sides, segs, things = {}, {}, {}, {}, {}
-  local specials = room.lineSpecials or {}
-  for index, corner in corners do
-    table.insert(vertexes, string.pack('<i2i2', corner[1], corner[2]))
-    table.insert(lines, string.pack('<I2I2I2I2I2i2i2', index - 1, index % 4, 1, specials[index - 1] or 0, 0, index - 1, -1))
-    table.insert(sides, string.pack('<i2i2', 0, 0) .. name8 '-' .. name8 '-' .. name8 'WALL' .. string.pack('<I2', 0))
-    table.insert(segs, string.pack('<I2I2i2I2I2i2', index - 1, index % 4, 0, index - 1, 0, 0))
-  end
-
-  for _, thing in room.things do
-    table.insert(things, string.pack('<i2i2i2I2I2', thing[1], thing[2], thing[3], thing[4], thing[5] or 7))
-  end
-
-  local blockmap = { string.pack('<i2i2i2i2', 0, 0, 5, 5) }
-  for _ = 1, 25 do
-    table.insert(blockmap, string.pack('<I2', 29))
-  end
-  table.insert(blockmap, string.pack('<i2i2i2i2i2i2', 0, 0, 1, 2, 3, -1))
-
-  return writeWad {
-    { 'E1M1', '' },
-    { 'THINGS', table.concat(things) },
-    { 'LINEDEFS', table.concat(lines) },
-    { 'SIDEDEFS', table.concat(sides) },
-    { 'VERTEXES', table.concat(vertexes) },
-    { 'SEGS', table.concat(segs) },
-    { 'SSECTORS', string.pack('<I2I2', 4, 0) },
-    { 'NODES', '' },
-    { 'SECTORS', string.pack('<i2i2', 0, 128) .. name8 'FLOOR' .. name8 'CEIL' .. string.pack('<i2i2i2', 160, room.sectorSpecial or 0, 0) },
-    { 'REJECT', '\0' },
-    { 'BLOCKMAP', table.concat(blockmap) },
-  }
+local function roomWad(room: rooms.Room): string
+  return rooms.roomWad(TestName, room)
 end
 
 -- The same room cut in two by a partition running north along x 256, with a one-sided wall
@@ -145,7 +94,7 @@ local function countType(game: any, name: string): number
   return count
 end
 
-suite.afterEach(function() fs.remove(TestPath) end)
+suite.afterEach(function() rooms.remove(TestName) end)
 
 suite.describe('play rules on a synthetic room', function()
   suite.it('generates the full state and thing tables', function()

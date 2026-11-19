@@ -1,0 +1,78 @@
+--!strict
+-- @doom/setup: starting and loading a game with its ruleset and mods, the one way the application,
+-- the network peers and the tests all do it, so they register the same content in the same order.
+local modApi = require('@doom/mod')
+local play = require('@doom/play')
+local rules = require('@doom/rules')
+
+local module = {}
+
+export type Start = {
+  mode: rules.Mode,
+  settings: rules.Settings?,
+  -- The rulesets to take the mode's from (the composed `doom.rules`), and the mods, in order.
+  rulesets: { [string]: modApi.Definition }?,
+  mods: { modApi.Definition }?,
+  map: string?,
+  skill: number?,
+  players: { boolean }?,
+  consoleplayer: number?,
+  nomonsters: boolean?,
+  intermissionTics: number?,
+}
+
+-- The ruleset and the mods a start registers, in registration order.
+function module.definitions(start: Start): { modApi.Definition }
+  local list: { modApi.Definition } = {}
+  local ruleset = rules.forMode(start.mode, start.rulesets)
+  if ruleset then table.insert(list, ruleset) end
+
+  for _, mod in start.mods or {} do
+    table.insert(list, mod)
+  end
+
+  return list
+end
+
+-- What a netgame's peers and a save compare: the simulation content, in order.
+function module.content(start: Start): { string }
+  return modApi.contentList(module.definitions(start))
+end
+
+local function installer(start: Start): ((engine: any) -> (), () -> modApi.Presentation)
+  local definitions = module.definitions(start)
+  local presentation: modApi.Presentation? = nil
+
+  return function(engine: any)
+    presentation = modApi.install(definitions, engine)
+  end, function(): modApi.Presentation
+    return presentation or { huds = {}, sounds = {}, listeners = {} }
+  end
+end
+
+-- Starts a game; returns it and what the mods registered for the screen and speakers.
+function module.start(wad: any, start: Start): (any, modApi.Presentation)
+  local settings = start.settings or rules.defaults(start.mode)
+  local options = rules.gameOptions(settings)
+  local install, presentation = installer(start)
+  options.setup = install
+  options.content = module.content(start)
+  options.mapName = start.map
+  options.skill = start.skill
+  options.players = start.players
+  options.consoleplayer = start.consoleplayer
+  options.nomonsters = start.nomonsters
+  options.intermissionTics = start.intermissionTics
+
+  local game = play.new(wad, options)
+  return game, presentation()
+end
+
+-- Loads a save made with the same ruleset and mods; a save made with others is refused.
+function module.load(wad: any, data: buffer, start: Start): (any, modApi.Presentation)
+  local install, presentation = installer(start)
+  local game = play.load(wad, data, install, module.content(start))
+  return game, presentation()
+end
+
+return module

@@ -5,7 +5,7 @@ id = "org.dreamweave.doom"
 version = "0.1.0"
 jess_api = "1"
 include = ["src", "bin", "tests", "README.md", "LICENSE.TXT"]
-tests = ["tests/wad_test.jsl", "tests/net_test.jsl", "tests/play_test.jsl"]
+tests = ["tests/wad_test.jsl", "tests/net_test.jsl", "tests/play_test.jsl", "tests/rules_test.jsl"]
 
 [modules]
 "@doom/fixed" = "src/fixed.jsl"
@@ -27,6 +27,9 @@ tests = ["tests/wad_test.jsl", "tests/net_test.jsl", "tests/play_test.jsl"]
 "@doom/play" = "src/play/api.jsl"
 "@doom/agent" = "src/agent.jsl"
 "@doom/spectator" = "src/spectator.jsl"
+"@doom/mod" = "src/mod/init.jsl"
+"@doom/rules" = "src/rules/init.jsl"
+"@doom/setup" = "src/setup.jsl"
 "@doom" = "src/init.jsl"
 
 [[layer]]
@@ -51,6 +54,9 @@ exports = [
   "@doom/play",
   "@doom/agent",
   "@doom/spectator",
+  "@doom/mod",
+  "@doom/rules",
+  "@doom/setup",
   "@doom",
 ]
 

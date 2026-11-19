@@ -1,0 +1,98 @@
+--!nonstrict
+-- Synthetic WADs for the tests: one square room the size of a small arena, written to a file of
+-- the caller's naming under target/doom-tests (test modules run side by side, so each names its
+-- own). They need no game data.
+local fs = require('@dream/fs')
+
+local module = {}
+
+local TestFolder = fs.join(fs.cwd(), 'target', 'doom-tests')
+assert(fs.mkdir(TestFolder, { recursive = true }))
+
+export type Room = {
+  things: { { number } },
+  lineSpecials: { [number]: number }?,
+  sectorSpecial: number?,
+}
+
+local function name8(name: string): string
+  return string.sub(name .. string.rep('\0', 8), 1, 8)
+end
+
+module.name8 = name8
+
+function module.path(name: string): string
+  return fs.join(TestFolder, name)
+end
+
+-- Writes { name, bytes } lumps as the WAD `name` and returns its path.
+function module.writeWad(name: string, lumps: { { string } }): string
+  local parts, directory = {}, {}
+  local offset = 12
+  for _, lump in lumps do
+    table.insert(directory, string.pack('<i4i4', offset, #lump[2]) .. name8(lump[1]))
+    table.insert(parts, lump[2])
+    offset += #lump[2]
+  end
+
+  local path = module.path(name)
+  assert(fs.writeFile(path, 'PWAD' .. string.pack('<i4i4', #lumps, offset) .. table.concat(parts) .. table.concat(directory)))
+  return path
+end
+
+-- One 512 by 512 room with its corner at the origin: four one-sided walls (line 0 west, 1 north,
+-- 2 east, 3 south), one sector, one subsector, no nodes. Things are { x, y, angle, type,
+-- options? }; the map is E1M1, or `map` with another marker after it when `nextMap` is given.
+function module.roomLumps(room: Room, map: string?): { { string } }
+  local corners = { { 0, 0 }, { 0, 512 }, { 512, 512 }, { 512, 0 } }
+  local vertexes, lines, sides, segs, things = {}, {}, {}, {}, {}
+  local specials = room.lineSpecials or {}
+  for index, corner in corners do
+    table.insert(vertexes, string.pack('<i2i2', corner[1], corner[2]))
+    table.insert(lines, string.pack('<I2I2I2I2I2i2i2', index - 1, index % 4, 1, specials[index - 1] or 0, 0, index - 1, -1))
+    table.insert(sides, string.pack('<i2i2', 0, 0) .. name8 '-' .. name8 '-' .. name8 'WALL' .. string.pack('<I2', 0))
+    table.insert(segs, string.pack('<I2I2i2I2I2i2', index - 1, index % 4, 0, index - 1, 0, 0))
+  end
+
+  for _, thing in room.things do
+    table.insert(things, string.pack('<i2i2i2I2I2', thing[1], thing[2], thing[3], thing[4], thing[5] or 7))
+  end
+
+  local blockmap = { string.pack('<i2i2i2i2', 0, 0, 5, 5) }
+  for _ = 1, 25 do
+    table.insert(blockmap, string.pack('<I2', 29))
+  end
+  table.insert(blockmap, string.pack('<i2i2i2i2i2i2', 0, 0, 1, 2, 3, -1))
+
+  return {
+    { map or 'E1M1', '' },
+    { 'THINGS', table.concat(things) },
+    { 'LINEDEFS', table.concat(lines) },
+    { 'SIDEDEFS', table.concat(sides) },
+    { 'VERTEXES', table.concat(vertexes) },
+    { 'SEGS', table.concat(segs) },
+    { 'SSECTORS', string.pack('<I2I2', 4, 0) },
+    { 'NODES', '' },
+    { 'SECTORS', string.pack('<i2i2', 0, 128) .. name8 'FLOOR' .. name8 'CEIL' .. string.pack('<i2i2i2', 160, room.sectorSpecial or 0, 0) },
+    { 'REJECT', '\0' },
+    { 'BLOCKMAP', table.concat(blockmap) },
+  }
+end
+
+-- The room as the WAD `name`; `rooms` adds more maps after E1M1, each { marker, room }.
+function module.roomWad(name: string, room: Room, rooms: { { any } }?): string
+  local lumps = module.roomLumps(room)
+  for _, extra in rooms or {} do
+    for _, lump in module.roomLumps(extra[2], extra[1]) do
+      table.insert(lumps, lump)
+    end
+  end
+
+  return module.writeWad(name, lumps)
+end
+
+function module.remove(name: string): ()
+  fs.remove(module.path(name))
+end
+
+return module

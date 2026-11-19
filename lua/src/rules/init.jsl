@@ -1,0 +1,333 @@
+--!strict
+-- @doom/rules: the three ways to play together, each a ruleset the game registers before any mod.
+--
+--   coop  everyone against the map: own starts, shared progress and exits, friendly fire and
+--         shared keys as the host chose, inventory kept or lost on death.
+--   ffa   deathmatch: every player against every other, frags kept exactly, a frag or time limit.
+--   tdm   two teams: team starts away from the enemy, team colors, team scores, friendly fire as
+--         the host chose, a score or time limit.
+--
+-- A ruleset is an ordinary @doom/mod definition with the `rules` capability; its settings live in
+-- the game (G.rules), so a save and every peer of a netgame hold the same ones. A mod package can
+-- replace a ruleset by providing the interface `doom.rules` (see the mod authoring guide).
+local modApi = require('@doom/mod')
+
+local module = {}
+
+export type Mode = 'single' | 'coop' | 'ffa' | 'tdm'
+
+-- What a game's rules are, as the host chose them. `teams[slot]` is 1 (red) or 2 (blue) in a
+-- team game.
+export type Settings = {
+  mode: Mode,
+  teamDamage: boolean,
+  sharedKeys: boolean,
+  keepInventory: boolean,
+  fragLimit: number,
+  timeLimit: number,
+  altDeath: boolean,
+  teams: { [number]: number },
+}
+
+module.Red, module.Blue = 1, 2
+module.TeamNames = { [1] = 'red', [2] = 'blue' }
+
+function module.defaults(mode: Mode): Settings
+  return {
+    mode = mode,
+    teamDamage = false,
+    sharedKeys = true,
+    keepInventory = false,
+    fragLimit = if mode == 'tdm' then 20 elseif mode == 'ffa' then 10 else 0,
+    timeLimit = 0,
+    altDeath = false,
+    teams = {},
+  }
+end
+
+-- The teams of a 2v2 (or any) team game: each player keeps the team they asked for while that
+-- team isn't fuller than the other, and the rest fill the smaller team, lowest slot first.
+function module.assignTeams(slots: { number }, wanted: { [number]: number }?): { [number]: number }
+  local teams: { [number]: number } = {}
+  local counts = { 0, 0 }
+  local limit = math.ceil(#slots / 2)
+  local sorted = table.clone(slots)
+  table.sort(sorted)
+  for _, slot in sorted do
+    local asked = wanted and wanted[slot]
+    local team = if asked == 1 then 1 elseif asked == 2 then 2 else nil
+    if team and counts[team] < limit then
+      teams[slot] = team
+      counts[team] += 1
+    end
+  end
+
+  for _, slot in sorted do
+    if teams[slot] then continue end
+
+    local team = if counts[1] <= counts[2] then 1 else 2
+    teams[slot] = team
+    counts[team] += 1
+  end
+
+  return teams
+end
+
+-- The options @doom/play starts a game of `settings` with.
+function module.gameOptions(settings: Settings): { [string]: any }
+  local mode = settings.mode
+  return {
+    deathmatch = if mode == 'ffa' or mode == 'tdm' then (if settings.altDeath then 2 else 1) else 0,
+    netgame = mode ~= 'single',
+    timelimit = if settings.timeLimit > 0 then settings.timeLimit else nil,
+    rules = {
+      mode = mode,
+      teamDamage = settings.teamDamage,
+      sharedKeys = settings.sharedKeys,
+      keepInventory = settings.keepInventory,
+      fragLimit = settings.fragLimit,
+      timeLimit = settings.timeLimit,
+      teams = table.clone(settings.teams),
+    },
+  }
+end
+
+local function rulesOf(engine: any): any
+  return engine.G.rules or {}
+end
+
+-- A player's frags for the scoreboard: every other player they killed, less their suicides.
+function module.frags(game: any, slot: number): number
+  local player = game.players[slot]
+  local total = 0
+  for victim = 0, 3 do
+    local count = player.frags[victim] or 0
+    if victim == slot then total -= count else total += count end
+  end
+
+  return total
+end
+
+-- A team's score: its players' kills of the other team, less their suicides and team kills.
+function module.teamScore(game: any, team: number): number
+  local teams = (game.rules and game.rules.teams) or {}
+  local total = 0
+  for slot = 0, 3 do
+    if teams[slot] ~= team then continue end
+
+    local player = game.players[slot]
+    for victim = 0, 3 do
+      local count = player.frags[victim] or 0
+      if count == 0 then continue end
+
+      if victim ~= slot and teams[victim] and teams[victim] ~= team then
+        total += count
+      else
+        total -= count
+      end
+    end
+  end
+
+  return total
+end
+
+local function sameTeam(engine: any, first: any, second: any): boolean
+  local teams = rulesOf(engine).teams or {}
+  local firstTeam, secondTeam = teams[first.index], teams[second.index]
+  return firstTeam ~= nil and firstTeam == secondTeam
+end
+
+-- Damage between two different players that the rules forbid: none of it lands, and no knockback.
+local function friendlyFire(engine: any, check: (first: any, second: any) -> boolean): ()
+  engine.AddHook('damage', 'rules', function(damage: number, target: any, _inflictor: any, source: any): number?
+    if rulesOf(engine).teamDamage then return nil end
+
+    local victim, attacker = target.player, source and source.player
+    if not (victim and attacker) or victim == attacker then return nil end
+    if check(victim, attacker) then return 0 end
+
+    return nil
+  end)
+end
+
+-- Every living player gets a key one of them picked up.
+local function sharedKeys(engine: any): ()
+  engine.AddHook('key', 'rules', function(player: any, card: number)
+    if not rulesOf(engine).sharedKeys then return end
+
+    for slot = 0, 3 do
+      local other = engine.G.players[slot]
+      if engine.G.playeringame[slot] and other ~= player and not other.cards[card] then
+        other.cards[card] = true
+        other.bonuscount = math.max(other.bonuscount, 6)
+      end
+    end
+  end)
+end
+
+-- A player who died gets back the weapons, ammo and backpack they carried; health, armor, keys
+-- and powers start again.
+local function keepInventory(engine: any): ()
+  engine.AddHook('reborn', 'rules', function(player: any, previous: any)
+    if not rulesOf(engine).keepInventory then return end
+    if not previous.weaponowned then return end
+
+    for weapon = 0, 8 do
+      player.weaponowned[weapon] = previous.weaponowned[weapon] == true
+    end
+
+    for ammo = 0, 3 do
+      player.ammo[ammo] = previous.ammo[ammo]
+      player.maxammo[ammo] = previous.maxammo[ammo]
+    end
+
+    player.backpack = previous.backpack
+    player.readyweapon, player.pendingweapon = previous.readyweapon, previous.readyweapon
+  end)
+end
+
+-- Ends the level for everyone once `reached()` says the limit is met; the time limit is the
+-- simulation's own (-timer).
+local function scoreLimit(engine: any, reached: () -> boolean): ()
+  engine.AddHook('tic', 'rules', function()
+    local game = engine.G
+    if game.gameaction or (rulesOf(engine).fragLimit or 0) <= 0 then return end
+    if reached() then engine.ExitLevel() end
+  end)
+end
+
+local Coop = modApi.define {
+  id = 'org.dreamweave.doom.rules.coop',
+  version = '1.0.0',
+  api = 1,
+  title = 'Cooperative',
+  capabilities = { 'rules' },
+  register = function(registry: modApi.Registry)
+    local engine = registry.engine
+    friendlyFire(engine, function(): boolean
+      return true
+    end)
+    sharedKeys(engine)
+    keepInventory(engine)
+  end,
+}
+
+local FreeForAll = modApi.define {
+  id = 'org.dreamweave.doom.rules.ffa',
+  version = '1.0.0',
+  api = 1,
+  title = 'Deathmatch',
+  capabilities = { 'rules' },
+  register = function(registry: modApi.Registry)
+    local engine = registry.engine
+    scoreLimit(engine, function(): boolean
+      local game = engine.G
+      for slot = 0, 3 do
+        if game.playeringame[slot] and module.frags(game, slot) >= game.rules.fragLimit then
+          game.rules.winner = slot
+          return true
+        end
+      end
+
+      return false
+    end)
+  end,
+}
+
+-- The deathmatch starts in the order a player of `team` should try them: farthest from the
+-- nearest living enemy first, ties in map order. Distances are whole map units, so every peer
+-- orders them alike.
+local function startsAwayFromEnemies(engine: any, playernum: number, starts: { any }): { any }?
+  local game = engine.G
+  local teams = rulesOf(engine).teams or {}
+  local team = teams[playernum]
+  if not team then return nil end
+
+  local enemies: { any } = {}
+  for slot = 0, 3 do
+    local mo = game.playeringame[slot] and slot ~= playernum and teams[slot] ~= team and game.players[slot].mo
+    if mo and mo.health > 0 then table.insert(enemies, mo) end
+  end
+
+  if #enemies == 0 then return nil end
+
+  local scored = {}
+  for index, start in starts do
+    local nearest = math.huge
+    for _, enemy in enemies do
+      local dx, dy = start.x - enemy.x // 65536, start.y - enemy.y // 65536
+      nearest = math.min(nearest, dx * dx + dy * dy)
+    end
+
+    table.insert(scored, { start = start, distance = nearest, index = index })
+  end
+
+  table.sort(scored, function(first: any, second: any): boolean
+    if first.distance ~= second.distance then return first.distance > second.distance end
+
+    return first.index < second.index
+  end)
+
+  return [for entry in scored => entry.start]
+end
+
+-- Red wears the red translation, blue the indigo one: the palette has no blue ramp.
+local TeamTranslation = { [1] = 3, [2] = 1 }
+
+local TeamDeathmatch = modApi.define {
+  id = 'org.dreamweave.doom.rules.tdm',
+  version = '1.0.0',
+  api = 1,
+  title = 'Team deathmatch',
+  capabilities = { 'rules' },
+  register = function(registry: modApi.Registry)
+    local engine = registry.engine
+    friendlyFire(engine, function(first: any, second: any): boolean
+      return sameTeam(engine, first, second)
+    end)
+
+    engine.AddHook('deathmatchStarts', 'rules', function(playernum: number, starts: { any }): { any }?
+      return startsAwayFromEnemies(engine, playernum, starts)
+    end)
+
+    engine.AddHook('spawnPlayer', 'rules', function(player: any)
+      local team = (rulesOf(engine).teams or {})[player.index]
+      local mo = player.mo
+      if not (team and mo) then return end
+
+      local shift = engine.MF_TRANSSHIFT
+      mo.flags = bit32.bor(bit32.band(mo.flags, bit32.bnot(bit32.lshift(3, shift))), bit32.lshift(TeamTranslation[team], shift))
+    end)
+
+    scoreLimit(engine, function(): boolean
+      local game = engine.G
+      for team = 1, 2 do
+        if module.teamScore(game, team) >= game.rules.fragLimit then
+          game.rules.winner = team
+          return true
+        end
+      end
+
+      return false
+    end)
+  end,
+}
+
+module.definitions = table.freeze {
+  coop = Coop,
+  ffa = FreeForAll,
+  tdm = TeamDeathmatch,
+}
+
+-- The ruleset a mode registers, from `rulesets` (the `doom.rules` interface when an application
+-- composed one, this module's own otherwise). Single player has none.
+function module.forMode(mode: Mode, rulesets: { [string]: modApi.Definition }?): modApi.Definition?
+  if mode == 'single' then return nil end
+
+  local chosen = (rulesets or module.definitions)[mode]
+  if not chosen then error(`doom: no ruleset for the mode '{mode}'`, 2) end
+
+  return chosen
+end
+
+return module

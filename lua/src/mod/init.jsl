@@ -1,0 +1,549 @@
+--!strict
+-- @doom/mod: the versioned API a DOOM mod is written against.
+--
+-- A mod is a Jess package. Its exported module returns a definition (`mod.define { ... }`): an
+-- id, a version, the API version it targets, the capabilities it uses, and `register`, which the
+-- game calls whenever a game starts or loads, before the first tic, with a registry limited to
+-- those capabilities. Everything a mod registers that changes the simulation (hooks, things,
+-- states, actions, weapons, pickups, spawns, encounters, rules) runs synchronously inside the
+-- tic that reaches it, in the order the mods were composed, on every peer of a netgame. What it
+-- registers for the screen and the speakers (HUD drawers, messages, sounds, event listeners)
+-- runs outside the simulation and can't change it.
+--
+-- Mods reach an application through `@jess/interfaces`: each mod package's managed module
+-- provides the interface `doom.mods` with `mod.provide(definition)`, which appends the mod to
+-- the list the packages before it composed. Load order is dependency order, so a mod that
+-- depends on another comes after it; mods that don't are ordered by package id.
+local bytes = require('@dream/bytes')
+
+local module = {}
+
+-- The API this module implements. A definition names the one it was written for; a mod written
+-- for a newer API is refused, an older one runs as long as this module still accepts it.
+module.ApiVersion = 1
+module.OldestApiVersion = 1
+
+export type Capability =
+  'rules'
+  | 'actors'
+  | 'weapons'
+  | 'pickups'
+  | 'spawns'
+  | 'maps'
+  | 'encounters'
+  | 'hud'
+  | 'audio'
+  | 'events'
+
+-- The capabilities that touch the simulation, and so are part of a netgame's negotiation and a
+-- save's header; the rest are cosmetic.
+local Simulation: { [string]: boolean } = {
+  rules = true,
+  actors = true,
+  weapons = true,
+  pickups = true,
+  spawns = true,
+  maps = true,
+  encounters = true,
+  hud = false,
+  audio = false,
+  events = false,
+}
+
+module.SimulationCapabilities = Simulation
+
+export type Definition = {
+  read id: string,
+  read version: string,
+  read api: number,
+  read title: string?,
+  read description: string?,
+  read capabilities: { Capability },
+  read register: (registry: Registry) -> (),
+  read digest: string,
+  read simulation: boolean,
+}
+
+export type DefinitionInput = {
+  id: string,
+  version: string,
+  api: number,
+  title: string?,
+  description: string?,
+  capabilities: { string },
+  register: (registry: Registry) -> (),
+  payload: { files: { string }, read: (path: string) -> buffer? }?,
+}
+
+-- An actor's frames: each `{ sprite, frame, tics, action?, next? }`, where `next` is a label in
+-- this list, a built-in state name (`S_TROO_RUN1`), or nil for the frame after it (the last
+-- one's next is S_NULL). `bright` frames draw at full light.
+export type Frame = {
+  label: string?,
+  sprite: string,
+  frame: number,
+  tics: number,
+  action: string?,
+  next: string?,
+  bright: boolean?,
+}
+
+export type ActorInput = {
+  name: string,
+  base: string?,
+  doomednum: number?,
+  info: { [string]: any }?,
+  frames: { Frame }?,
+  -- Which of `info`'s state fields (spawnstate, seestate, ...) start at which label of `frames`.
+  states: { [string]: string }?,
+}
+
+export type Encounter = {
+  map: string,
+  -- Starts on the level's first tic at or after `tic`, or when a player is within `radius` map
+  -- units of `x`, `y`, whichever the encounter names.
+  tic: number?,
+  x: number?,
+  y: number?,
+  radius: number?,
+  spawn: { { thing: string, x: number, y: number, angle: number? } },
+  message: string?,
+}
+
+-- What a mod's `register` receives. Every member checks that the mod declared the capability it
+-- needs; the error names the mod and the capability.
+export type Registry = {
+  id: string,
+  -- Simulation, `rules`: a handler for one of the simulation's hooks (see @doom/play's hooks).
+  hook: (name: string, handler: (...any) -> ...any) -> (),
+  -- Simulation, `actors`: a new thing type from a built-in one or from scratch; returns its type
+  -- number. Its frames become new states.
+  actor: (actor: ActorInput) -> number,
+  -- Simulation, `actors`: changes fields of a built-in thing's info (speed, spawnhealth, ...).
+  thing: (name: string, fields: { [string]: any }) -> (),
+  -- Simulation, `actors` or `weapons`: an action states can name, or a replacement for one.
+  action: (name: string, handler: (...any) -> ()) -> (),
+  -- Simulation, `weapons`: changes a weapon's info (ammo type, states), by slot 0 to 8.
+  weapon: (slot: number, fields: { [string]: any }) -> (),
+  -- Simulation, `pickups`: what touching a pickup of `sprite` does; true when it was taken.
+  pickup: (sprite: string, handler: (player: any, special: any) -> boolean) -> (),
+  -- Simulation, `spawns`: a map spot of editor number `doomednum` spawns `thing` (a type name),
+  -- or nothing for `false`.
+  spawn: (doomednum: number, thing: string | false) -> (),
+  -- Simulation, `spawns`: every spawn of `thing` spawns `replacement` instead.
+  replace: (thing: string, replacement: string) -> (),
+  -- Simulation, `encounters`: monsters that arrive on a map at a time or a place.
+  encounter: (encounter: Encounter) -> (),
+  -- Simulation, `maps`: which map follows `map` (`secret` for the secret exit).
+  nextMap: (map: string, following: string, secret: boolean?) -> (),
+  -- What this mod keeps in the game: a table of plain values, saved with it.
+  state: () -> { [string]: any },
+  -- The simulation's random numbers, shared with the game: 0 to 255.
+  random: () -> number,
+  -- The simulation itself, for what the members above don't reach. Its shape follows Linux Doom
+  -- 1.10's names and can change between versions of this package; prefer the members above.
+  engine: any,
+  -- Cosmetic, `hud`: drawn over the view after the status bar, with the frame and the player.
+  hud: (drawer: (frame: any, game: any, slot: number) -> ()) -> (),
+  -- Cosmetic, `audio`: a sound lump to play for a named event of `on`.
+  sound: (event: string, lump: string) -> (),
+  -- Cosmetic, `events`: a listener for the game's announcements (kills, pickups, exits) after the
+  -- tic that made them; it can't change the game.
+  on: (event: string, listener: (payload: any) -> ()) -> (),
+}
+
+-- What the game keeps of everything mods registered that isn't simulation.
+export type Presentation = {
+  huds: { { owner: string, drawer: (frame: any, game: any, slot: number) -> () } },
+  sounds: { [string]: string },
+  listeners: { [string]: { (payload: any) -> () } },
+}
+
+local Known: { [string]: boolean } = {}
+for name in Simulation do
+  Known[name] = true
+end
+
+local function fail(message: string): never
+  error(`doom mod: {message}`, 3)
+end
+
+local function semver(version: string): boolean
+  return string.match(version, '^%d+%.%d+%.%d+$') ~= nil
+    or string.match(version, '^%d+%.%d+%.%d+%-[%w%.%-]+$') ~= nil
+end
+
+-- The digest of a package payload: every file's path and bytes in the payload's canonical order,
+-- so the same package gives the same digest from its source folder and from its JPK.
+function module.payloadDigest(payload: { files: { string }, read: (path: string) -> buffer? }): string
+  local hasher = bytes.hasher('blake3')
+  for _, path in payload.files do
+    local data = payload.read(path) or buffer.create(0)
+    hasher:update(string.pack('<s4I8', path, buffer.len(data)))
+    hasher:update(data)
+  end
+
+  return bytes.toHex(hasher:finish())
+end
+
+-- Checks a definition and returns it frozen, with its digest and whether it touches the
+-- simulation. Every problem is an error naming the field.
+function module.define(input: DefinitionInput): Definition
+  if type(input) ~= 'table' then fail('a definition is a table') end
+
+  if type(input.id) ~= 'string' or not string.match(input.id, '^[a-z0-9][a-z0-9%-]*%.[a-z0-9%.%-]+$') then
+    fail(`id must be a reverse-domain name like org.example.mod, not {tostring(input.id)}`)
+  end
+
+  local id = input.id
+  if type(input.version) ~= 'string' or not semver(input.version) then
+    fail(`{id}: version must be a semantic version like 1.0.0, not {tostring(input.version)}`)
+  end
+
+  if type(input.api) ~= 'number' or input.api % 1 ~= 0 then fail(`{id}: api must be a whole number`) end
+
+  if input.api > module.ApiVersion then
+    fail(`{id} needs @doom/mod API {input.api}; this game implements {module.ApiVersion}`)
+  end
+
+  if input.api < module.OldestApiVersion then
+    fail(`{id} was written for @doom/mod API {input.api}, which this game no longer runs`)
+  end
+
+  if type(input.register) ~= 'function' then fail(`{id}: register must be a function`) end
+
+  if type(input.capabilities) ~= 'table' or #input.capabilities == 0 then
+    fail(`{id}: capabilities must list what the mod uses`)
+  end
+
+  local capabilities: { Capability } = {}
+  local simulation = false
+  for _, name in input.capabilities do
+    if not Known[name] then fail(`{id}: unknown capability '{tostring(name)}'`) end
+    if table.find(capabilities, name :: Capability) then fail(`{id}: capability '{name}' is listed twice`) end
+
+    table.insert(capabilities, name :: Capability)
+    if Simulation[name] then simulation = true end
+  end
+
+  local digest = if input.payload then module.payloadDigest(input.payload) else 'unpackaged'
+  return table.freeze {
+    id = id,
+    version = input.version,
+    api = input.api,
+    title = input.title,
+    description = input.description,
+    capabilities = capabilities,
+    register = input.register,
+    digest = digest,
+    simulation = simulation,
+  }
+end
+
+-- The interface every mod package's managed module provides as `doom.mods`.
+export type Composition = { list: { Definition } }
+
+-- The managed module a mod package returns: provides `doom.mods`, keeping the mods composed
+-- before it and adding this one after them.
+function module.provide(definition: Definition): any
+  local composed: Composition = { list = { definition } }
+
+  return {
+    on = {
+      host = {
+        interfaceOverride = function(previous: Composition)
+          local list = table.clone(previous.list)
+          for _, earlier in list do
+            if earlier.id == definition.id then error(`doom mod: {definition.id} is provided twice`) end
+          end
+
+          table.insert(list, definition)
+          composed.list = list
+        end,
+      },
+    },
+
+    interface = composed,
+  }
+end
+
+-- What negotiation and a save's header compare: each simulation mod as `id@version#digest`, in
+-- order. Cosmetic mods differ between peers freely.
+function module.contentList(definitions: { Definition }): { string }
+  return [for definition in definitions if definition.simulation => `{definition.id}@{definition.version}#{definition.digest}`]
+end
+
+local function has(definition: Definition, capability: Capability): boolean
+  return table.find(definition.capabilities, capability) ~= nil
+end
+
+-- A state number for a name: a built-in S_ name, or a label of the actor being built.
+local function resolveState(engine: any, labels: { [string]: number }, name: string?, owner: string): number
+  if not name then return 0 end
+
+  local state = labels[name] or engine.S[name]
+  if state == nil then error(`doom mod: {owner}: no state '{name}'`, 0) end
+
+  return state
+end
+
+local function addActor(engine: any, owner: string, actor: ActorInput): number
+  if type(actor.name) ~= 'string' or not string.match(actor.name, '^MT_[%w_]+$') then
+    error(`doom mod: {owner}: an actor's name is MT_ and a word, not {tostring(actor.name)}`, 0)
+  end
+
+  if engine.MT[actor.name] then error(`doom mod: {owner}: {actor.name} already exists`, 0) end
+
+  local info: { [string]: any }
+  if actor.base then
+    local base = engine.MT[actor.base]
+    if base == nil then error(`doom mod: {owner}: no thing '{actor.base}' to base {actor.name} on`, 0) end
+
+    info = table.clone(engine.mobjinfo[base])
+  else
+    info = table.clone(engine.mobjinfo[engine.MT.MT_POSSESSED])
+  end
+
+  info.name = actor.name
+  info.doomednum = actor.doomednum or -1
+  for key, value in actor.info or {} do
+    info[key] = value
+  end
+
+  local labels: { [string]: number } = {}
+  local frames = actor.frames or {}
+  local first = #engine.states + 1
+  for index, frame in frames do
+    if frame.label then labels[frame.label] = first + index - 1 end
+  end
+
+  for index, frame in frames do
+    if frame.action and not engine.actions[frame.action] then
+      error(`doom mod: {owner}: {actor.name} frame {index} names no action '{frame.action}'`, 0)
+    end
+
+    local nextState = if frame.next then resolveState(engine, labels, frame.next, owner)
+      elseif index < #frames then first + index
+      else 0
+
+    engine.states[first + index - 1] = {
+      sprite = frame.sprite,
+      frame = frame.frame + (if frame.bright then 0x8000 else 0),
+      tics = frame.tics,
+      action = frame.action or false,
+      nextstate = nextState,
+      misc1 = 0,
+      misc2 = 0,
+    }
+  end
+
+  for field, label in actor.states or {} do
+    info[field] = resolveState(engine, labels, label, owner)
+  end
+
+  local type = #engine.mobjinfo + 1
+  engine.mobjinfo[type] = info
+  engine.MT[actor.name] = type
+  return type
+end
+
+local function thingType(engine: any, owner: string, name: string): number
+  local type = engine.MT[name]
+  if type == nil then error(`doom mod: {owner}: no thing '{name}'`, 0) end
+
+  return type
+end
+
+-- Runs every definition's `register` against the simulation `engine` (the table @doom/play's
+-- setup hands over), in order, and returns what they registered for the presentation.
+function module.install(definitions: { Definition }, engine: any): Presentation
+  local presentation: Presentation = { huds = {}, sounds = {}, listeners = {} }
+  local spawns: { [number]: number | false } = {}
+  local replacements: { [number]: number } = {}
+  local pickups: { [string]: (player: any, special: any) -> boolean } = {}
+  local encounters: { { owner: string, encounter: Encounter } } = {}
+  local following: { [string]: string } = {}
+
+  for _, definition in definitions do
+    local owner = definition.id
+    local function need(capability: Capability, what: string): ()
+      if not has(definition, capability) then
+        error(`doom mod: {owner} registers {what} without declaring the '{capability}' capability`, 0)
+      end
+    end
+
+    local registry: Registry = {
+      id = owner,
+      hook = function(name: string, handler: (...any) -> ...any)
+        need('rules', `a {name} hook`)
+        engine.AddHook(name, owner, handler)
+      end,
+      actor = function(actor: ActorInput): number
+        need('actors', `the actor {tostring(actor.name)}`)
+        return addActor(engine, owner, actor)
+      end,
+      thing = function(name: string, fields: { [string]: any })
+        need('actors', `changes to {name}`)
+        local info = engine.mobjinfo[thingType(engine, owner, name)]
+        for key, value in fields do
+          if info[key] == nil then error(`doom mod: {owner}: {name} has no field '{key}'`, 0) end
+
+          info[key] = value
+        end
+      end,
+      action = function(name: string, handler: (...any) -> ())
+        if not (has(definition, 'actors') or has(definition, 'weapons')) then
+          error(`doom mod: {owner} registers the action {name} without declaring 'actors' or 'weapons'`, 0)
+        end
+
+        engine.actions[name] = handler
+      end,
+      weapon = function(slot: number, fields: { [string]: any })
+        need('weapons', `changes to weapon {slot}`)
+        local weapon = engine.weaponinfo[slot]
+        if not weapon then error(`doom mod: {owner}: no weapon slot {slot}`, 0) end
+
+        for key, value in fields do
+          if weapon[key] == nil then error(`doom mod: {owner}: weapons have no field '{key}'`, 0) end
+
+          weapon[key] = if type(value) == 'string' then resolveState(engine, {}, value, owner) else value
+        end
+      end,
+      pickup = function(sprite: string, handler: (player: any, special: any) -> boolean)
+        need('pickups', `the pickup {sprite}`)
+        pickups[sprite] = handler
+      end,
+      spawn = function(doomednum: number, thing: string | false)
+        need('spawns', `a spawn for editor number {doomednum}`)
+        spawns[doomednum] = if thing == false then false else thingType(engine, owner, thing)
+      end,
+      replace = function(thing: string, replacement: string)
+        need('spawns', `a replacement for {thing}`)
+        replacements[thingType(engine, owner, thing)] = thingType(engine, owner, replacement)
+      end,
+      encounter = function(encounter: Encounter)
+        need('encounters', `an encounter on {tostring(encounter.map)}`)
+        for _, spot in encounter.spawn do
+          thingType(engine, owner, spot.thing)
+        end
+
+        table.insert(encounters, { owner = owner, encounter = encounter })
+      end,
+      nextMap = function(map: string, next: string, secret: boolean?)
+        need('maps', `the map after {map}`)
+        following[`{string.upper(map)}{if secret then '/secret' else ''}`] = string.upper(next)
+      end,
+      state = function(): { [string]: any }
+        return engine.ModState(owner)
+      end,
+      random = function(): number
+        return engine.Random()
+      end,
+      engine = engine,
+      hud = function(drawer: (frame: any, game: any, slot: number) -> ())
+        need('hud', 'a HUD drawer')
+        table.insert(presentation.huds, { owner = owner, drawer = drawer })
+      end,
+      sound = function(event: string, lump: string)
+        need('audio', `a sound for {event}`)
+        presentation.sounds[event] = lump
+      end,
+      on = function(event: string, listener: (payload: any) -> ())
+        need('events', `a listener for {event}`)
+        local list = presentation.listeners[event]
+        if not list then
+          list = {}
+          presentation.listeners[event] = list
+        end
+
+        table.insert(list, listener)
+      end,
+    }
+
+    definition.register(registry)
+  end
+
+  if next(spawns) or next(replacements) then
+    engine.AddHook('thingType', '@doom/mod', function(type: number?, mthing: any): number?
+      local mapped = spawns[mthing.type]
+      if mapped == false then return -1 end
+
+      local chosen = mapped or type
+      if chosen and replacements[chosen] then chosen = replacements[chosen] end
+
+      return chosen
+    end)
+  end
+
+  if next(pickups) then
+    engine.AddHook('pickup', '@doom/mod', function(player: any, special: any): boolean?
+      local handler = pickups[special.sprite]
+      if not handler then return nil end
+      if not handler(player, special) then return true end
+
+      engine.RemoveMobj(special)
+      return true
+    end)
+  end
+
+  if #encounters > 0 then
+    local function start(entry: { owner: string, encounter: Encounter }, index: number): ()
+      local started = engine.ModState('@doom/mod')
+      local key = `encounter{index}`
+      if started[key] == engine.G.mapname then return end
+
+      started[key] = engine.G.mapname
+      for _, spot in entry.encounter.spawn do
+        local east, north = spot.x * engine.FRACUNIT, spot.y * engine.FRACUNIT
+        local mobj = engine.SpawnMobj(east, north, engine.ONFLOORZ, engine.MT[spot.thing])
+        mobj.angle = math.floor((spot.angle or 0) / 45) * engine.ANG45 % 4294967296
+        engine.SpawnMobj(east, north, mobj.floorz, engine.MT.MT_TFOG)
+        if bit32.band(mobj.flags, engine.MF_COUNTKILL) ~= 0 then engine.G.totalkills += 1 end
+      end
+
+      local message = entry.encounter.message
+      if message then
+        for slot = 0, 3 do
+          if engine.G.playeringame[slot] then engine.G.players[slot].message = message end
+        end
+      end
+    end
+
+    engine.AddHook('tic', '@doom/mod', function()
+      local game = engine.G
+      for index, entry in encounters do
+        local encounter = entry.encounter
+        if string.upper(encounter.map) ~= game.mapname then continue end
+
+        if encounter.tic and game.leveltime >= encounter.tic then
+          start(entry, index)
+          continue
+        end
+
+        local radius = encounter.radius
+        if not (radius and encounter.x and encounter.y) then continue end
+
+        for slot = 0, 3 do
+          local mo = game.playeringame[slot] and game.players[slot].mo
+          if not mo then continue end
+
+          local dx, dy = mo.x / engine.FRACUNIT - encounter.x, mo.y / engine.FRACUNIT - encounter.y
+          if dx * dx + dy * dy <= radius * radius then
+            start(entry, index)
+            break
+          end
+        end
+      end
+    end)
+  end
+
+  if next(following) then
+    engine.AddHook('nextMap', '@doom/mod', function(mapname: string, secret: boolean): string?
+      return following[`{mapname}{if secret then '/secret' else ''}`]
+    end)
+  end
+
+  return presentation
+end
+
+return module
