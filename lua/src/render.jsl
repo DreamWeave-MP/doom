@@ -3,7 +3,6 @@
 local paletteModule = require("@doom/palette")
 local patchModule = require("@doom/patch")
 local mapModule = require("@doom/map")
-local rmain = require("./rmain")
 
 local module = {}
 export type Frame = { pixels: buffer, width: number, height: number }
@@ -64,10 +63,6 @@ function module.automap(map: any, wad: any, trace: {{x: number, y: number}}?): (
     local playerColor = palette:nearest(255, 255, 255); local start = mapModule.playerStart(map, 1); local px, py = project(start.x, start.y)
     for d = -3, 3 do put(frame, px + d, py, playerColor); put(frame, px, py + d, playerColor) end
     return frame, palette
-end
-
-function module.view(map: any, wad: any, x: number, y: number, angle: number, mobjs: {any}?): (Frame, any)
-    return rmain.view(map, wad, x, y, angle, mobjs)
 end
 
 function module.ppm(frame: Frame, palette: any): buffer return paletteModule.toPpm(frame.pixels, frame.width, frame.height, palette) end

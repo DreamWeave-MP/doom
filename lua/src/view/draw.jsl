@@ -1,0 +1,118 @@
+--!strict
+--!native
+-- r_draw.c's drawers: a column of a wall, sprite or sky; the fuzz that draws a spectre; a column
+-- through a player's translation; and a span of a flat. Each writes one run of pixels into an
+-- indexed frame, `stride` bytes to a row, from `at`, `count + 1` pixels long as the C loops are.
+--
+-- Fractions are 16.16 fixed point held in doubles. A row of a column is its fraction's whole
+-- part, wrapped by `bits` (or, at -1, by `height`); the span takes its x and y from the whole
+-- parts of two fractions, six bits each, as a 64 by 64 flat needs.
+local module = {}
+
+-- r_draw.c's fuzzoffset: whether each fuzzed pixel copies the row above (-1) or below (1).
+local FuzzOffsets = {
+  1, -1, 1, -1, 1, 1, -1, 1, 1, -1, 1, 1, 1, -1, 1, 1, 1, -1, -1, -1, -1, 1, -1, -1, 1,
+  1, 1, 1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, -1, -1, -1, 1, 1, 1, 1, -1, 1, 1, -1, 1,
+}
+
+local FuzzTable = #FuzzOffsets
+
+--- R_DrawColumn: `source` from `base` down the column, lit through the light table that starts
+--- at `colormap` in `colormaps`.
+function module.column(
+  dest: buffer,
+  at: number,
+  stride: number,
+  count: number,
+  source: buffer,
+  base: number,
+  bits: number,
+  height: number,
+  colormaps: buffer,
+  colormap: number,
+  frac: number,
+  step: number
+): ()
+  if bits > 0 then
+    for _ = 0, count do
+      local texel = buffer.readu8(source, base + bit32.extract(frac, 16, bits))
+      buffer.writeu8(dest, at, buffer.readu8(colormaps, colormap + texel))
+      at += stride
+      frac += step
+    end
+
+    return
+  end
+
+  for _ = 0, count do
+    local texel = buffer.readu8(source, base + (frac // 65536) % height)
+    buffer.writeu8(dest, at, buffer.readu8(colormaps, colormap + texel))
+    at += stride
+    frac += step
+  end
+end
+
+--- R_DrawFuzzColumn: each pixel darkened (light table 6) from its neighbor above or below, in
+--- the order the fuzz table runs from `position`. Returns where the table got to, which carries
+--- on to the next column and the next frame.
+function module.fuzz(dest: buffer, at: number, stride: number, count: number, colormaps: buffer, position: number): number
+  for _ = 0, count do
+    local neighbor = buffer.readu8(dest, at + FuzzOffsets[position + 1] * stride)
+    buffer.writeu8(dest, at, buffer.readu8(colormaps, 6 * 256 + neighbor))
+    position += 1
+    if position == FuzzTable then position = 0 end
+
+    at += stride
+  end
+
+  return position
+end
+
+--- R_DrawTranslatedColumn: a sprite column through the translation that starts at
+--- `translation` in `translations` before it is lit.
+function module.translated(
+  dest: buffer,
+  at: number,
+  stride: number,
+  count: number,
+  source: buffer,
+  base: number,
+  translations: buffer,
+  translation: number,
+  colormaps: buffer,
+  colormap: number,
+  frac: number,
+  step: number
+): ()
+  for _ = 0, count do
+    local texel = buffer.readu8(translations, translation + buffer.readu8(source, base + bit32.extract(frac, 16, 7)))
+    buffer.writeu8(dest, at, buffer.readu8(colormaps, colormap + texel))
+    at += stride
+    frac += step
+  end
+end
+
+--- R_DrawSpan: a row of the flat at `base` in `source`, stepping across it from (xfrac, yfrac).
+function module.span(
+  dest: buffer,
+  at: number,
+  count: number,
+  source: buffer,
+  base: number,
+  colormaps: buffer,
+  colormap: number,
+  xfrac: number,
+  yfrac: number,
+  xstep: number,
+  ystep: number
+): ()
+  for _ = 0, count do
+    local spot = bit32.extract(yfrac, 16, 6) * 64 + bit32.extract(xfrac, 16, 6)
+    buffer.writeu8(dest, at, buffer.readu8(colormaps, colormap + buffer.readu8(source, base + spot)))
+    at += 1
+    xfrac += xstep
+    yfrac += ystep
+  end
+end
+
+return module

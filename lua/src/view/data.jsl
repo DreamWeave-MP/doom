@@ -1,0 +1,418 @@
+--!strict
+--!native
+-- What the renderer reads from a WAD (r_data.c, r_sky.c, the lump side of r_things.c and
+-- r_draw.c's translation tables, and p_spec.c's animation table), prepared once per WAD.
+--
+-- Wall textures are numbered as R_InitTextures numbers them, TEXTURE1 then TEXTURE2, so the
+-- numbers on the play simulation's sides index them directly; each is composed the first time a
+-- wall shows it. Flats and sprite patches are drawn straight from the WAD's bytes. Lumps come
+-- from @doom/wad's merged directory, so a PWAD's flats, sprites and patches replace the IWAD's
+-- by name.
+local module = {}
+
+--- A wall texture: its TEXTURE record and, once a wall has shown it, its composite.
+export type Texture = {
+  name: string,
+  width: number,
+  height: number,
+  --- textureheight[]: the height in fixed point, for pegging.
+  fixedHeight: number,
+  --- texturewidthmask[]: one less than the widest power of two the width holds.
+  widthMask: number,
+  --- How many bits of a row index a column reads, or -1 to wrap a row by the height instead.
+  rowBits: number,
+  lump: buffer,
+  record: number,
+  --- The composite, a column at a time (column `c` starts at `c * height`), with 128 bytes
+  --- spare at the end for a column drawer's last overshooting row.
+  pixels: buffer?,
+  opaque: buffer?,
+  --- Each column's runs of opaque rows as { top, length, top, length, ... }, by column + 1.
+  posts: { { number } },
+}
+
+--- A sprite patch, by where its lump starts in the WAD's bytes.
+export type Patch = { at: number, width: number, left: number, top: number }
+
+export type SpriteFrame = { rotate: boolean, patches: { Patch }, flips: { boolean } }
+
+export type Anim = { texture: boolean, basePic: number, numPics: number, speed: number }
+
+export type Data = {
+  wad: any,
+  bytes: buffer,
+  colormaps: buffer,
+  colormapCount: number,
+  pnames: { string },
+  textures: { [number]: Texture },
+  textureCount: number,
+  textureNumbers: { [string]: number },
+  --- Each flat's first byte in `bytes`, by flat number.
+  flats: { [number]: number },
+  flatNumbers: { [string]: number },
+  anims: { Anim },
+  textureTranslation: { [number]: number },
+  flatTranslation: { [number]: number },
+  spriteLumps: { [string]: { any } },
+  sprites: { [string]: { [number]: SpriteFrame } | false },
+  --- r_draw.c's three player translations, 256 bytes each: green to gray, brown and red.
+  translations: buffer,
+  commercial: boolean,
+}
+
+-- p_spec.c's animdefs: { is a texture, last name, first name, tics a picture shows }.
+local AnimDefs: { { any } } = {
+  { false, 'NUKAGE3', 'NUKAGE1', 8 },
+  { false, 'FWATER4', 'FWATER1', 8 },
+  { false, 'SWATER4', 'SWATER1', 8 },
+  { false, 'LAVA4', 'LAVA1', 8 },
+  { false, 'BLOOD3', 'BLOOD1', 8 },
+  { false, 'RROCK08', 'RROCK05', 8 },
+  { false, 'SLIME04', 'SLIME01', 8 },
+  { false, 'SLIME08', 'SLIME05', 8 },
+  { false, 'SLIME12', 'SLIME09', 8 },
+  { true, 'BLODGR4', 'BLODGR1', 8 },
+  { true, 'SLADRIP3', 'SLADRIP1', 8 },
+  { true, 'BLODRIP4', 'BLODRIP1', 8 },
+  { true, 'FIREWALL', 'FIREWALA', 8 },
+  { true, 'GSTFONT3', 'GSTFONT1', 8 },
+  { true, 'FIRELAVA', 'FIRELAV3', 8 },
+  { true, 'FIREMAG3', 'FIREMAG1', 8 },
+  { true, 'FIREBLU2', 'FIREBLU1', 8 },
+  { true, 'ROCKRED3', 'ROCKRED1', 8 },
+  { true, 'BFALL4', 'BFALL1', 8 },
+  { true, 'SFALL4', 'SFALL1', 8 },
+  { true, 'WFALL4', 'WFALL1', 8 },
+  { true, 'DBRAIN4', 'DBRAIN1', 8 },
+}
+
+local function name8(bytes: buffer, at: number): string
+  local text = buffer.readstring(bytes, at, 8)
+  local zero = string.find(text, '\0', 1, true)
+  if zero then text = string.sub(text, 1, zero - 1) end
+
+  return string.upper(text)
+end
+
+local function patchNames(wad: any): { string }
+  if not wad:find('PNAMES') then return {} end
+
+  local bytes = wad:read('PNAMES')
+  local count = math.min(buffer.readi32(bytes, 0), (buffer.len(bytes) - 4) // 8)
+  return [for index in range(0, count - 1) => name8(bytes, 4 + index * 8)]
+end
+
+-- How many bits of a row index reach every row: a power of two height wraps by its own bits,
+-- anything 128 or taller by 7 as R_DrawColumn's `& 127` does, and a shorter odd height by itself.
+local function rowBits(height: number): number
+  if height >= 128 then return 7 end
+
+  local bits = 0
+  while 2 ^ bits < height do
+    bits += 1
+  end
+
+  return if 2 ^ bits == height and bits > 0 then bits else -1
+end
+
+local function loadTextures(result: Data)
+  local wad = result.wad
+  local count = 0
+  for _, lumpName in { 'TEXTURE1', 'TEXTURE2' } do
+    if not wad:find(lumpName) then continue end
+
+    local lump = wad:read(lumpName)
+    for index = 0, buffer.readi32(lump, 0) - 1 do
+      local record = buffer.readi32(lump, 4 + index * 4)
+      local name = name8(lump, record)
+      local width, height = buffer.readi16(lump, record + 12), buffer.readi16(lump, record + 14)
+      local mask = 1
+      while mask * 2 <= width do
+        mask *= 2
+      end
+
+      result.textures[count] = {
+        name = name,
+        width = width,
+        height = height,
+        fixedHeight = height * 65536,
+        widthMask = mask - 1,
+        rowBits = rowBits(height),
+        lump = lump,
+        record = record,
+        pixels = nil,
+        opaque = nil,
+        posts = {},
+      }
+
+      if result.textureNumbers[name] == nil then result.textureNumbers[name] = count end
+      result.textureTranslation[count] = count
+      count += 1
+    end
+  end
+
+  result.textureCount = count
+end
+
+-- Flats and sprites sit between markers: F_START and F_END (FF_ in a PWAD), S_START and S_END
+-- (SS_). A flat is numbered once by name, and its bytes are the last lump of that name.
+local function loadMarked(result: Data)
+  local wad = result.wad
+  local inFlats, inSprites = false, false
+  local flatCount = 0
+  for _, lump in wad.lumps do
+    local name = lump.name
+    if name == 'F_START' or name == 'FF_START' then
+      inFlats = true
+    elseif name == 'F_END' or name == 'FF_END' then
+      inFlats = false
+    elseif name == 'S_START' or name == 'SS_START' then
+      inSprites = true
+    elseif name == 'S_END' or name == 'SS_END' then
+      inSprites = false
+    elseif lump.size == 0 then
+      continue
+    elseif inFlats and result.flatNumbers[name] == nil then
+      result.flatNumbers[name] = flatCount
+      result.flats[flatCount] = (wad:find(name) :: any).offset
+      result.flatTranslation[flatCount] = flatCount
+      flatCount += 1
+    elseif inSprites and #name >= 6 then
+      local prefix = string.sub(name, 1, 4)
+      local list = result.spriteLumps[prefix]
+      if not list then
+        list = {}
+        result.spriteLumps[prefix] = list
+      end
+
+      table.insert(list, lump)
+    end
+  end
+end
+
+local function loadAnims(result: Data)
+  for _, def in AnimDefs do
+    local isTexture, last, first, speed = def[1], def[2], def[3], def[4]
+    local numbers = if isTexture then result.textureNumbers else result.flatNumbers
+    local basePic, picNum = numbers[first], numbers[last]
+    if basePic == nil or picNum == nil or picNum - basePic + 1 < 2 then continue end
+
+    table.insert(result.anims, { texture = isTexture, basePic = basePic, numPics = picNum - basePic + 1, speed = speed })
+  end
+end
+
+local function translationTables(): buffer
+  local tables = buffer.create(768)
+  for index = 0, 255 do
+    if index >= 0x70 and index <= 0x7f then
+      buffer.writeu8(tables, index, 0x60 + index % 16)
+      buffer.writeu8(tables, 256 + index, 0x40 + index % 16)
+      buffer.writeu8(tables, 512 + index, 0x20 + index % 16)
+    else
+      buffer.writeu8(tables, index, index)
+      buffer.writeu8(tables, 256 + index, index)
+      buffer.writeu8(tables, 512 + index, index)
+    end
+  end
+
+  return tables
+end
+
+--- R_InitData for `wad`: its textures' directory, flats, sprites, light tables and animations.
+function module.load(wad: any): Data
+  local colormaps = wad:read('COLORMAP')
+  if buffer.len(colormaps) < 256 then error('view: COLORMAP is truncated', 2) end
+
+  local result: Data = {
+    wad = wad,
+    bytes = wad.data,
+    colormaps = colormaps,
+    colormapCount = buffer.len(colormaps) // 256,
+    pnames = patchNames(wad),
+    textures = {},
+    textureCount = 0,
+    textureNumbers = {},
+    flats = {},
+    flatNumbers = {},
+    anims = {},
+    textureTranslation = {},
+    flatTranslation = {},
+    spriteLumps = {},
+    sprites = {},
+    translations = translationTables(),
+    commercial = wad:find('MAP01') ~= nil,
+  }
+
+  loadTextures(result)
+  loadMarked(result)
+  loadAnims(result)
+  return result
+end
+
+--- R_GenerateComposite: `texture`'s patches laid into its columns, made once.
+function module.compose(result: Data, texture: Texture): buffer
+  local existing = texture.pixels
+  if existing then return existing end
+
+  local width, height = texture.width, texture.height
+  local pixels, opaque = buffer.create(width * height + 128), buffer.create(width * height)
+  local bytes, lump, record = result.bytes, texture.lump, texture.record
+  local limit = buffer.len(bytes)
+  for patch = 0, buffer.readi16(lump, record + 20) - 1 do
+    local entry = record + 22 + patch * 10
+    local originX, originY = buffer.readi16(lump, entry), buffer.readi16(lump, entry + 2)
+    local name = result.pnames[buffer.readi16(lump, entry + 4) + 1]
+    local found = if name then result.wad:find(name) else nil
+    if not found or found.size < 8 then continue end
+
+    local at = found.offset
+    local patchWidth = buffer.readi16(bytes, at)
+    for column = math.max(originX, 0), math.min(originX + patchWidth, width) - 1 do
+      local post = at + buffer.readu32(bytes, at + 8 + (column - originX) * 4)
+      while post < limit do
+        local topDelta = buffer.readu8(bytes, post)
+        if topDelta == 255 then break end
+
+        local length = buffer.readu8(bytes, post + 1)
+        local position, count = originY + topDelta, length
+
+        -- R_DrawColumnInCache moves the start of a post that rises above the texture, and
+        -- copies it from the post's first byte all the same.
+        if position < 0 then
+          count += position
+          position = 0
+        end
+
+        if position + count > height then count = height - position end
+
+        if count > 0 then
+          buffer.copy(pixels, column * height + position, bytes, post + 3, count)
+          buffer.fill(opaque, column * height + position, 1, count)
+        end
+
+        post += length + 4
+      end
+    end
+  end
+
+  texture.pixels, texture.opaque = pixels, opaque
+  return pixels
+end
+
+--- The runs of opaque rows down `column` of `texture` (masked by its width), for a masked wall.
+function module.posts(result: Data, texture: Texture, column: number): { number }
+  local cached = texture.posts[column + 1]
+  if cached then return cached end
+
+  module.compose(result, texture)
+  local opaque = texture.opaque :: buffer
+  local height = texture.height
+  local base = column * height
+  local runs = {}
+  local row = 0
+  while row < height do
+    if buffer.readu8(opaque, base + row) == 0 then
+      row += 1
+      continue
+    end
+
+    local top = row
+    while row < height and buffer.readu8(opaque, base + row) ~= 0 do
+      row += 1
+    end
+
+    table.insert(runs, top)
+    table.insert(runs, row - top)
+  end
+
+  texture.posts[column + 1] = runs
+  return runs
+end
+
+local function patchAt(result: Data, lump: any): Patch
+  local at = lump.offset
+  local bytes = result.bytes
+  return {
+    at = at,
+    width = buffer.readi16(bytes, at),
+    left = buffer.readi16(bytes, at + 4),
+    top = buffer.readi16(bytes, at + 6),
+  }
+end
+
+-- R_InstallSpriteLump. A later lump for a frame and rotation replaces an earlier one, which is
+-- how a PWAD's sprite takes the IWAD's place.
+local function install(frames: { [number]: SpriteFrame }, patch: Patch, frame: number, rotation: number, flipped: boolean)
+  if frame < 0 or frame >= 29 or rotation < 0 or rotation > 8 then return end
+
+  if rotation == 0 then
+    frames[frame] = {
+      rotate = false,
+      patches = table.create(8, patch),
+      flips = table.create(8, flipped),
+    }
+    return
+  end
+
+  local existing = frames[frame]
+  if not existing or not existing.rotate then
+    existing = { rotate = true, patches = {}, flips = table.create(8, false) }
+    frames[frame] = existing
+  end
+
+  existing.patches[rotation] = patch
+  existing.flips[rotation] = flipped
+end
+
+--- R_InitSpriteDefs for one sprite name: its frames by number, each with a patch per rotation
+--- (1 to 8). Nil when the WAD has no lumps for it.
+function module.sprite(result: Data, name: string): { [number]: SpriteFrame }?
+  local cached = result.sprites[name]
+  if cached ~= nil then return cached or nil end
+
+  local lumps = result.spriteLumps[name]
+  if not lumps then
+    result.sprites[name] = false
+    return nil
+  end
+
+  local frames: { [number]: SpriteFrame } = {}
+  for _, lump in lumps do
+    local lumpName = lump.name
+    local patch = patchAt(result, lump)
+    install(frames, patch, string.byte(lumpName, 5) - 65, string.byte(lumpName, 6) - 48, false)
+    if #lumpName >= 8 then
+      install(frames, patch, string.byte(lumpName, 7) - 65, string.byte(lumpName, 8) - 48, true)
+    end
+  end
+
+  result.sprites[name] = frames
+  return frames
+end
+
+--- P_UpdateSpecials' global animation, for the level time it last ran at: `leveltime` is the
+--- game's, one past it. Before the first tic every picture is itself.
+function module.animate(result: Data, leveltime: number)
+  local tic = leveltime - 1
+  for _, anim in result.anims do
+    local translation = if anim.texture then result.textureTranslation else result.flatTranslation
+    local basePic, numPics = anim.basePic, anim.numPics
+    for pic = basePic, basePic + numPics - 1 do
+      translation[pic] = if tic < 0 then pic else basePic + (tic // anim.speed + pic) % numPics
+    end
+  end
+end
+
+--- R_TextureNumForName for the level's sky (G_InitNew and G_DoLoadLevel's choice).
+function module.skyTexture(result: Data, commercial: boolean, episode: number, map: number): number
+  local name
+  if commercial then
+    name = if map < 12 then 'SKY1' elseif map < 21 then 'SKY2' else 'SKY3'
+  else
+    name = `SKY{math.clamp(episode, 1, 4)}`
+  end
+
+  return result.textureNumbers[name] or result.textureNumbers.SKY1 or 0
+end
+
+return module

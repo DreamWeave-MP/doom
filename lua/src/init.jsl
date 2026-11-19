@@ -5,6 +5,8 @@ local fs = require('@dream/fs')
 local wadModule = require('@doom/wad')
 local mapModule = require('@doom/map')
 local render = require('@doom/render')
+local paletteModule = require('@doom/palette')
+local view = require('@doom/view')
 local demoModule = require('@doom/demo')
 local play = require('@doom/play')
 
@@ -86,26 +88,14 @@ local function consoleView(game: any): (number, number, number)
   return mo.x / FracUnit, mo.y / FracUnit, mo.angle * 360 / 4294967296
 end
 
-local function mobjList(game: any): { any }
-  local list = {}
-  local cap = game.thinkercap
-  local thinker = cap.next
-  local own = game.players[game.consoleplayer].mo
-  while thinker ~= cap do
-    if thinker.think == 'mobj' and thinker ~= own then table.insert(list, thinker) end
-    thinker = thinker.next
-  end
-
-  return list
-end
-
--- Draws the current game from the console player's eyes. The frame uses the
--- map's static geometry: sectors moved by doors and lifts draw where they began.
-function module.render(output: string?): any
+-- Draws the current game from the console player's eyes, with their weapon, at
+-- screen size `size` (3 to 11, the whole screen by default).
+function module.render(output: string?, size: number?): any
   local game = play.game
   local x, y, angle = consoleView(game)
-  local map = mapModule.load(game.wad, game.mapname)
-  local frame, palette = render.view(map, game.wad, x, y, angle, mobjList(game))
+  local frame = render.frame()
+  view.render(view.new(game.wad), game, game.consoleplayer, frame, { size = size or 11 })
+  local palette = paletteModule.fromPlaypal(game.wad:read('PLAYPAL'), 0)
   if output then assert(fs.writeFile(output, render.ppm(frame, palette))) end
   return { output = output, map = game.mapname, x = x, y = y, angle = angle, width = frame.width, height = frame.height, frame = frame, palette = palette }
 end

@@ -1,0 +1,1903 @@
+--!strict
+--!native
+-- @doom/view: Linux Doom 1.10's software renderer over the live play state. r_main.c sets the
+-- view up, r_bsp.c walks the BSP front to back clipping walls against what is already solid,
+-- r_segs.c draws the walls and marks the floors and ceilings around them, r_plane.c fills those
+-- in a row at a time, and r_things.c draws the sprites, masked walls and the player's weapon
+-- back to front over the result. Positions are 16.16 fixed point and angles 32-bit BAM, as in
+-- the C, held in doubles.
+--
+-- The C keeps its frame state in globals, and so does this file: the locals below are those
+-- globals, valid while one call draws. The game is only read, but for the automap's ML_MAPPED on
+-- each line drawn; where the C stamps sectors with validcount to add their sprites once, the
+-- renderer keeps marks of its own.
+local data = require('@self/data')
+local draw = require('@self/draw')
+local info = require('./play/info')
+local patchModule = require('./patch')
+local tables = require('./tables')
+
+local module = {}
+
+export type Target = { pixels: buffer, width: number, height: number }
+export type Options = { size: number? }
+
+type ViewSize = {
+  blocks: number,
+  width: number,
+  height: number,
+  centerX: number,
+  centerY: number,
+  centerXFrac: number,
+  centerYFrac: number,
+  viewAngleToX: { [number]: number },
+  xToViewAngle: { [number]: number },
+  ySlope: { [number]: number },
+  distScale: { [number]: number },
+  scaleLight: { [number]: number },
+  clipAngle: number,
+  pspriteScale: number,
+  pspriteIScale: number,
+  windowX: number,
+  windowY: number,
+  back: buffer?,
+}
+
+-- A level's BSP as its lumps hold it: the play simulation keeps neither the nodes' bounding
+-- boxes nor the segs' angles and offsets.
+type Level = {
+  segs: any,
+  segCount: number,
+  v1x: { [number]: number },
+  v1y: { [number]: number },
+  v2x: { [number]: number },
+  v2y: { [number]: number },
+  angle: { [number]: number },
+  offset: { [number]: number },
+  nodeX: { [number]: number },
+  nodeY: { [number]: number },
+  nodeDx: { [number]: number },
+  nodeDy: { [number]: number },
+  boxes: { [number]: number },
+  children: { [number]: number },
+  root: number,
+}
+
+type Plane = {
+  height: number,
+  pic: string,
+  light: number,
+  minX: number,
+  maxX: number,
+  top: buffer,
+  bottom: buffer,
+}
+
+type DrawSeg = {
+  seg: number,
+  x1: number,
+  x2: number,
+  scale1: number,
+  scale2: number,
+  scaleStep: number,
+  silhouette: number,
+  bottomHeight: number,
+  topHeight: number,
+  topClip: number,
+  bottomClip: number,
+  maskedColumns: number,
+}
+
+type VisSprite = {
+  order: number,
+  x1: number,
+  x2: number,
+  gx: number,
+  gy: number,
+  gz: number,
+  gzt: number,
+  startFrac: number,
+  scale: number,
+  xIScale: number,
+  textureMid: number,
+  patch: data.Patch,
+  colormap: number,
+  flags: number,
+}
+
+export type Renderer = {
+  data: data.Data,
+  sizes: { [number]: ViewSize },
+  level: Level?,
+  fuzzPosition: number,
+  planes: { Plane },
+  drawSegs: { DrawSeg },
+  visSprites: { VisSprite },
+  spriteMarks: { [any]: number },
+  frames: number,
+}
+
+local FracUnit = 65536
+local U32 = 4294967296
+local Ang90, Ang180, Ang270 = 0x40000000, 0x80000000, 0xC0000000
+local MaxInt, MinInt = 2147483647, -2147483648
+local MinZ = 4 * FracUnit
+local AngleToFine = 524288
+local HeightUnit = 4096
+local MaxLightScale, MaxLightZ = 48, 128
+local SilBottom, SilTop, SilBoth = 1, 2, 3
+local MaxShort = 32767
+local ScreenWidth, ScreenHeight, StatusBarHeight = 320, 200, 32
+local SkyFlat = 'F_SKY1'
+local FullBright, FrameMask = 0x8000, 0x7fff
+local Shadow, TranslationBits = 0x40000, 0xc000000
+local DontPegTop, DontPegBottom, MappedFlag = 8, 16, 256
+
+-- Where the arrays that are not openings live in `openings`: screenheightarray, negonearray,
+-- and the two a sprite is clipped by, each a screen wide. Real openings follow them.
+local ScreenHeightArray, NegOneArray, SpriteBottomClip, SpriteTopClip = 0, 320, 640, 960
+local FirstOpening = 1280
+local Null = -1
+
+local finesine, finetangent, tantoangle = tables.finesine, tables.finetangent, tables.tantoangle
+local states = info.states
+
+-- r_bsp.c's checkcoord: which corners of a bounding box (top, bottom, left, right) bound it as
+-- seen from each of the nine places around it.
+local CheckCoord = {
+  [0] = { 3, 0, 2, 1 },
+  { 3, 0, 2, 0 },
+  { 3, 1, 2, 0 },
+  { 0, 0, 0, 0 },
+  { 2, 0, 2, 1 },
+  { 0, 0, 0, 0 },
+  { 3, 1, 3, 0 },
+  { 0, 0, 0, 0 },
+  { 2, 0, 3, 1 },
+  { 2, 1, 3, 1 },
+  { 2, 1, 3, 0 },
+}
+
+local function i32(value: number): number
+  value %= U32
+  return if value >= 2147483648 then value - U32 else value
+end
+
+-- ((int64)a * b) >> 16, exact in doubles by splitting b into 16-bit limbs.
+local function fixedMul(left: number, right: number): number
+  local high = right // 65536
+  local result = left * high + (left * (right - high * 65536)) // 65536
+  if result >= 2147483648 or result < -2147483648 then return i32(result) end
+
+  return result
+end
+
+local function fixedDiv(left: number, right: number): number
+  if math.abs(left) // 16384 >= math.abs(right) then return if (left < 0) ~= (right < 0) then MinInt else MaxInt end
+
+  local quotient = left / right * 65536
+  return if quotient < 0 then math.ceil(quotient) else math.floor(quotient)
+end
+
+-- C integer division: truncates toward zero.
+local function idiv(left: number, right: number): number
+  local quotient = left / right
+  return if quotient < 0 then math.ceil(quotient) else math.floor(quotient)
+end
+
+-- The globals of one frame. --------------------------------------------------------------------
+
+local viewData: data.Data = nil :: any
+local colormaps: buffer = buffer.create(0)
+local wadBytes: buffer = buffer.create(0)
+local dest: buffer = buffer.create(0)
+local stride = ScreenWidth
+local yLookup: { [number]: number } = {}
+
+local viewWidth, viewHeight, centerX, centerY = 0, 0, 0, 0
+local centerXFrac, centerYFrac, projection, clipAngle = 0, 0, 0, 0
+local viewAngleToX: { [number]: number }, xToViewAngle: { [number]: number } = {}, {}
+local ySlope: { [number]: number }, distScale: { [number]: number }, scaleLight: { [number]: number } = {}, {}, {}
+local fixedLight: { [number]: number } = table.create(MaxLightScale, 0)
+local pspriteScale, pspriteIScale = FracUnit, FracUnit
+
+local viewX, viewY, viewZ, viewAngle, viewSin, viewCos = 0, 0, 0, 0, 0, 0
+local extraLight = 0
+-- The offset of the light table every pixel uses (invulnerability, light amplification), or -1.
+local fixedColormap = -1
+
+local level: Level = nil :: any
+local segs: any = nil
+local subsectors: any = nil
+local sides: any = nil
+local levelTime = 0
+local textureTranslation: { [number]: number } = {}
+local textures: { [number]: data.Texture } = {}
+local skyTexture: data.Texture = nil :: any
+
+-- r_bsp.c
+local currentSeg, currentSegTable, sidedef, linedef = 0, nil :: any, nil :: any, nil :: any
+local frontSector: any, backSector: any = nil, nil
+local solidFirst: { [number]: number } = {}
+local solidLast: { [number]: number } = {}
+local newEnd = 0
+local drawSegs: { DrawSeg } = {}
+local drawSegCount = 0
+
+-- r_segs.c
+local segTextured, markFloor, markCeiling, maskedTexture = false, false, false, false
+local topTexture, bottomTexture, midTexture = 0, 0, 0
+local rwAngle1, rwX, rwStopX, rwCenterAngle = 0, 0, 0, 0
+local rwOffset, rwDistance, rwScale, rwScaleStep = 0, 0, 0, 0
+local rwMidTextureMid, rwTopTextureMid, rwBottomTextureMid = 0, 0, 0
+local worldTop, worldBottom, worldHigh, worldLow = 0, 0, 0, 0
+local pixHigh, pixLow, pixHighStep, pixLowStep = 0, 0, 0, 0
+local topFrac, topStep, bottomFrac, bottomStep = 0, 0, 0, 0
+local wallLights: { [number]: number } = {}
+local wallLightBase = 0
+local maskedTextureColumns = 0
+
+-- r_plane.c
+local planes: { Plane } = {}
+local planeCount = 0
+local floorPlane: Plane? = nil
+local ceilingPlane: Plane? = nil
+local openings = buffer.create(2 * 320 * 128)
+local lastOpening = FirstOpening
+local floorClip = buffer.create(2 * ScreenWidth)
+local ceilingClip = buffer.create(2 * ScreenWidth)
+local spanStart: { [number]: number } = table.create(ScreenHeight, 0)
+local planeHeight, planeZLight = 0, 0
+local baseXScale, baseYScale = 0, 0
+local cachedHeight: { [number]: number } = table.create(ScreenHeight, 0)
+local cachedDistance: { [number]: number } = table.create(ScreenHeight, 0)
+local cachedXStep: { [number]: number } = table.create(ScreenHeight, 0)
+local cachedYStep: { [number]: number } = table.create(ScreenHeight, 0)
+local flatSource: number = 0
+
+-- r_things.c
+local visSprites: { VisSprite } = {}
+local visSpriteCount = 0
+local spriteLights = 0
+local spriteMarks: { [any]: number } = {}
+local frameNumber = 0
+local mFloorClip, mCeilingClip = 0, 0
+local sprYScale, sprTopScreen, textureMid, iScale = 0, 0, 0, 0
+local fuzzPosition = 0
+
+-- View size: R_ExecuteSetViewSize, R_InitTextureMapping, R_InitBuffer. ------------------------
+
+-- R_InitLightTables: the light table for each light level and distance, as an offset.
+local zLight: { [number]: number } = {}
+for light = 0, 15 do
+  local startMap = ((15 - light) * 2) * 32 // 16
+  for distance = 0, MaxLightZ - 1 do
+    local scale = fixedDiv(160 * FracUnit, (distance + 1) * 1048576) // 4096
+    zLight[light * MaxLightZ + distance] = math.clamp(startMap - idiv(scale, 2), 0, 31) * 256
+  end
+end
+
+local function sizeOf(blocks: number): ViewSize
+  local width: number = if blocks == 11 then ScreenWidth else blocks * 32
+  local height: number = if blocks == 11 then ScreenHeight else blocks * 168 // 10 // 8 * 8
+
+  local halfX, halfY = width // 2, height // 2
+  local halfXFrac = halfX * FracUnit
+  local focalLength = fixedDiv(halfXFrac, finetangent[3072 + 1])
+
+  local angleToX: { [number]: number } = {}
+  for index = 0, 4095 do
+    local tangent = finetangent[index + 1]
+    local column
+    if tangent > FracUnit * 2 then
+      column = -1
+    elseif tangent < -FracUnit * 2 then
+      column = width + 1
+    else
+      column = math.clamp((halfXFrac - fixedMul(tangent, focalLength) + FracUnit - 1) // FracUnit, -1, width + 1)
+    end
+
+    angleToX[index] = column
+  end
+
+  local xToAngle: { [number]: number } = {}
+  for column = 0, width do
+    local index = 0
+    while angleToX[index] > column do
+      index += 1
+    end
+
+    xToAngle[column] = (index * AngleToFine - Ang90) % U32
+  end
+
+  for index = 0, 4095 do
+    if angleToX[index] == -1 then
+      angleToX[index] = 0
+    elseif angleToX[index] == width + 1 then
+      angleToX[index] = width
+    end
+  end
+
+  local slopes: { [number]: number } = {}
+  for row = 0, height - 1 do
+    local dy = math.abs((row - height // 2) * FracUnit + FracUnit // 2)
+    slopes[row] = fixedDiv(width // 2 * FracUnit, dy)
+  end
+
+  local scales: { [number]: number } = {}
+  for column = 0, width - 1 do
+    scales[column] = fixedDiv(FracUnit, math.abs(finesine[xToAngle[column] // AngleToFine + 2049]))
+  end
+
+  local lights: { [number]: number } = {}
+  for light = 0, 15 do
+    local startMap = ((15 - light) * 2) * 32 // 16
+    for scale = 0, MaxLightScale - 1 do
+      lights[light * MaxLightScale + scale] = math.clamp(startMap - scale * ScreenWidth // width // 2, 0, 31) * 256
+    end
+  end
+
+  return {
+    blocks = blocks,
+    width = width,
+    height = height,
+    centerX = halfX,
+    centerY = halfY,
+    centerXFrac = halfXFrac,
+    centerYFrac = halfY * FracUnit,
+    viewAngleToX = angleToX,
+    xToViewAngle = xToAngle,
+    ySlope = slopes,
+    distScale = scales,
+    scaleLight = lights,
+    clipAngle = xToAngle[0],
+    pspriteScale = FracUnit * width // ScreenWidth,
+    pspriteIScale = FracUnit * ScreenWidth // width,
+    windowX = (ScreenWidth - width) // 2,
+    windowY = if width == ScreenWidth then 0 else (ScreenHeight - StatusBarHeight - height) // 2,
+    back = nil,
+  }
+end
+
+-- R_FillBackScreen: the flat tiled around a window smaller than the screen, and its bevel.
+local function backScreen(result: data.Data, size: ViewSize): buffer?
+  local wad = result.wad
+  local flatName = if result.commercial then 'GRNROCK' else 'FLOOR7_2'
+  local flat = wad:find(flatName)
+  if not flat or flat.size < 4096 then return nil end
+
+  local rows = ScreenHeight - StatusBarHeight
+  local back = buffer.create(ScreenWidth * rows)
+  for row = 0, rows - 1 do
+    for tile = 0, ScreenWidth - 1, 64 do
+      buffer.copy(back, row * ScreenWidth + tile, result.bytes, flat.offset + row % 64 * 64, 64)
+    end
+  end
+
+  local function patch(name: string, screenX: number, screenY: number)
+    if not wad:find(name) then return end
+
+    patchModule.draw(back, ScreenWidth, rows, patchModule.open(wad:read(name)), screenX, screenY)
+  end
+
+  local left, top, width, height = size.windowX, size.windowY, size.width, size.height
+  for offset = 0, width - 1, 8 do
+    patch('BRDR_T', left + offset, top - 8)
+    patch('BRDR_B', left + offset, top + height)
+  end
+
+  for offset = 0, height - 1, 8 do
+    patch('BRDR_L', left - 8, top + offset)
+    patch('BRDR_R', left + width, top + offset)
+  end
+
+  patch('BRDR_TL', left - 8, top - 8)
+  patch('BRDR_TR', left + width, top - 8)
+  patch('BRDR_BL', left - 8, top + height)
+  patch('BRDR_BR', left + width, top + height)
+  return back
+end
+
+-- R_DrawViewBorder: the back screen copied around the window.
+local function drawBorder(size: ViewSize)
+  local back = size.back
+  if not back then return end
+
+  local rows = ScreenHeight - StatusBarHeight
+  local top, side = size.windowY, size.windowX
+  for row = 0, rows - 1 do
+    if row < top or row >= top + size.height then
+      buffer.copy(dest, row * stride, back, row * ScreenWidth, ScreenWidth)
+    else
+      buffer.copy(dest, row * stride, back, row * ScreenWidth, side)
+      buffer.copy(dest, row * stride + side + size.width, back, row * ScreenWidth + side + size.width, side)
+    end
+  end
+end
+
+-- The level's lumps. ---------------------------------------------------------------------------
+
+local function levelOf(renderer: Renderer, game: any): Level
+  local current = renderer.level
+  if current and current.segs == game.segs then return current end
+
+  local wad, marker = viewData.wad, game.mapname
+  local result: Level = {
+    segs = game.segs,
+    segCount = #game.segs,
+    v1x = {},
+    v1y = {},
+    v2x = {},
+    v2y = {},
+    angle = {},
+    offset = {},
+    nodeX = {},
+    nodeY = {},
+    nodeDx = {},
+    nodeDy = {},
+    boxes = {},
+    children = {},
+    root = -1,
+  }
+
+  local lump = wad:read(wad:mapLump(marker, 'SEGS'))
+  for index = 0, result.segCount - 1 do
+    local seg = game.segs[index + 1]
+    result.v1x[index], result.v1y[index] = seg.v1.x, seg.v1.y
+    result.v2x[index], result.v2y[index] = seg.v2.x, seg.v2.y
+    result.angle[index] = (buffer.readi16(lump, index * 12 + 4) * FracUnit) % U32
+    result.offset[index] = buffer.readi16(lump, index * 12 + 10) * FracUnit
+  end
+
+  lump = wad:read(wad:mapLump(marker, 'NODES'))
+  local count = buffer.len(lump) // 28
+  for index = 0, count - 1 do
+    local at = index * 28
+    result.nodeX[index] = buffer.readi16(lump, at) * FracUnit
+    result.nodeY[index] = buffer.readi16(lump, at + 2) * FracUnit
+    result.nodeDx[index] = buffer.readi16(lump, at + 4) * FracUnit
+    result.nodeDy[index] = buffer.readi16(lump, at + 6) * FracUnit
+    for corner = 0, 7 do
+      result.boxes[index * 8 + corner] = buffer.readi16(lump, at + 8 + corner * 2) * FracUnit
+    end
+
+    result.children[index * 2] = buffer.readu16(lump, at + 24)
+    result.children[index * 2 + 1] = buffer.readu16(lump, at + 26)
+  end
+
+  result.root = count - 1
+  renderer.level = result
+  renderer.spriteMarks = setmetatable({}, { __mode = 'k' }) :: any
+  return result
+end
+
+-- r_main.c's geometry. -------------------------------------------------------------------------
+
+local function slopeDiv(numerator: number, denominator: number): number
+  if denominator < 512 then return 2048 end
+
+  local answer = (numerator * 8) % U32 // (denominator // 256)
+  return if answer <= 2048 then answer else 2048
+end
+
+-- R_PointToAngle: the angle from the view to (x, y).
+local function pointToAngle(east: number, north: number): number
+  east -= viewX
+  north -= viewY
+  if east == 0 and north == 0 then return 0 end
+
+  if east >= 0 then
+    if north >= 0 then
+      if east > north then return tantoangle[slopeDiv(north, east) + 1] end
+      return Ang90 - 1 - tantoangle[slopeDiv(east, north) + 1]
+    end
+
+    north = -north
+    if east > north then return (-tantoangle[slopeDiv(north, east) + 1]) % U32 end
+    return Ang270 + tantoangle[slopeDiv(east, north) + 1]
+  end
+
+  east = -east
+  if north >= 0 then
+    if east > north then return Ang180 - 1 - tantoangle[slopeDiv(north, east) + 1] end
+    return Ang90 + tantoangle[slopeDiv(east, north) + 1]
+  end
+
+  north = -north
+  if east > north then return Ang180 + tantoangle[slopeDiv(north, east) + 1] end
+  return Ang270 - 1 - tantoangle[slopeDiv(east, north) + 1]
+end
+
+-- R_PointToDist
+local function pointToDist(east: number, north: number): number
+  local dx, dy = math.abs(east - viewX), math.abs(north - viewY)
+  if dy > dx then dx, dy = dy, dx end
+
+  local slope = math.min(fixedDiv(dy, dx) // 32, 2048)
+  local angle = (tantoangle[slope + 1] + Ang90) % U32 // AngleToFine
+  return fixedDiv(dx, finesine[angle + 1])
+end
+
+-- R_PointOnSide for node `node`.
+local function pointOnSide(east: number, north: number, node: number): number
+  local nodeX, nodeY, nodeDx, nodeDy = level.nodeX[node], level.nodeY[node], level.nodeDx[node], level.nodeDy[node]
+  if nodeDx == 0 then
+    if east <= nodeX then return if nodeDy > 0 then 1 else 0 end
+    return if nodeDy < 0 then 1 else 0
+  end
+
+  if nodeDy == 0 then
+    if north <= nodeY then return if nodeDx < 0 then 1 else 0 end
+    return if nodeDx > 0 then 1 else 0
+  end
+
+  local dx, dy = east - nodeX, north - nodeY
+  if (nodeDy < 0) ~= (nodeDx < 0) ~= (dx < 0) ~= (dy < 0) then
+    return if (nodeDy < 0) ~= (dx < 0) then 1 else 0
+  end
+
+  local left = fixedMul(nodeDy // FracUnit, dx)
+  local right = fixedMul(dy, nodeDx // FracUnit)
+  return if right < left then 0 else 1
+end
+
+-- R_PointOnSegSide for seg `seg`.
+local function pointOnSegSide(east: number, north: number, seg: number): number
+  local lineX, lineY = level.v1x[seg], level.v1y[seg]
+  local lineDx, lineDy = level.v2x[seg] - lineX, level.v2y[seg] - lineY
+  if lineDx == 0 then
+    if east <= lineX then return if lineDy > 0 then 1 else 0 end
+    return if lineDy < 0 then 1 else 0
+  end
+
+  if lineDy == 0 then
+    if north <= lineY then return if lineDx < 0 then 1 else 0 end
+    return if lineDx > 0 then 1 else 0
+  end
+
+  local dx, dy = east - lineX, north - lineY
+  if (lineDy < 0) ~= (lineDx < 0) ~= (dx < 0) ~= (dy < 0) then
+    return if (lineDy < 0) ~= (dx < 0) then 1 else 0
+  end
+
+  local left = fixedMul(lineDy // FracUnit, dx)
+  local right = fixedMul(dy, lineDx // FracUnit)
+  return if right < left then 0 else 1
+end
+
+-- R_ScaleFromGlobalAngle: the scale of the current wall at `visAngle`, given rw_distance.
+local function scaleFromGlobalAngle(visAngle: number, normalAngle: number): number
+  local angleA = (Ang90 + visAngle - viewAngle) % U32
+  local angleB = (Ang90 + visAngle - normalAngle) % U32
+  local sineA, sineB = finesine[angleA // AngleToFine + 1], finesine[angleB // AngleToFine + 1]
+  local numerator = fixedMul(projection, sineB)
+  local denominator = fixedMul(rwDistance, sineA)
+  if denominator > numerator // FracUnit then
+    local scale = fixedDiv(numerator, denominator)
+    if scale > 64 * FracUnit then return 64 * FracUnit end
+    if scale < 256 then return 256 end
+    return scale
+  end
+
+  return 64 * FracUnit
+end
+
+-- Texture columns. ----------------------------------------------------------------------------
+
+local function textureOf(number: number): data.Texture
+  local texture = textures[number]
+  if not texture.pixels then data.compose(viewData, texture) end
+
+  return texture
+end
+
+-- R_DrawColumn of `texture`'s column `column` (R_GetColumn masks it by the texture's width) from
+-- row `yl` to `yh` at `x`.
+local function wallColumn(texture: data.Texture, textureColumn: number, column: number, yl: number, yh: number, mid: number, step: number, colormap: number)
+  local count = yh - yl
+  if count < 0 then return end
+
+  local height = texture.height
+  draw.column(
+    dest,
+    yLookup[yl] + column,
+    stride,
+    count,
+    texture.pixels :: buffer,
+    bit32.band(textureColumn, texture.widthMask) * height,
+    texture.rowBits,
+    height,
+    colormaps,
+    colormap,
+    mid + (yl - centerY) * step,
+    step
+  )
+end
+
+-- r_plane.c --------------------------------------------------------------------------------------
+
+local function newPlane(): Plane
+  planeCount += 1
+  local plane = planes[planeCount]
+  if not plane then
+    plane = {
+      height = 0,
+      pic = '',
+      light = 0,
+      minX = 0,
+      maxX = 0,
+      top = buffer.create(ScreenWidth + 2),
+      bottom = buffer.create(ScreenWidth + 2),
+    }
+    planes[planeCount] = plane
+  end
+
+  buffer.fill(plane.top, 0, 255)
+  return plane
+end
+
+-- R_FindPlane. Every sky is one plane.
+local function findPlane(height: number, pic: string, light: number): Plane
+  if pic == SkyFlat then
+    height, light = 0, 0
+  end
+
+  for index = 1, planeCount do
+    local check = planes[index]
+    if check.height == height and check.pic == pic and check.light == light then return check end
+  end
+
+  local plane = newPlane()
+  plane.height, plane.pic, plane.light = height, pic, light
+  plane.minX, plane.maxX = ScreenWidth, -1
+  return plane
+end
+
+-- R_CheckPlane: `plane` widened to start..stop, or a new plane when the columns they share are
+-- already marked.
+local function checkPlane(plane: Plane, start: number, stop: number): Plane
+  local intersectLow, unionLow, intersectHigh, unionHigh
+  if start < plane.minX then
+    intersectLow, unionLow = plane.minX, start
+  else
+    unionLow, intersectLow = plane.minX, start
+  end
+
+  if stop > plane.maxX then
+    intersectHigh, unionHigh = plane.maxX, stop
+  else
+    unionHigh, intersectHigh = plane.maxX, stop
+  end
+
+  local top = plane.top
+  local column = intersectLow
+  while column <= intersectHigh do
+    if buffer.readu8(top, column + 1) ~= 255 then break end
+    column += 1
+  end
+
+  if column > intersectHigh then
+    plane.minX, plane.maxX = unionLow, unionHigh
+    return plane
+  end
+
+  local height, pic, light = plane.height, plane.pic, plane.light
+  local fresh = newPlane()
+  fresh.height, fresh.pic, fresh.light = height, pic, light
+  fresh.minX, fresh.maxX = start, stop
+  return fresh
+end
+
+-- R_MapPlane
+local function mapPlane(row: number, x1: number, x2: number)
+  local distance: number, xStep: number, yStep: number = cachedDistance[row], cachedXStep[row], cachedYStep[row]
+  if planeHeight ~= cachedHeight[row] then
+    cachedHeight[row] = planeHeight
+    distance = fixedMul(planeHeight, ySlope[row])
+    xStep = fixedMul(distance, baseXScale)
+    yStep = fixedMul(distance, baseYScale)
+    cachedDistance[row], cachedXStep[row], cachedYStep[row] = distance, xStep, yStep
+  end
+
+  local length = fixedMul(distance, distScale[x1])
+  local angle = (viewAngle + xToViewAngle[x1]) % U32 // AngleToFine
+  local xFrac = viewX + fixedMul(finesine[angle + 2049], length)
+  local yFrac = -viewY - fixedMul(finesine[angle + 1], length)
+  local colormap = fixedColormap
+  if colormap < 0 then colormap = zLight[planeZLight + math.min(distance // 1048576, MaxLightZ - 1)] end
+
+  draw.span(dest, yLookup[row] + x1, x2 - x1, wadBytes, flatSource, colormaps, colormap, xFrac, yFrac, xStep, yStep)
+end
+
+-- R_MakeSpans
+local function makeSpans(column: number, t1: number, b1: number, t2: number, b2: number)
+  while t1 < t2 and t1 <= b1 do
+    mapPlane(t1, spanStart[t1], column - 1)
+    t1 += 1
+  end
+
+  while b1 > b2 and b1 >= t1 do
+    mapPlane(b1, spanStart[b1], column - 1)
+    b1 -= 1
+  end
+
+  while t2 < t1 and t2 <= b2 do
+    spanStart[t2] = column
+    t2 += 1
+  end
+
+  while b2 > b1 and b2 >= t2 do
+    spanStart[b2] = column
+    b2 -= 1
+  end
+end
+
+-- R_DrawPlanes
+local function drawPlanes()
+  local flats, flatTranslation, flatNumbers = viewData.flats, viewData.flatTranslation, viewData.flatNumbers
+  for index = 1, planeCount do
+    local plane = planes[index]
+    local minX, maxX = plane.minX, plane.maxX
+    if minX > maxX then continue end
+
+    local top, bottom = plane.top, plane.bottom
+
+    -- The sky is drawn at full brightness, light table 0, even through invulnerability.
+    if plane.pic == SkyFlat then
+      local pixels = skyTexture.pixels :: buffer
+      local height, mask, bits = skyTexture.height, skyTexture.widthMask, skyTexture.rowBits
+      for column = minX, maxX do
+        local yl, yh = buffer.readu8(top, column + 1), buffer.readu8(bottom, column + 1)
+        if yl > yh then continue end
+
+        local skyColumn = bit32.band((viewAngle + xToViewAngle[column]) % U32 // 4194304, mask)
+        local frac = 100 * FracUnit + (yl - centerY) * pspriteIScale
+        draw.column(dest, yLookup[yl] + column, stride, yh - yl, pixels, skyColumn * height, bits, height, colormaps, 0, frac, pspriteIScale)
+      end
+
+      continue
+    end
+
+    local number = flatNumbers[plane.pic]
+    local source = if number == nil then nil else flats[flatTranslation[number]]
+    if source == nil then continue end
+
+    flatSource = source
+    planeHeight = math.abs(plane.height - viewZ)
+    planeZLight = math.clamp(plane.light // 16 + extraLight, 0, 15) * MaxLightZ
+    buffer.writeu8(top, maxX + 2, 255)
+    buffer.writeu8(top, minX, 255)
+    for column = minX, maxX + 1 do
+      makeSpans(column, buffer.readu8(top, column), buffer.readu8(bottom, column), buffer.readu8(top, column + 1), buffer.readu8(bottom, column + 1))
+    end
+  end
+end
+
+-- r_segs.c ---------------------------------------------------------------------------------------
+
+-- R_RenderSegLoop: the columns of the current wall, from rw_x up to rw_stopx.
+local function renderSegLoop()
+  local mid, top, bottom = midTexture ~= 0, topTexture ~= 0, bottomTexture ~= 0
+  local midTex = if mid then textureOf(midTexture) else nil
+  local topTex = if top then textureOf(topTexture) else nil
+  local bottomTex = if bottom then textureOf(bottomTexture) else nil
+  local ceilingMarks = if markCeiling then ceilingPlane else nil
+  local floorMarks = if markFloor then floorPlane else nil
+
+  for column = rwX, rwStopX - 1 do
+    local ceilingLimit, floorLimit = buffer.readi16(ceilingClip, column * 2), buffer.readi16(floorClip, column * 2)
+    local yl = (topFrac + HeightUnit - 1) // HeightUnit
+    if yl < ceilingLimit + 1 then yl = ceilingLimit + 1 end
+
+    if ceilingMarks then
+      local markTop, markBottom = ceilingLimit + 1, yl - 1
+      if markBottom >= floorLimit then markBottom = floorLimit - 1 end
+
+      if markTop <= markBottom then
+        buffer.writeu8(ceilingMarks.top, column + 1, markTop)
+        buffer.writeu8(ceilingMarks.bottom, column + 1, markBottom)
+      end
+    end
+
+    local yh = bottomFrac // HeightUnit
+    if yh >= floorLimit then yh = floorLimit - 1 end
+
+    if floorMarks then
+      local markTop, markBottom = yh + 1, floorLimit - 1
+      if markTop <= ceilingLimit then markTop = ceilingLimit + 1 end
+
+      if markTop <= markBottom then
+        buffer.writeu8(floorMarks.top, column + 1, markTop)
+        buffer.writeu8(floorMarks.bottom, column + 1, markBottom)
+      end
+    end
+
+    local textureColumn, colormap, step = 0, 0, 0
+    if segTextured then
+      local angle = (rwCenterAngle + xToViewAngle[column]) % U32 // AngleToFine
+      textureColumn = (rwOffset - fixedMul(finetangent[angle % 4096 + 1], rwDistance)) // FracUnit
+      colormap = wallLights[wallLightBase + math.min(rwScale // 4096, MaxLightScale - 1)]
+      step = 4294967295 // rwScale
+    end
+
+    if midTex then
+      wallColumn(midTex, textureColumn, column, yl, yh, rwMidTextureMid, step, colormap)
+      buffer.writei16(ceilingClip, column * 2, viewHeight)
+      buffer.writei16(floorClip, column * 2, -1)
+    else
+      if topTex then
+        local edge = pixHigh // HeightUnit
+        pixHigh += pixHighStep
+        if edge >= floorLimit then edge = floorLimit - 1 end
+
+        if edge >= yl then
+          wallColumn(topTex, textureColumn, column, yl, edge, rwTopTextureMid, step, colormap)
+          buffer.writei16(ceilingClip, column * 2, edge)
+        else
+          buffer.writei16(ceilingClip, column * 2, yl - 1)
+        end
+      elseif ceilingMarks then
+        buffer.writei16(ceilingClip, column * 2, yl - 1)
+      end
+
+      if bottomTex then
+        local edge = (pixLow + HeightUnit - 1) // HeightUnit
+        pixLow += pixLowStep
+        local limit = buffer.readi16(ceilingClip, column * 2)
+        if edge <= limit then edge = limit + 1 end
+
+        if edge <= yh then
+          wallColumn(bottomTex, textureColumn, column, edge, yh, rwBottomTextureMid, step, colormap)
+          buffer.writei16(floorClip, column * 2, edge)
+        else
+          buffer.writei16(floorClip, column * 2, yh + 1)
+        end
+      elseif floorMarks then
+        buffer.writei16(floorClip, column * 2, yh + 1)
+      end
+
+      if maskedTexture then buffer.writei16(openings, (maskedTextureColumns + column) * 2, textureColumn) end
+    end
+
+    rwScale += rwScaleStep
+    topFrac += topStep
+    bottomFrac += bottomStep
+  end
+end
+
+local function reserveOpenings(count: number)
+  local needed = (lastOpening + count) * 2
+  if needed <= buffer.len(openings) then return end
+
+  local grown = buffer.create(math.max(needed, buffer.len(openings) * 2))
+  buffer.copy(grown, 0, openings)
+  openings = grown
+end
+
+local function newDrawSeg(): DrawSeg
+  drawSegCount += 1
+  local record = drawSegs[drawSegCount]
+  if record then return record end
+
+  record = {
+    seg = 0,
+    x1 = 0,
+    x2 = 0,
+    scale1 = 0,
+    scale2 = 0,
+    scaleStep = 0,
+    silhouette = 0,
+    bottomHeight = 0,
+    topHeight = 0,
+    topClip = Null,
+    bottomClip = Null,
+    maskedColumns = Null,
+  }
+  drawSegs[drawSegCount] = record
+  return record
+end
+
+-- The light tables of a wall in `sector`: walls running east-west a level darker and north-south
+-- a level brighter, the "fake contrast".
+local function wallLightsOf(sector: any, seg: number): number
+  local light = sector.lightlevel // 16 + extraLight
+  if level.v1y[seg] == level.v2y[seg] then
+    light -= 1
+  elseif level.v1x[seg] == level.v2x[seg] then
+    light += 1
+  end
+
+  return math.clamp(light, 0, 15) * MaxLightScale
+end
+
+-- R_StoreWallRange: the current seg drawn from column `start` to `stop`, and remembered as a
+-- drawseg for the sprites and masked walls drawn over it.
+local function storeWallRange(start: number, stop: number)
+  local seg = currentSeg
+  local front, back = frontSector, backSector
+  local ds = newDrawSeg()
+
+  -- The automap shows a line once a wall of it has been drawn: ML_MAPPED is the one thing the
+  -- renderer writes into the game, and no hash reads a line's flags.
+  linedef.flags = bit32.bor(linedef.flags, MappedFlag)
+
+  local normalAngle = (level.angle[seg] + Ang90) % U32
+  local offsetAngle = (normalAngle - rwAngle1) % U32
+  if offsetAngle >= Ang180 then offsetAngle = U32 - offsetAngle end
+  if offsetAngle > Ang90 then offsetAngle = Ang90 end
+
+  local hypotenuse = pointToDist(level.v1x[seg], level.v1y[seg])
+  rwDistance = fixedMul(hypotenuse, finesine[(Ang90 - offsetAngle) // AngleToFine + 1])
+
+  ds.x1, ds.x2, ds.seg = start, stop, seg
+  rwX, rwStopX = start, stop + 1
+  rwScale = scaleFromGlobalAngle((viewAngle + xToViewAngle[start]) % U32, normalAngle)
+  ds.scale1 = rwScale
+  if stop > start then
+    ds.scale2 = scaleFromGlobalAngle((viewAngle + xToViewAngle[stop]) % U32, normalAngle)
+    rwScaleStep = idiv(ds.scale2 - rwScale, stop - start)
+  else
+    ds.scale2 = ds.scale1
+    rwScaleStep = 0
+  end
+
+  ds.scaleStep = rwScaleStep
+
+  worldTop = front.ceilingheight - viewZ
+  worldBottom = front.floorheight - viewZ
+  midTexture, topTexture, bottomTexture, maskedTexture = 0, 0, 0, false
+  ds.maskedColumns = Null
+
+  if not back then
+    midTexture = textureTranslation[sidedef.midtexture]
+    markFloor, markCeiling = true, true
+    if bit32.band(linedef.flags, DontPegBottom) ~= 0 then
+      rwMidTextureMid = front.floorheight + textures[sidedef.midtexture].fixedHeight - viewZ
+    else
+      rwMidTextureMid = worldTop
+    end
+
+    rwMidTextureMid += sidedef.rowoffset
+    ds.silhouette = SilBoth
+    ds.topClip, ds.bottomClip = ScreenHeightArray, NegOneArray
+    ds.bottomHeight, ds.topHeight = MaxInt, MinInt
+  else
+    ds.topClip, ds.bottomClip = Null, Null
+    ds.silhouette = 0
+    if front.floorheight > back.floorheight then
+      ds.silhouette = SilBottom
+      ds.bottomHeight = front.floorheight
+    elseif back.floorheight > viewZ then
+      ds.silhouette = SilBottom
+      ds.bottomHeight = MaxInt
+    end
+
+    if front.ceilingheight < back.ceilingheight then
+      ds.silhouette = bit32.bor(ds.silhouette, SilTop)
+      ds.topHeight = front.ceilingheight
+    elseif back.ceilingheight < viewZ then
+      ds.silhouette = bit32.bor(ds.silhouette, SilTop)
+      ds.topHeight = MinInt
+    end
+
+    if back.ceilingheight <= front.floorheight then
+      ds.bottomClip = NegOneArray
+      ds.bottomHeight = MaxInt
+      ds.silhouette = bit32.bor(ds.silhouette, SilBottom)
+    end
+
+    if back.floorheight >= front.ceilingheight then
+      ds.topClip = ScreenHeightArray
+      ds.topHeight = MinInt
+      ds.silhouette = bit32.bor(ds.silhouette, SilTop)
+    end
+
+    worldHigh = back.ceilingheight - viewZ
+    worldLow = back.floorheight - viewZ
+
+    -- The hack that lets heights change in outdoor areas: a sky meeting a sky draws no upper wall.
+    if front.ceilingpic == SkyFlat and back.ceilingpic == SkyFlat then worldTop = worldHigh end
+
+    markFloor = worldLow ~= worldBottom or back.floorpic ~= front.floorpic or back.lightlevel ~= front.lightlevel
+    markCeiling = worldHigh ~= worldTop or back.ceilingpic ~= front.ceilingpic or back.lightlevel ~= front.lightlevel
+
+    if back.ceilingheight <= front.floorheight or back.floorheight >= front.ceilingheight then
+      markCeiling, markFloor = true, true
+    end
+
+    if worldHigh < worldTop then
+      topTexture = textureTranslation[sidedef.toptexture]
+      if bit32.band(linedef.flags, DontPegTop) ~= 0 then
+        rwTopTextureMid = worldTop
+      else
+        rwTopTextureMid = back.ceilingheight + textures[sidedef.toptexture].fixedHeight - viewZ
+      end
+    end
+
+    if worldLow > worldBottom then
+      bottomTexture = textureTranslation[sidedef.bottomtexture]
+      rwBottomTextureMid = if bit32.band(linedef.flags, DontPegBottom) ~= 0 then worldTop else worldLow
+    end
+
+    rwTopTextureMid += sidedef.rowoffset
+    rwBottomTextureMid += sidedef.rowoffset
+
+    if sidedef.midtexture ~= 0 then
+      maskedTexture = true
+      reserveOpenings(rwStopX - rwX)
+      maskedTextureColumns = lastOpening - rwX
+      ds.maskedColumns = maskedTextureColumns
+      lastOpening += rwStopX - rwX
+    end
+  end
+
+  segTextured = midTexture ~= 0 or topTexture ~= 0 or bottomTexture ~= 0 or maskedTexture
+  if segTextured then
+    local angle = (normalAngle - rwAngle1) % U32
+    offsetAngle = angle
+    if offsetAngle > Ang180 then offsetAngle = (-offsetAngle) % U32 end
+    if offsetAngle > Ang90 then offsetAngle = Ang90 end
+
+    rwOffset = fixedMul(hypotenuse, finesine[offsetAngle // AngleToFine + 1])
+    if angle < Ang180 then rwOffset = -rwOffset end
+
+    rwOffset += sidedef.textureoffset + level.offset[seg]
+
+    -- Line special 48 scrolls its front side a unit a tic; P_UpdateSpecials adds it to the
+    -- offset, which the simulation here leaves alone.
+    if linedef.special == 48 and currentSegTable.sidedef == sides[linedef.sidenum[1] + 1] then
+      rwOffset += levelTime * FracUnit
+    end
+
+    rwCenterAngle = (Ang90 + viewAngle - normalAngle) % U32
+    if fixedColormap < 0 then
+      wallLights, wallLightBase = scaleLight, wallLightsOf(front, seg)
+    end
+  end
+
+  if front.floorheight >= viewZ then markFloor = false end
+  if front.ceilingheight <= viewZ and front.ceilingpic ~= SkyFlat then markCeiling = false end
+
+  worldTop //= 16
+  worldBottom //= 16
+  topStep = -fixedMul(rwScaleStep, worldTop)
+  topFrac = centerYFrac // 16 - fixedMul(worldTop, rwScale)
+  bottomStep = -fixedMul(rwScaleStep, worldBottom)
+  bottomFrac = centerYFrac // 16 - fixedMul(worldBottom, rwScale)
+
+  if back then
+    worldHigh //= 16
+    worldLow //= 16
+    if worldHigh < worldTop then
+      pixHigh = centerYFrac // 16 - fixedMul(worldHigh, rwScale)
+      pixHighStep = -fixedMul(rwScaleStep, worldHigh)
+    end
+
+    if worldLow > worldBottom then
+      pixLow = centerYFrac // 16 - fixedMul(worldLow, rwScale)
+      pixLowStep = -fixedMul(rwScaleStep, worldLow)
+    end
+  end
+
+  if markCeiling then ceilingPlane = checkPlane(ceilingPlane :: Plane, rwX, rwStopX - 1) end
+  if markFloor then floorPlane = checkPlane(floorPlane :: Plane, rwX, rwStopX - 1) end
+
+  renderSegLoop()
+
+  local silhouette = ds.silhouette
+  if (bit32.band(silhouette, SilTop) ~= 0 or maskedTexture) and ds.topClip == Null then
+    reserveOpenings(rwStopX - start)
+    buffer.copy(openings, lastOpening * 2, ceilingClip, start * 2, (rwStopX - start) * 2)
+    ds.topClip = lastOpening - start
+    lastOpening += rwStopX - start
+  end
+
+  if (bit32.band(silhouette, SilBottom) ~= 0 or maskedTexture) and ds.bottomClip == Null then
+    reserveOpenings(rwStopX - start)
+    buffer.copy(openings, lastOpening * 2, floorClip, start * 2, (rwStopX - start) * 2)
+    ds.bottomClip = lastOpening - start
+    lastOpening += rwStopX - start
+  end
+
+  if maskedTexture and bit32.band(silhouette, SilTop) == 0 then
+    ds.silhouette = bit32.bor(ds.silhouette, SilTop)
+    ds.topHeight = MinInt
+  end
+
+  if maskedTexture and bit32.band(silhouette, SilBottom) == 0 then
+    ds.silhouette = bit32.bor(ds.silhouette, SilBottom)
+    ds.bottomHeight = MaxInt
+  end
+end
+
+-- r_bsp.c ----------------------------------------------------------------------------------------
+
+-- R_ClipSolidWallSegment: draws what of first..last no solid wall hides, and adds it to them.
+local function clipSolidWallSegment(first: number, last: number)
+  local start = 0
+  while solidLast[start] < first - 1 do
+    start += 1
+  end
+
+  if first < solidFirst[start] then
+    if last < solidFirst[start] - 1 then
+      -- Entirely visible, before `start`: a new clip post goes in its place.
+      storeWallRange(first, last)
+      local cursor = newEnd
+      newEnd += 1
+      while cursor ~= start do
+        solidFirst[cursor], solidLast[cursor] = solidFirst[cursor - 1], solidLast[cursor - 1]
+        cursor -= 1
+      end
+
+      solidFirst[cursor], solidLast[cursor] = first, last
+      return
+    end
+
+    storeWallRange(first, solidFirst[start] - 1)
+    solidFirst[start] = first
+  end
+
+  if last <= solidLast[start] then return end
+
+  local cursor = start
+  local contained = false
+  while last >= solidFirst[cursor + 1] - 1 do
+    storeWallRange(solidLast[cursor] + 1, solidFirst[cursor + 1] - 1)
+    cursor += 1
+    if last <= solidLast[cursor] then
+      solidLast[start] = solidLast[cursor]
+      contained = true
+      break
+    end
+  end
+
+  if not contained then
+    storeWallRange(solidLast[cursor] + 1, last)
+    solidLast[start] = last
+  end
+
+  if cursor == start then return end
+
+  -- The posts `start` now covers come out of the list. The C copies one past the list's end
+  -- as it goes, and keeps it; the arrays hold a value there for it to copy.
+  while true do
+    local current = cursor
+    cursor += 1
+    if current == newEnd then break end
+
+    start += 1
+    solidFirst[start], solidLast[start] = solidFirst[cursor], solidLast[cursor]
+  end
+
+  newEnd = start + 1
+end
+
+-- R_ClipPassWallSegment: draws what of first..last no solid wall hides, without adding to them.
+local function clipPassWallSegment(first: number, last: number)
+  local start = 0
+  while solidLast[start] < first - 1 do
+    start += 1
+  end
+
+  if first < solidFirst[start] then
+    if last < solidFirst[start] - 1 then
+      storeWallRange(first, last)
+      return
+    end
+
+    storeWallRange(first, solidFirst[start] - 1)
+  end
+
+  if last <= solidLast[start] then return end
+
+  while last >= solidFirst[start + 1] - 1 do
+    storeWallRange(solidLast[start] + 1, solidFirst[start + 1] - 1)
+    start += 1
+    if last <= solidLast[start] then return end
+  end
+
+  storeWallRange(solidLast[start] + 1, last)
+end
+
+-- R_AddLine
+local function addLine(seg: number)
+  local angle1 = pointToAngle(level.v1x[seg], level.v1y[seg])
+  local angle2 = pointToAngle(level.v2x[seg], level.v2y[seg])
+  local span = (angle1 - angle2) % U32
+
+  -- Its back side faces the view.
+  if span >= Ang180 then return end
+
+  rwAngle1 = angle1
+  angle1 = (angle1 - viewAngle) % U32
+  angle2 = (angle2 - viewAngle) % U32
+
+  local tspan = (angle1 + clipAngle) % U32
+  if tspan > 2 * clipAngle then
+    if tspan - 2 * clipAngle >= span then return end
+    angle1 = clipAngle
+  end
+
+  tspan = (clipAngle - angle2) % U32
+  if tspan > 2 * clipAngle then
+    if tspan - 2 * clipAngle >= span then return end
+    angle2 = (-clipAngle) % U32
+  end
+
+  local x1 = viewAngleToX[(angle1 + Ang90) % U32 // AngleToFine]
+  local x2 = viewAngleToX[(angle2 + Ang90) % U32 // AngleToFine]
+  if x1 == x2 then return end
+
+  local segTable = segs[seg + 1]
+  currentSeg, currentSegTable = seg, segTable
+  sidedef, linedef = segTable.sidedef, segTable.linedef
+  local front, back = frontSector, segTable.backsector
+  backSector = back
+
+  if not back or back.ceilingheight <= front.floorheight or back.floorheight >= front.ceilingheight then
+    clipSolidWallSegment(x1, x2 - 1)
+    return
+  end
+
+  -- A line with the same floor, ceiling and light on both sides and nothing to draw in the middle
+  -- is there only to trigger something.
+  if
+    back.ceilingheight == front.ceilingheight
+    and back.floorheight == front.floorheight
+    and back.ceilingpic == front.ceilingpic
+    and back.floorpic == front.floorpic
+    and back.lightlevel == front.lightlevel
+    and sidedef.midtexture == 0
+  then
+    return
+  end
+
+  clipPassWallSegment(x1, x2 - 1)
+end
+
+-- R_CheckBBox: whether any of node `node`'s side `side` might show between the solid walls.
+local function checkBBox(node: number, side: number): boolean
+  local boxes = level.boxes
+  local base = node * 8 + side * 4
+  local top, bottom, left, right = boxes[base], boxes[base + 1], boxes[base + 2], boxes[base + 3]
+  local boxX = if viewX <= left then 0 elseif viewX < right then 1 else 2
+  local boxY = if viewY >= top then 0 elseif viewY > bottom then 1 else 2
+  local position = boxY * 4 + boxX
+  if position == 5 then return true end
+
+  local coords = CheckCoord[position]
+  local angle1 = (pointToAngle(boxes[base + coords[1]], boxes[base + coords[2]]) - viewAngle) % U32
+  local angle2 = (pointToAngle(boxes[base + coords[3]], boxes[base + coords[4]]) - viewAngle) % U32
+  local span = (angle1 - angle2) % U32
+
+  -- Sitting on a line.
+  if span >= Ang180 then return true end
+
+  local tspan = (angle1 + clipAngle) % U32
+  if tspan > 2 * clipAngle then
+    if tspan - 2 * clipAngle >= span then return false end
+    angle1 = clipAngle
+  end
+
+  tspan = (clipAngle - angle2) % U32
+  if tspan > 2 * clipAngle then
+    if tspan - 2 * clipAngle >= span then return false end
+    angle2 = (-clipAngle) % U32
+  end
+
+  local sx1 = viewAngleToX[(angle1 + Ang90) % U32 // AngleToFine]
+  local sx2 = viewAngleToX[(angle2 + Ang90) % U32 // AngleToFine]
+  if sx1 == sx2 then return false end
+
+  sx2 -= 1
+  local start = 0
+  while solidLast[start] < sx2 do
+    start += 1
+  end
+
+  return not (sx1 >= solidFirst[start] and sx2 <= solidLast[start])
+end
+
+-- r_things.c: projection. ------------------------------------------------------------------------
+
+local function newVisSprite(): VisSprite
+  visSpriteCount += 1
+  local vis = visSprites[visSpriteCount]
+  if vis then return vis end
+
+  vis = {
+    order = 0,
+    x1 = 0,
+    x2 = 0,
+    gx = 0,
+    gy = 0,
+    gz = 0,
+    gzt = 0,
+    startFrac = 0,
+    scale = 0,
+    xIScale = 0,
+    textureMid = 0,
+    patch = nil :: any,
+    colormap = 0,
+    flags = 0,
+  }
+  visSprites[visSpriteCount] = vis
+  return vis
+end
+
+-- R_ProjectSprite
+local function projectSprite(thing: any)
+  local trX, trY = thing.x - viewX, thing.y - viewY
+  local tz = fixedMul(trX, viewCos) + fixedMul(trY, viewSin)
+
+  -- Behind the view, or too close to it.
+  if tz < MinZ then return end
+
+  local xScale = fixedDiv(projection, tz)
+  local tx = -(fixedMul(trY, viewCos) - fixedMul(trX, viewSin))
+
+  -- Too far off to the side.
+  if math.abs(tx) > tz * 4 then return end
+
+  local frames = data.sprite(viewData, thing.sprite)
+  local frame = frames and frames[bit32.band(thing.frame, FrameMask)]
+  if not frame then return end
+
+  local rotation = 1
+  if frame.rotate then
+    local angle = pointToAngle(thing.x, thing.y)
+    rotation = (angle - thing.angle + 0x90000000) % U32 // 0x20000000 + 1
+  end
+
+  local patch = frame.patches[rotation]
+  if not patch then return end
+
+  local flip = frame.flips[rotation]
+  tx -= patch.left * FracUnit
+  local x1 = (centerXFrac + fixedMul(tx, xScale)) // FracUnit
+  if x1 > viewWidth then return end
+
+  tx += patch.width * FracUnit
+  local x2 = (centerXFrac + fixedMul(tx, xScale)) // FracUnit - 1
+  if x2 < 0 then return end
+
+  local vis = newVisSprite()
+  vis.order = visSpriteCount
+  vis.flags = thing.flags
+  vis.scale = xScale
+  vis.gx, vis.gy, vis.gz = thing.x, thing.y, thing.z
+  vis.gzt = thing.z + patch.top * FracUnit
+  vis.textureMid = vis.gzt - viewZ
+  vis.x1 = if x1 < 0 then 0 else x1
+  vis.x2 = if x2 >= viewWidth then viewWidth - 1 else x2
+
+  local inverse = fixedDiv(FracUnit, xScale)
+  if flip then
+    vis.startFrac = patch.width * FracUnit - 1
+    vis.xIScale = -inverse
+  else
+    vis.startFrac = 0
+    vis.xIScale = inverse
+  end
+
+  if vis.x1 > x1 then vis.startFrac += vis.xIScale * (vis.x1 - x1) end
+
+  vis.patch = patch
+  if bit32.band(thing.flags, Shadow) ~= 0 then
+    vis.colormap = -1
+  elseif fixedColormap >= 0 then
+    vis.colormap = fixedColormap
+  elseif bit32.band(thing.frame, FullBright) ~= 0 then
+    vis.colormap = 0
+  else
+    vis.colormap = scaleLight[spriteLights + math.min(xScale // 4096, MaxLightScale - 1)]
+  end
+end
+
+-- R_AddSprites: the things in `sector`, once a frame however many subsectors it has.
+local function addSprites(sector: any)
+  if spriteMarks[sector] == frameNumber then return end
+
+  spriteMarks[sector] = frameNumber
+  spriteLights = math.clamp(sector.lightlevel // 16 + extraLight, 0, 15) * MaxLightScale
+
+  local thing = sector.thinglist
+  while thing do
+    projectSprite(thing)
+    thing = thing.snext
+  end
+end
+
+-- R_Subsector
+local function renderSubsector(number: number)
+  local subsector = subsectors[number + 1]
+  local sector = subsector.sector
+  frontSector = sector
+
+  floorPlane = if sector.floorheight < viewZ then findPlane(sector.floorheight, sector.floorpic, sector.lightlevel) else nil
+  ceilingPlane = if sector.ceilingheight > viewZ or sector.ceilingpic == SkyFlat
+    then findPlane(sector.ceilingheight, sector.ceilingpic, sector.lightlevel)
+    else nil
+
+  addSprites(sector)
+
+  local first = subsector.firstline
+  for seg = first, first + subsector.numlines - 1 do
+    addLine(seg)
+  end
+end
+
+-- R_RenderBSPNode: every subsector under `bspNumber`, front to back.
+local function renderBSPNode(bspNumber: number)
+  if bit32.band(bspNumber, 0x8000) ~= 0 then
+    renderSubsector(if bspNumber == -1 then 0 else bspNumber - 0x8000)
+    return
+  end
+
+  local side = pointOnSide(viewX, viewY, bspNumber)
+  renderBSPNode(level.children[bspNumber * 2 + side])
+  if checkBBox(bspNumber, 1 - side) then renderBSPNode(level.children[bspNumber * 2 + 1 - side]) end
+end
+
+-- r_things.c: drawing. ---------------------------------------------------------------------------
+
+-- R_DrawMaskedColumn's colfunc for one post: `source` from `base`, rows yl to yh at x.
+local function maskedPost(source: buffer, base: number, column: number, yl: number, yh: number, mid: number, colormap: number, translation: number)
+  if colormap < 0 then
+    if yl == 0 then yl = 1 end
+    if yh == viewHeight - 1 then yh = viewHeight - 2 end
+    if yh < yl then return end
+
+    fuzzPosition = draw.fuzz(dest, yLookup[yl] + column, stride, yh - yl, colormaps, fuzzPosition)
+    return
+  end
+
+  local frac = mid + (yl - centerY) * iScale
+  if translation > 0 then
+    draw.translated(
+      dest,
+      yLookup[yl] + column,
+      stride,
+      yh - yl,
+      source,
+      base,
+      viewData.translations,
+      (translation - 1) * 256,
+      colormaps,
+      colormap,
+      frac,
+      iScale
+    )
+    return
+  end
+
+  draw.column(dest, yLookup[yl] + column, stride, yh - yl, source, base, 7, 128, colormaps, colormap, frac, iScale)
+end
+
+-- R_DrawMaskedColumn over a patch column at `at` in the WAD's bytes.
+local function patchColumn(at: number, column: number, colormap: number, translation: number)
+  local floorLimit = buffer.readi16(openings, (mFloorClip + column) * 2)
+  local ceilingLimit = buffer.readi16(openings, (mCeilingClip + column) * 2)
+  while true do
+    local topDelta = buffer.readu8(wadBytes, at)
+    if topDelta == 255 then return end
+
+    local length = buffer.readu8(wadBytes, at + 1)
+    local topScreen = sprTopScreen + sprYScale * topDelta
+    local yl = (topScreen + FracUnit - 1) // FracUnit
+    local yh = (topScreen + sprYScale * length - 1) // FracUnit
+    if yh >= floorLimit then yh = floorLimit - 1 end
+    if yl <= ceilingLimit then yl = ceilingLimit + 1 end
+    if yl <= yh then maskedPost(wadBytes, at + 3, column, yl, yh, textureMid - topDelta * FracUnit, colormap, translation) end
+
+    at += length + 4
+  end
+end
+
+-- R_DrawVisSprite
+local function drawVisSprite(vis: VisSprite)
+  local patch = vis.patch
+  local colormap = vis.colormap
+  local translation = bit32.band(vis.flags, TranslationBits) // 0x4000000
+  iScale = math.abs(vis.xIScale)
+  textureMid = vis.textureMid
+  sprYScale = vis.scale
+  sprTopScreen = centerYFrac - fixedMul(textureMid, sprYScale)
+
+  local frac, step = vis.startFrac, vis.xIScale
+  local width, at = patch.width, patch.at
+  for column = vis.x1, vis.x2 do
+    local sourceColumn = frac // FracUnit
+    if sourceColumn >= 0 and sourceColumn < width then
+      patchColumn(at + buffer.readu32(wadBytes, at + 8 + sourceColumn * 4), column, colormap, translation)
+    end
+
+    frac += step
+  end
+end
+
+-- R_RenderMaskedSegRange: the masked middle texture of drawseg `ds` from x1 to x2.
+local function renderMaskedSegRange(ds: DrawSeg, x1: number, x2: number)
+  local seg = ds.seg
+  local segTable = segs[seg + 1]
+  local front, back, side = segTable.frontsector, segTable.backsector, segTable.sidedef
+  local number = textureTranslation[side.midtexture]
+  local texture = textureOf(number)
+  local lights = wallLightsOf(front, seg)
+  local columns = ds.maskedColumns
+  local scaleStep = ds.scaleStep
+  sprYScale = ds.scale1 + (x1 - ds.x1) * scaleStep
+  mFloorClip, mCeilingClip = ds.bottomClip, ds.topClip
+
+  local mid
+  if bit32.band(segTable.linedef.flags, DontPegBottom) ~= 0 then
+    mid = math.max(front.floorheight, back.floorheight) + texture.fixedHeight - viewZ
+  else
+    mid = math.min(front.ceilingheight, back.ceilingheight) - viewZ
+  end
+
+  mid += side.rowoffset
+
+  local pixels, height, mask = texture.pixels :: buffer, texture.height, texture.widthMask
+  for column = x1, x2 do
+    local sourceColumn = buffer.readi16(openings, (columns + column) * 2)
+    if sourceColumn ~= MaxShort then
+      local colormap = fixedColormap
+      if colormap < 0 then colormap = scaleLight[lights + math.min(sprYScale // 4096, MaxLightScale - 1)] end
+
+      sprTopScreen = centerYFrac - fixedMul(mid, sprYScale)
+      iScale = 4294967295 // sprYScale
+
+      local masked = bit32.band(sourceColumn, mask)
+      local runs = data.posts(viewData, texture, masked)
+      local floorLimit = buffer.readi16(openings, (mFloorClip + column) * 2)
+      local ceilingLimit = buffer.readi16(openings, (mCeilingClip + column) * 2)
+      for run = 1, #runs, 2 do
+        local top, length = runs[run], runs[run + 1]
+        local topScreen = sprTopScreen + sprYScale * top
+        local yl = (topScreen + FracUnit - 1) // FracUnit
+        local yh = (topScreen + sprYScale * length - 1) // FracUnit
+        if yh >= floorLimit then yh = floorLimit - 1 end
+        if yl <= ceilingLimit then yl = ceilingLimit + 1 end
+
+        if yl <= yh then
+          draw.column(
+            dest,
+            yLookup[yl] + column,
+            stride,
+            yh - yl,
+            pixels,
+            masked * height + top,
+            7,
+            128,
+            colormaps,
+            colormap,
+            mid - top * FracUnit + (yl - centerY) * iScale,
+            iScale
+          )
+        end
+      end
+
+      buffer.writei16(openings, (columns + column) * 2, MaxShort)
+    end
+
+    sprYScale += scaleStep
+  end
+end
+
+-- R_DrawSprite: `vis` clipped by every drawseg in front of it, and the masked walls behind it
+-- drawn first.
+local function drawSprite(vis: VisSprite)
+  local x1, x2 = vis.x1, vis.x2
+  for column = x1, x2 do
+    buffer.writei16(openings, (SpriteBottomClip + column) * 2, -2)
+    buffer.writei16(openings, (SpriteTopClip + column) * 2, -2)
+  end
+
+  for index = drawSegCount, 1, -1 do
+    local ds = drawSegs[index]
+    if ds.x1 > x2 or ds.x2 < x1 or (ds.silhouette == 0 and ds.maskedColumns == Null) then continue end
+
+    local r1 = if ds.x1 < x1 then x1 else ds.x1
+    local r2 = if ds.x2 > x2 then x2 else ds.x2
+    local lowScale, scale = ds.scale1, ds.scale2
+    if lowScale > scale then lowScale, scale = scale, lowScale end
+
+    if scale < vis.scale or (lowScale < vis.scale and pointOnSegSide(vis.gx, vis.gy, ds.seg) == 0) then
+      -- The seg is behind the sprite: only its masked texture is drawn now.
+      if ds.maskedColumns ~= Null then renderMaskedSegRange(ds, r1, r2) end
+      continue
+    end
+
+    local silhouette = ds.silhouette
+    if vis.gz >= ds.bottomHeight then silhouette = bit32.band(silhouette, SilTop) end
+    if vis.gzt <= ds.topHeight then silhouette = bit32.band(silhouette, SilBottom) end
+
+    if bit32.band(silhouette, SilBottom) ~= 0 then
+      for column = r1, r2 do
+        if buffer.readi16(openings, (SpriteBottomClip + column) * 2) == -2 then
+          buffer.writei16(openings, (SpriteBottomClip + column) * 2, buffer.readi16(openings, (ds.bottomClip + column) * 2))
+        end
+      end
+    end
+
+    if bit32.band(silhouette, SilTop) ~= 0 then
+      for column = r1, r2 do
+        if buffer.readi16(openings, (SpriteTopClip + column) * 2) == -2 then
+          buffer.writei16(openings, (SpriteTopClip + column) * 2, buffer.readi16(openings, (ds.topClip + column) * 2))
+        end
+      end
+    end
+  end
+
+  for column = x1, x2 do
+    if buffer.readi16(openings, (SpriteBottomClip + column) * 2) == -2 then
+      buffer.writei16(openings, (SpriteBottomClip + column) * 2, viewHeight)
+    end
+
+    if buffer.readi16(openings, (SpriteTopClip + column) * 2) == -2 then
+      buffer.writei16(openings, (SpriteTopClip + column) * 2, -1)
+    end
+  end
+
+  mFloorClip, mCeilingClip = SpriteBottomClip, SpriteTopClip
+  drawVisSprite(vis)
+end
+
+-- R_DrawPSprite's avis: a weapon is drawn as it is projected, never sorted.
+local playerVis: VisSprite = {
+  order = 0,
+  x1 = 0,
+  x2 = 0,
+  gx = 0,
+  gy = 0,
+  gz = 0,
+  gzt = 0,
+  startFrac = 0,
+  scale = 0,
+  xIScale = 0,
+  textureMid = 0,
+  patch = nil :: any,
+  colormap = 0,
+  flags = 0,
+}
+
+-- R_DrawPSprite: a weapon sprite, `psprite` of `player`.
+local function drawPSprite(player: any, psprite: any)
+  local state = states[psprite.state]
+  local frames = data.sprite(viewData, state.sprite)
+  local frame = frames and frames[bit32.band(state.frame, FrameMask)]
+  if not frame then return end
+
+  local patch, flip = frame.patches[1], frame.flips[1]
+  if not patch then return end
+
+  local tx = psprite.sx - 160 * FracUnit - patch.left * FracUnit
+  local x1 = (centerXFrac + fixedMul(tx, pspriteScale)) // FracUnit
+  if x1 > viewWidth then return end
+
+  tx += patch.width * FracUnit
+  local x2 = (centerXFrac + fixedMul(tx, pspriteScale)) // FracUnit - 1
+  if x2 < 0 then return end
+
+  local vis = playerVis
+  vis.flags = 0
+  vis.textureMid = 100 * FracUnit + FracUnit // 2 - (psprite.sy - patch.top * FracUnit)
+  vis.x1 = if x1 < 0 then 0 else x1
+  vis.x2 = if x2 >= viewWidth then viewWidth - 1 else x2
+  vis.scale = pspriteScale
+  if flip then
+    vis.xIScale = -pspriteIScale
+    vis.startFrac = patch.width * FracUnit - 1
+  else
+    vis.xIScale = pspriteIScale
+    vis.startFrac = 0
+  end
+
+  if vis.x1 > x1 then vis.startFrac += vis.xIScale * (vis.x1 - x1) end
+
+  vis.patch = patch
+  local invisibility = player.powers[2]
+  if invisibility > 4 * 32 or bit32.band(invisibility, 8) ~= 0 then
+    vis.colormap = -1
+  elseif fixedColormap >= 0 then
+    vis.colormap = fixedColormap
+  elseif bit32.band(state.frame, FullBright) ~= 0 then
+    vis.colormap = 0
+  else
+    vis.colormap = scaleLight[spriteLights + MaxLightScale - 1]
+  end
+
+  drawVisSprite(vis)
+end
+
+-- R_DrawPlayerSprites
+local function drawPlayerSprites(player: any)
+  spriteLights = math.clamp(player.mo.subsector.sector.lightlevel // 16 + extraLight, 0, 15) * MaxLightScale
+  mFloorClip, mCeilingClip = ScreenHeightArray, NegOneArray
+  for index = 0, 1 do
+    local psprite = player.psprites[index]
+    if psprite and psprite.state then drawPSprite(player, psprite) end
+  end
+end
+
+local function byScale(first: VisSprite, second: VisSprite): boolean
+  if first.scale ~= second.scale then return first.scale < second.scale end
+  return first.order < second.order
+end
+
+-- R_DrawMasked: sprites far to near, then the masked walls no sprite drew, then the weapon.
+local function drawMasked(player: any?)
+  local sorted: { VisSprite } = table.create(visSpriteCount) :: any
+  table.move(visSprites, 1, visSpriteCount, 1, sorted)
+  table.sort(sorted, byScale)
+  for _, vis in sorted do
+    drawSprite(vis)
+  end
+
+  for index = drawSegCount, 1, -1 do
+    local ds = drawSegs[index]
+    if ds.maskedColumns ~= Null then renderMaskedSegRange(ds, ds.x1, ds.x2) end
+  end
+
+  if player then drawPlayerSprites(player) end
+end
+
+-- r_main.c: the frame. ---------------------------------------------------------------------------
+
+local function useSize(renderer: Renderer, blocks: number): ViewSize
+  local size = renderer.sizes[blocks]
+  if not size then
+    size = sizeOf(blocks)
+    if size.width ~= ScreenWidth then size.back = backScreen(renderer.data, size) end
+    renderer.sizes[blocks] = size
+  end
+
+  viewWidth, viewHeight, centerX, centerY = size.width, size.height, size.centerX, size.centerY
+  centerXFrac, centerYFrac, projection = size.centerXFrac, size.centerYFrac, size.centerXFrac
+  viewAngleToX, xToViewAngle, ySlope, distScale = size.viewAngleToX, size.xToViewAngle, size.ySlope, size.distScale
+  scaleLight, clipAngle = size.scaleLight, size.clipAngle
+  pspriteScale, pspriteIScale = size.pspriteScale, size.pspriteIScale
+  return size
+end
+
+-- P_PlayerThink's light table for a player's powers, when the simulation has set none: the
+-- inverted map while invulnerable and nearly full bright with light amplification, both
+-- flickering off over their last four seconds.
+local function playerColormap(player: any): number
+  if player.fixedcolormap ~= 0 then return player.fixedcolormap end
+
+  local powers = player.powers
+  local invulnerable, infrared = powers[0], powers[5]
+  if invulnerable ~= 0 then return if invulnerable > 4 * 32 or bit32.band(invulnerable, 8) ~= 0 then 32 else 0 end
+  if infrared ~= 0 then return if infrared > 4 * 32 or bit32.band(infrared, 8) ~= 0 then 1 else 0 end
+
+  return 0
+end
+
+local function renderFrame(renderer: Renderer, game: any, target: Target, options: Options?, east: number, north: number, height: number, angle: number, player: any?)
+  if target.width < ScreenWidth or target.height < ScreenHeight then error('view: the target is smaller than 320 by 200', 3) end
+  if buffer.len(target.pixels) < target.width * target.height then error('view: the target buffer is too small', 3) end
+
+  local blocks = math.clamp(math.floor(options and options.size or 10), 3, 11)
+  viewData = renderer.data
+  colormaps, wadBytes = viewData.colormaps, viewData.bytes
+  dest, stride = target.pixels, target.width
+  local size = useSize(renderer, blocks)
+
+  for row = 0, viewHeight - 1 do
+    yLookup[row] = (size.windowY + row) * stride + size.windowX
+  end
+
+  drawBorder(size)
+
+  level = levelOf(renderer, game)
+  segs, subsectors = game.segs, game.subsectors
+  sides, levelTime = game.sides, game.leveltime or 0
+  data.animate(viewData, game.leveltime or 0)
+  textureTranslation, textures = viewData.textureTranslation, viewData.textures
+  skyTexture = textureOf(data.skyTexture(viewData, game.commercial == true, game.gameepisode or 1, game.gamemap or 1))
+
+  -- R_SetupFrame
+  viewX, viewY, viewZ, viewAngle = east, north, height, angle % U32
+  viewSin = finesine[viewAngle // AngleToFine + 1]
+  viewCos = finesine[viewAngle // AngleToFine + 2049]
+  extraLight = if player then player.extralight else 0
+  local fixed = if player then playerColormap(player) else 0
+  if fixed ~= 0 and fixed < viewData.colormapCount then
+    fixedColormap = fixed * 256
+    table.clear(fixedLight)
+    for index = 0, MaxLightScale - 1 do
+      fixedLight[index] = fixedColormap
+    end
+
+    wallLights, wallLightBase = fixedLight, 0
+  else
+    fixedColormap = -1
+  end
+
+  renderer.frames += 1
+  frameNumber = renderer.frames
+  spriteMarks = renderer.spriteMarks
+  fuzzPosition = renderer.fuzzPosition
+
+  -- R_ClearClipSegs
+  table.clear(solidFirst)
+  table.clear(solidLast)
+  for index = 0, 2 * ScreenWidth do
+    solidFirst[index], solidLast[index] = MaxInt, MaxInt
+  end
+
+  solidFirst[0], solidLast[0] = -0x7fffffff, -1
+  solidFirst[1], solidLast[1] = viewWidth, 0x7fffffff
+  newEnd = 2
+
+  -- R_ClearDrawSegs, R_ClearPlanes, R_ClearSprites
+  drawSegs, drawSegCount = renderer.drawSegs, 0
+  planes, planeCount = renderer.planes, 0
+  visSprites, visSpriteCount = renderer.visSprites, 0
+  for column = 0, viewWidth - 1 do
+    buffer.writei16(floorClip, column * 2, viewHeight)
+    buffer.writei16(ceilingClip, column * 2, -1)
+    buffer.writei16(openings, (ScreenHeightArray + column) * 2, viewHeight)
+    buffer.writei16(openings, (NegOneArray + column) * 2, -1)
+  end
+
+  lastOpening = FirstOpening
+  for row = 0, ScreenHeight - 1 do
+    cachedHeight[row] = 0
+  end
+
+  local planeAngle = (viewAngle - Ang90) % U32 // AngleToFine
+  baseXScale = fixedDiv(finesine[planeAngle + 2049], centerXFrac)
+  baseYScale = -fixedDiv(finesine[planeAngle + 1], centerXFrac)
+
+  renderBSPNode(level.root)
+  drawPlanes()
+  drawMasked(player)
+
+  renderer.fuzzPosition = fuzzPosition
+end
+
+--- A renderer for `wad`: everything a view needs that depends only on the WAD, made once a WAD.
+local renderers: { [any]: Renderer } = setmetatable({}, { __mode = 'k' }) :: any
+
+function module.new(wad: any): Renderer
+  local existing = renderers[wad]
+  if existing then return existing end
+
+  local renderer: Renderer = {
+    data = data.load(wad),
+    sizes = {},
+    level = nil,
+    fuzzPosition = 0,
+    planes = {},
+    drawSegs = {},
+    visSprites = {},
+    spriteMarks = setmetatable({}, { __mode = 'k' }) :: any,
+    frames = 0,
+  }
+  renderers[wad] = renderer
+  return renderer
+end
+
+--- Draws player `slot`'s view of `game` into `target` (320 by 200, indexed, a row at a time), and
+--- the weapon in their hands. `options.size` is the screen size, 3 to 11: 10, the default, is
+--- the full width above the status bar's 32 rows, which are left alone; 11 is the whole screen;
+--- smaller sizes are a window inside the border.
+function module.render(renderer: Renderer, game: any, slot: number, target: Target, options: Options?)
+  local player = game.players[slot]
+  local mo = player and player.mo
+  if not mo then error(`view: player {slot} has no body to see from`, 2) end
+
+  renderFrame(renderer, game, target, options, mo.x, mo.y, player.viewz, mo.angle, player)
+end
+
+--- Draws `game` from (x, y, z), fixed point, looking along BAM `angle`: a free camera, with no
+--- weapon and no light effects.
+function module.renderAt(renderer: Renderer, game: any, east: number, north: number, height: number, angle: number, target: Target, options: Options?)
+  renderFrame(renderer, game, target, options, east, north, height, angle, nil)
+end
+
+return module
