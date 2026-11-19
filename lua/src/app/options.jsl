@@ -1,19 +1,17 @@
 --!strict
 -- The application's command line, vanilla-shaped (`-iwad`, `-file`, `-warp`, `-skill`) with the
--- network and mod switches beside it. The entry parses the target's arguments into the table
--- this module returns; the managed modules read it at startup. A module loads once per domain,
--- so the entry and the managed modules share this one table.
+-- network switches beside it. The entry parses the target's arguments into the table this module
+-- returns; the managed modules read it at startup. A module loads once per domain, so the entry
+-- and the managed modules share this one table.
 local module = {}
 
 export type Options = {
   iwad: string?,
   files: { string },
-  mods: { string },
   warp: string?,
   skill: number,
   host: string?,
   join: string?,
-  token: string?,
   name: string,
   players: number,
   mode: string,
@@ -26,139 +24,155 @@ export type Options = {
   noMusic: boolean,
   fullscreen: boolean,
   frames: number?,
-  record: string?,
-  config: string?,
 }
 
-module.Defaults = table.freeze {
-  skill = 3,
-  name = 'player',
-  players = 2,
-  mode = 'coop',
-  teamDamage = false,
-  fragLimit = 0,
-  timeLimit = 0,
-  scale = 3,
-}
+function module.defaults(): Options
+  return {
+    files = {},
+    skill = 3,
+    name = 'player',
+    players = 2,
+    mode = 'coop',
+    teamDamage = false,
+    keepInventory = false,
+    fragLimit = 0,
+    timeLimit = 0,
+    scale = 3,
+    noSound = false,
+    noMusic = false,
+    fullscreen = false,
+  }
+end
 
-local current: Options = {
-  files = {},
-  mods = {},
-  skill = module.Defaults.skill,
-  name = module.Defaults.name,
-  players = module.Defaults.players,
-  mode = module.Defaults.mode,
-  teamDamage = module.Defaults.teamDamage,
-  keepInventory = false,
-  fragLimit = module.Defaults.fragLimit,
-  timeLimit = module.Defaults.timeLimit,
-  scale = module.Defaults.scale,
-  noSound = false,
-  noMusic = false,
-  fullscreen = false,
-}
+local current = module.defaults()
 
 module.current = current
 
-local Modes = { coop = true, ffa = true, tdm = true }
+-- A switch: how many values follow it (`'list'` takes every value up to the next switch) and what
+-- they set. `apply` gets the switch's own name for its error messages.
+type Switch = {
+  values: number | 'list',
+  apply: (options: Options, values: { string }, name: string) -> (),
+}
 
-local function number(arguments: { string }, index: number, name: string): number
-  local value = tonumber(arguments[index])
-  if not value then error(`doom: {name} takes a number, not '{arguments[index] or ''}'`, 0) end
+local function number(values: { string }, name: string): number
+  local value = tonumber(values[1])
+  if not value then error(`doom: {name} takes a number, not '{values[1]}'`, 0) end
 
   return value
+end
+
+-- A switch that sets one number, held between `minimum` and `maximum`.
+local function numeric(field: string, minimum: number, maximum: number): Switch
+  return {
+    values = 1,
+    apply = function(options: Options, values: { string }, name: string)
+      (options :: any)[field] = math.clamp(number(values, name), minimum, maximum)
+    end,
+  }
+end
+
+-- A switch that sets one text value.
+local function text(field: string): Switch
+  return {
+    values = 1,
+    apply = function(options: Options, values: { string })
+      (options :: any)[field] = values[1]
+    end,
+  }
+end
+
+-- A switch that turns a setting on.
+local function flag(field: string): Switch
+  return {
+    values = 0,
+    apply = function(options: Options)
+      (options :: any)[field] = true
+    end,
+  }
+end
+
+local Modes = { coop = true, ffa = true, tdm = true }
+
+local Switches: { [string]: Switch } = {
+  ['-iwad'] = text('iwad'),
+  ['-file'] = {
+    values = 'list',
+    apply = function(options: Options, values: { string })
+      table.move(values, 1, #values, #options.files + 1, options.files)
+    end,
+  },
+  -- `-warp 2 3` is E2M3 and `-warp 7` MAP07, as vanilla read them; anything else is a map's name.
+  ['-warp'] = {
+    values = 'list',
+    apply = function(options: Options, values: { string }, name: string)
+      local first, second = values[1], values[2]
+      if not first or #values > 2 then error(`doom: {name} takes an episode and a map, a map number, or a map name`, 0) end
+
+      if second then
+        options.warp = `E{number({ first }, name)}M{number({ second }, name)}`
+      elseif tonumber(first) then
+        options.warp = string.format('MAP%02d', tonumber(first) :: number)
+      else
+        options.warp = string.upper(first)
+      end
+    end,
+  },
+  ['-skill'] = numeric('skill', 1, 5),
+  ['-host'] = text('host'),
+  ['-join'] = text('join'),
+  ['-name'] = text('name'),
+  ['-players'] = numeric('players', 1, 4),
+  ['-mode'] = {
+    values = 1,
+    apply = function(options: Options, values: { string }, name: string)
+      if not Modes[values[1]] then error(`doom: {name} is coop, ffa or tdm, not '{values[1]}'`, 0) end
+
+      options.mode = values[1]
+    end,
+  },
+  ['-teamdamage'] = flag('teamDamage'),
+  ['-keepinventory'] = flag('keepInventory'),
+  ['-fraglimit'] = numeric('fragLimit', 0, 1000),
+  ['-timelimit'] = numeric('timeLimit', 0, 1000),
+  ['-scale'] = numeric('scale', 1, 8),
+  ['-nosound'] = flag('noSound'),
+  ['-nomusic'] = flag('noMusic'),
+  ['-fullscreen'] = flag('fullscreen'),
+  ['-frames'] = numeric('frames', 1, math.huge),
+}
+
+local function isSwitch(argument: string?): boolean
+  return argument ~= nil and string.sub(argument, 1, 1) == '-' and tonumber(argument) == nil
 end
 
 -- Parses `arguments` into a fresh options table. Unknown switches are errors: a misspelled
 -- `-iwad` that silently started the wrong game would be worse.
 function module.parse(arguments: { string }): Options
-  local parsed: Options = table.clone(current)
-  parsed.files, parsed.mods = {}, {}
+  local parsed = module.defaults()
   local index = 1
   while index <= #arguments do
-    local switch = string.lower(arguments[index])
-    local value = arguments[index + 1]
+    local name = string.lower(arguments[index])
+    local switch = Switches[name]
+    if not switch then error(`doom: unknown switch '{arguments[index]}'`, 0) end
+
     index += 1
-
-    if switch == '-iwad' then
-      parsed.iwad = value
-      index += 1
-    elseif switch == '-file' then
-      while arguments[index] and string.sub(arguments[index], 1, 1) ~= '-' do
-        table.insert(parsed.files, arguments[index])
+    local values: { string } = {}
+    if switch.values == 'list' then
+      while index <= #arguments and not isSwitch(arguments[index]) do
+        table.insert(values, arguments[index])
         index += 1
       end
-    elseif switch == '-mod' then
-      while arguments[index] and string.sub(arguments[index], 1, 1) ~= '-' do
-        table.insert(parsed.mods, arguments[index])
-        index += 1
-      end
-    elseif switch == '-warp' then
-      local second = arguments[index + 1]
-      if value and second and tonumber(value) and tonumber(second) then
-        parsed.warp = `E{value}M{second}`
-        index += 2
-      elseif value and tonumber(value) then
-        parsed.warp = string.format('MAP%02d', tonumber(value) :: number)
-        index += 1
-      else
-        parsed.warp = value and string.upper(value)
-        index += 1
-      end
-    elseif switch == '-skill' then
-      parsed.skill = math.clamp(number(arguments, index, '-skill'), 1, 5)
-      index += 1
-    elseif switch == '-host' then
-      parsed.host = value or '0.0.0.0:5029'
-      index += 1
-    elseif switch == '-join' then
-      parsed.join = value
-      index += 1
-    elseif switch == '-token' then
-      parsed.token = value
-      index += 1
-    elseif switch == '-name' then
-      parsed.name = value or parsed.name
-      index += 1
-    elseif switch == '-players' then
-      parsed.players = math.clamp(number(arguments, index, '-players'), 1, 4)
-      index += 1
-    elseif switch == '-mode' then
-      if not value or not Modes[value] then error(`doom: -mode is coop, ffa or tdm, not '{value or ''}'`, 0) end
-
-      parsed.mode = value
-      index += 1
-    elseif switch == '-teamdamage' then
-      parsed.teamDamage = true
-    elseif switch == '-keepinventory' then
-      parsed.keepInventory = true
-    elseif switch == '-fraglimit' then
-      parsed.fragLimit = number(arguments, index, '-fraglimit')
-      index += 1
-    elseif switch == '-timelimit' then
-      parsed.timeLimit = number(arguments, index, '-timelimit')
-      index += 1
-    elseif switch == '-scale' then
-      parsed.scale = math.clamp(number(arguments, index, '-scale'), 1, 8)
-      index += 1
-    elseif switch == '-nosound' then
-      parsed.noSound = true
-    elseif switch == '-nomusic' then
-      parsed.noMusic = true
-    elseif switch == '-fullscreen' then
-      parsed.fullscreen = true
-    elseif switch == '-frames' then
-      parsed.frames = number(arguments, index, '-frames')
-      index += 1
-    elseif switch == '-record' then
-      parsed.record = value
-      index += 1
-    elseif switch == '-config' then
-      parsed.config = value
-      index += 1
     else
-      error(`doom: unknown switch '{arguments[index - 1]}'`, 0)
+      for _ = 1, switch.values :: number do
+        if index > #arguments then error(`doom: {name} takes a value`, 0) end
+
+        table.insert(values, arguments[index])
+        index += 1
+      end
     end
+
+    switch.apply(parsed, values, name)
   end
 
   return parsed

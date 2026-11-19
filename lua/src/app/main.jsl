@@ -279,6 +279,37 @@ local function applySetting(state: App, name: string, value: any): ()
   if name == 'musicVolume' and state.mixer then sound.setMusicVolume(state.mixer, value) end
 end
 
+-- What each of the menu's commands does; the commands the menu handles itself (open, close,
+-- readThis) do nothing here.
+local MenuCommands: { [string]: (state: App, command: any) -> () } = {
+  newGame = function(state: App, command: any)
+    local map = if state.wad:find('MAP01') then 'MAP01' else `E{command.episode or 1}M1`
+    startSingle(state, singleStart(map, command.skill))
+  end,
+  quit = function(state: App)
+    toTitle(state)
+    application.exit(0)
+  end,
+  endGame = function(state: App)
+    toTitle(state)
+  end,
+  save = function(state: App, command: any)
+    saveGame(state, command.slot, command.description or 'saved game')
+  end,
+  load = function(state: App, command: any)
+    loadGame(state, command.slot)
+  end,
+  setting = function(state: App, command: any)
+    applySetting(state, command.name, command.value)
+  end,
+  host = function(state: App, command: any)
+    startHost(state, command.mode, command.players or 2, command.skill or 2, command.map)
+  end,
+  join = function(state: App, command: any)
+    startJoin(state, command.token or '')
+  end,
+}
+
 local function menuCommand(state: App, command: any, effect: string?): ()
   if effect and state.mixer then
     sound.update(state.mixer, play.game, 0, { { name = effect } })
@@ -286,26 +317,8 @@ local function menuCommand(state: App, command: any, effect: string?): ()
 
   if not command then return end
 
-  local kind = command.kind
-  if kind == 'newGame' then
-    local map = if state.wad:find('MAP01') then 'MAP01' else `E{command.episode or 1}M1`
-    startSingle(state, singleStart(map, command.skill))
-  elseif kind == 'quit' then
-    toTitle(state)
-    application.exit(0)
-  elseif kind == 'endGame' then
-    toTitle(state)
-  elseif kind == 'save' then
-    saveGame(state, command.slot, command.description or 'saved game')
-  elseif kind == 'load' then
-    loadGame(state, command.slot)
-  elseif kind == 'setting' then
-    applySetting(state, command.name, command.value)
-  elseif kind == 'host' then
-    startHost(state, command.mode, command.players or 2, command.skill or 2, command.map)
-  elseif kind == 'join' then
-    startJoin(state, command.token or '')
-  end
+  local run = MenuCommands[command.kind]
+  if run then run(state, command) end
 end
 
 -- The tic's effects that aren't simulation: the HUD, sound, music, cosmetic announcements.
