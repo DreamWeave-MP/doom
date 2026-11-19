@@ -39,6 +39,7 @@ export type Remote = {
   heard: number,
   starved: number,
   snapshot: boolean,
+  rejected: number?,
 }
 
 export type Options = {
@@ -76,8 +77,16 @@ local function now(): number
   return os.clock() * 1000
 end
 
+-- A peer can leave the transport before its disconnect is polled; what would have gone to it is
+-- dropped, and the disconnect is handled when it comes.
 local function send(host: Host, peer: integer, event: net.EventName, payload: buffer): ()
+  if not table.find(host.server:peers(), peer) then return end
+
   host.server:sendEvent(peer, host.protocol.ids[event], payload)
+end
+
+local function disconnect(host: Host, peer: integer): ()
+  if table.find(host.server:peers(), peer) then host.server:disconnect(peer) end
 end
 
 -- Every remote that is in the game and running tics.
@@ -167,11 +176,19 @@ function module.token(host: Host, slot: number): string
   return net.tokenText(host.server:connectToken(integer.create(slot), seconds, timeout))
 end
 
+-- Tells a peer why it may not play, and disconnects it a second later: a disconnect sent at
+-- once can overtake the message.
 local function reject(host: Host, peer: integer, reason: string): ()
   host.log(`rejected peer {peer}: {reason}`)
   send(host, peer, 'REJECT', net.encodeValue { reason = reason })
   host.server:flush()
-  host.server:disconnect(peer)
+  local slot = host.peers[peer]
+  local remote = slot and host.remotes[slot]
+  if remote then
+    remote.rejected = now()
+  else
+    disconnect(host, peer)
+  end
 end
 
 -- A remote player is gone: from the lobby, or from the game at the next tic.
@@ -242,7 +259,7 @@ local function receive(host: Host, item: net.Received): ()
     local slot = item.clientId or 0
     if slot < 1 or slot >= host.options.maxPlayers or host.remotes[slot] then
       host.log(`refused a connection for slot {slot}`)
-      host.server:disconnect(item.peer)
+      disconnect(host, item.peer)
       return
     end
 
@@ -260,6 +277,7 @@ local function receive(host: Host, item: net.Received): ()
       heard = now(),
       starved = 0,
       snapshot = false,
+      rejected = nil,
     }
     host.peers[item.peer] = slot
     return
@@ -274,6 +292,8 @@ local function receive(host: Host, item: net.Received): ()
   if item.kind ~= 'message' or not slot then return end
 
   local remote = host.remotes[slot]
+  if remote.rejected then return end
+
   local payload = item.payload :: buffer
   remote.heard = now()
   if item.event == 'HELLO' then
@@ -308,7 +328,7 @@ local function receive(host: Host, item: net.Received): ()
     end
   elseif item.event == 'BYE' then
     drop(host, slot, 'said goodbye')
-    host.server:disconnect(item.peer)
+    disconnect(host, item.peer)
   end
 end
 
@@ -340,9 +360,12 @@ function module.pump(host: Host): ()
 
   local limit = (host.options.timeout or 10) * 1000
   for slot, remote in host.remotes do
-    if now() - remote.heard > limit then
+    if remote.rejected and now() - remote.rejected > 1000 then
+      drop(host, slot, 'rejected')
+      disconnect(host, remote.peer)
+    elseif now() - remote.heard > limit then
       drop(host, slot, 'timed out')
-      host.server:disconnect(remote.peer)
+      disconnect(host, remote.peer)
     end
   end
 
@@ -498,13 +521,16 @@ end
 -- What the session has seen, for a scoreboard or a log.
 function module.report(host: Host): any
   local players = {}
+  local connected = host.server:peers()
   for slot, remote in host.remotes do
+    -- The transport answers link statistics only for a peer it still holds.
+    local linked = table.find(connected, remote.peer) ~= nil
     players[slot] = {
       name = remote.name,
       queued = #remote.queue,
       starved = remote.starved,
-      rtt = host.server:peerRtt(remote.peer),
-      loss = host.server:peerPacketLoss(remote.peer),
+      rtt = if linked then host.server:peerRtt(remote.peer) else nil,
+      loss = if linked then host.server:peerPacketLoss(remote.peer) else nil,
     }
   end
 
