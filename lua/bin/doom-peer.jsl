@@ -41,6 +41,7 @@ local options: { [string]: any } = {
   timeout = 10,
   fraglimit = 0,
   resync = true,
+  mods = {},
 }
 
 local Numbers = {
@@ -75,6 +76,12 @@ while index <= #arguments do
       table.insert(options.files, arguments[index])
       index += 1
     end
+  elseif switch == '-mod' then
+    index += 1
+    while arguments[index] and string.sub(arguments[index], 1, 1) ~= '-' do
+      table.insert(options.mods, arguments[index])
+      index += 1
+    end
   elseif switch == '-teamdamage' then
     options.teamDamage = true
     index += 1
@@ -94,6 +101,10 @@ local paths = { options.iwad }
 for _, file in options.files do
   table.insert(paths, file)
 end
+
+-- Mods by the module name their package exports (@arsenal); the script is run with each mod's
+-- package given to jess with --package, in the order the mods should compose.
+local mods = [for name in options.mods => (require :: any)(name)]
 
 local wad = wadModule.open(options.iwad, options.files)
 local conditioner = if options.latency > 0 or options.jitter > 0 or options.loss > 0
@@ -172,7 +183,7 @@ if role == 'host' then
     address = target,
     wad = wad,
     paths = paths,
-    start = { mode = options.mode, settings = settings, map = options.map, skill = options.skill - 1 },
+    start = { mode = options.mode, settings = settings, map = options.map, skill = options.skill - 1, mods = mods },
     maxPlayers = options.players,
     name = options.name,
     team = options.team,
@@ -244,6 +255,7 @@ local client = session.client.new {
   token = buffer.tostring(token),
   wad = wad,
   paths = paths,
+  mods = mods,
   name = options.name,
   team = options.team,
   timeout = options.timeout,

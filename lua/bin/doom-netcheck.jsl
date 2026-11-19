@@ -28,6 +28,10 @@ local Peer = 'lua/bin/doom-peer.jsl'
 local Grants = {
   '--package',
   'lua',
+  '--package',
+  'mods/arsenal',
+  '--package',
+  'mods/coop-director',
   '--capability',
   'network.transport',
   '--capability',
@@ -269,6 +273,24 @@ scenario('content-mismatch', function()
   local client = reports.player2
   check('content-mismatch', client ~= nil and string.find(tostring(client.reason), 'content mismatch', 1, true) ~= nil, `player2 was not refused for its content: {client and client.reason}`)
   check('content-mismatch', string.find(logs.host or '', 'extra.wad', 1, true) ~= nil, 'the host did not name the extra file')
+end)
+
+scenario('mods-coop', function()
+  local both = { '-mod', '@arsenal', '@coopdirector' }
+  local reports = run('mods-coop', session('coop', 3, Tics, both, function(): ({ string }, number?)
+    return both, nil
+  end))
+  agree('mods-coop', reports, { 'player2', 'player3' }, Tics)
+  check('mods-coop', reports.host and reports.host.mismatches == 0, 'the host saw a hash mismatch')
+end)
+
+scenario('mod-mismatch', function()
+  local reports, logs = run('mod-mismatch', session('coop', 2, 105, { '-wait', '1', '-mod', '@arsenal', '@coopdirector' }, function(): ({ string }, number?)
+    return { '-mod', '@arsenal' }, nil
+  end))
+  local client = reports.player2
+  check('mod-mismatch', client ~= nil and string.find(tostring(client.reason), 'content mismatch', 1, true) ~= nil, `player2 was not refused for its mods: {client and client.reason}`)
+  check('mod-mismatch', string.find(logs.host or '', 'org.dreamweave.doom.coop-director', 1, true) ~= nil, 'the host did not name the missing mod')
 end)
 
 for _, line in results do
