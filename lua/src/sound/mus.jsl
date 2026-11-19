@@ -1,0 +1,119 @@
+--!strict
+-- MUS, the DMX music format (`D_<name>` lumps): a header naming the score's place and the
+-- instruments it uses, then a score of events, each with a delay in ticks of 1/140 second
+-- after it. Channel 15 is percussion. Parsing only reads the score; ./synth plays it.
+
+export type EventKind = 'release' | 'play' | 'bend' | 'system' | 'controller' | 'measure' | 'finish'
+
+export type Event = {
+  kind: EventKind,
+  channel: number,
+  -- release and play: the note, 0 to 127.
+  note: number,
+  -- play: a new volume for the channel's notes, or nil to keep the last one.
+  volume: number?,
+  -- bend: 0 to 255, 128 none; system: the event (10 sounds off, 11 notes off, 12 mono, 13
+  -- poly, 14 reset controllers); controller: its value, 0 to 127.
+  value: number,
+  -- controller: 0 instrument, 1 bank, 2 modulation, 3 volume, 4 pan, 5 expression, 6 reverb,
+  -- 7 chorus, 8 sustain, 9 soft.
+  controller: number,
+  -- Ticks until the next event.
+  delay: number,
+}
+
+export type Song = {
+  primaryChannels: number,
+  secondaryChannels: number,
+  instruments: { number },
+  events: { Event },
+}
+
+local TicksPerSecond = 140
+local Kinds: { [number]: EventKind } = {
+  [0] = 'release',
+  [1] = 'play',
+  [2] = 'bend',
+  [3] = 'system',
+  [4] = 'controller',
+  [5] = 'measure',
+  [6] = 'finish',
+}
+
+local function parse(data: buffer): Song
+  local length = buffer.len(data)
+  if length < 16 or buffer.readstring(data, 0, 4) ~= 'MUS\x1a' then error('mus: not a MUS lump', 2) end
+
+  local scoreLength, scoreStart = buffer.readu16(data, 4), buffer.readu16(data, 6)
+  local instrumentCount = buffer.readu16(data, 12)
+  if 16 + instrumentCount * 2 > length then error('mus: the instrument list is truncated', 2) end
+
+  local instruments: { number } = table.create(instrumentCount) :: { number }
+  for index = 0, instrumentCount - 1 do
+    table.insert(instruments, buffer.readu16(data, 16 + index * 2))
+  end
+
+  -- Some lumps count a score past their end; the lump's end is where it stops.
+  local finish = math.min(scoreStart + scoreLength, length)
+  local at = scoreStart
+  local function byte(): number
+    if at >= finish then error('mus: the score is truncated', 3) end
+
+    local value = buffer.readu8(data, at)
+    at += 1
+    return value
+  end
+
+  local events: { Event } = {}
+  while at < finish do
+    local descriptor = byte()
+    local kind = Kinds[bit32.band(bit32.rshift(descriptor, 4), 7)]
+    if not kind then error(`mus: unknown event at byte {at - 1}`, 2) end
+
+    local event: Event = {
+      kind = kind,
+      channel = bit32.band(descriptor, 15),
+      note = 0,
+      volume = nil,
+      value = 0,
+      controller = 0,
+      delay = 0,
+    }
+
+    if kind == 'release' then
+      event.note = bit32.band(byte(), 127)
+    elseif kind == 'play' then
+      local note = byte()
+      event.note = bit32.band(note, 127)
+      if note >= 128 then event.volume = bit32.band(byte(), 127) end
+    elseif kind == 'bend' then
+      event.value = byte()
+    elseif kind == 'system' then
+      event.value = bit32.band(byte(), 127)
+    elseif kind == 'controller' then
+      event.controller = bit32.band(byte(), 127)
+      event.value = bit32.band(byte(), 127)
+    end
+
+    if descriptor >= 128 then
+      local delay = 0
+      repeat
+        local part = byte()
+        delay = delay * 128 + bit32.band(part, 127)
+      until part < 128
+      event.delay = delay
+    end
+
+    table.insert(events, event)
+    if kind == 'finish' then break end
+  end
+
+  return {
+    primaryChannels = buffer.readu16(data, 8),
+    secondaryChannels = buffer.readu16(data, 10),
+    instruments = instruments,
+    events = events,
+  }
+end
+
+return { parse = parse, TicksPerSecond = TicksPerSecond }

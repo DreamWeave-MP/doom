@@ -1,0 +1,52 @@
+--!strict
+-- DMX digitized sound lumps (`DS<name>`): a u16 format (3), a u16 rate, a u32 sample count, then
+-- unsigned 8-bit mono samples. From Doom 1.666 on, the samples are padded with 16 copies of the
+-- first sample before them and 16 of the last after them, all counted, and DMX skips the padding;
+-- the earlier lumps have none. Padding is recognized by those copies, so either kind decodes to
+-- just its sound.
+
+export type Sound = {
+  rate: number,
+  -- Unsigned 8-bit samples, 128 silent.
+  samples: buffer,
+}
+
+local DefaultRate = 11025
+local Padding = 16
+
+local function repeats(data: buffer, from: number, count: number, value: number): boolean
+  for at = from, from + count - 1 do
+    if buffer.readu8(data, at) ~= value then return false end
+  end
+
+  return true
+end
+
+-- The sound in a DMX lump, or nil when it isn't one (another format, or no samples).
+local function decode(data: buffer): Sound?
+  local length = buffer.len(data)
+  if length < 8 or buffer.readu16(data, 0) ~= 3 then return nil end
+
+  local rate = buffer.readu16(data, 2)
+  if rate == 0 then rate = DefaultRate end
+
+  -- A count past the lump's end is cut to what the lump holds.
+  local count = math.min(buffer.readu32(data, 4), length - 8)
+  local first, last = 8, 8 + count
+  if count > Padding * 2 then
+    local leading = repeats(data, first, Padding, buffer.readu8(data, first + Padding))
+    local trailing = repeats(data, last - Padding, Padding, buffer.readu8(data, last - Padding - 1))
+    if leading and trailing then
+      first += Padding
+      last -= Padding
+    end
+  end
+
+  if last <= first then return nil end
+
+  local samples = buffer.create(last - first)
+  buffer.copy(samples, 0, data, first, last - first)
+  return { rate = rate, samples = samples }
+end
+
+return { decode = decode }

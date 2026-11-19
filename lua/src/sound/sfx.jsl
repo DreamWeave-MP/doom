@@ -1,0 +1,143 @@
+--!strict
+-- sounds.c's S_sfx: every sound effect by its name without the `sfx_` prefix, in the
+-- original's order. `priority` decides which sound a full set of channels gives up (the
+-- lower, the more it matters); `singularity` is unused by the original too. A `link` plays
+-- another sound's lump at `pitch` (128 is unchanged), `volume` added to the level.
+
+export type Sfx = {
+  name: string,
+  index: number,
+  singularity: boolean,
+  priority: number,
+  link: string?,
+  pitch: number,
+  volume: number,
+}
+
+local byName: { [string]: Sfx } = {}
+local count = 0
+
+local function add(name: string, singularity: boolean, priority: number, link: string?, pitch: number?, volume: number?): ()
+  count += 1
+  byName[name] = {
+    name = name,
+    index = count,
+    singularity = singularity,
+    priority = priority,
+    link = link,
+    pitch = pitch or 128,
+    volume = volume or 0,
+  }
+end
+
+-- sfx_pistol (1) first.
+add('pistol', false, 64)
+add('shotgn', false, 64)
+add('sgcock', false, 64)
+add('dshtgn', false, 64)
+add('dbopn', false, 64)
+add('dbcls', false, 64)
+add('dbload', false, 64)
+add('plasma', false, 64)
+add('bfg', false, 64)
+add('sawup', false, 64)
+add('sawidl', false, 118)
+add('sawful', false, 64)
+add('sawhit', false, 64)
+add('rlaunc', false, 64)
+add('rxplod', false, 70)
+add('firsht', false, 70)
+add('firxpl', false, 70)
+add('pstart', false, 100)
+add('pstop', false, 100)
+add('doropn', false, 100)
+add('dorcls', false, 100)
+add('stnmov', false, 119)
+add('swtchn', false, 78)
+add('swtchx', false, 78)
+add('plpain', false, 96)
+add('dmpain', false, 96)
+add('popain', false, 96)
+add('vipain', false, 96)
+add('mnpain', false, 96)
+add('pepain', false, 96)
+add('slop', false, 78)
+add('itemup', true, 78)
+add('wpnup', true, 78)
+add('oof', false, 96)
+add('telept', false, 32)
+add('posit1', true, 98)
+add('posit2', true, 98)
+add('posit3', true, 98)
+add('bgsit1', true, 98)
+add('bgsit2', true, 98)
+add('sgtsit', true, 98)
+add('cacsit', true, 98)
+add('brssit', true, 94)
+add('cybsit', true, 92)
+add('spisit', true, 90)
+add('bspsit', true, 90)
+add('kntsit', true, 90)
+add('vilsit', true, 90)
+add('mansit', true, 90)
+add('pesit', true, 90)
+add('sklatk', false, 70)
+add('sgtatk', false, 70)
+add('skepch', false, 70)
+add('vilatk', false, 70)
+add('claw', false, 70)
+add('skeswg', false, 70)
+add('pldeth', false, 32)
+add('pdiehi', false, 32)
+add('podth1', false, 70)
+add('podth2', false, 70)
+add('podth3', false, 70)
+add('bgdth1', false, 70)
+add('bgdth2', false, 70)
+add('sgtdth', false, 70)
+add('cacdth', false, 70)
+add('skldth', false, 70)
+add('brsdth', false, 32)
+add('cybdth', false, 32)
+add('spidth', false, 32)
+add('bspdth', false, 32)
+add('vildth', false, 32)
+add('kntdth', false, 32)
+add('pedth', false, 32)
+add('skedth', false, 32)
+add('posact', true, 120)
+add('bgact', true, 120)
+add('dmact', true, 120)
+add('bspact', true, 100)
+add('bspwlk', true, 100)
+add('vilact', true, 100)
+add('noway', false, 78)
+add('barexp', false, 60)
+add('punch', false, 64)
+add('hoof', false, 70)
+add('metal', false, 70)
+add('chgun', false, 64, 'pistol', 150, 0)
+add('tink', false, 60)
+add('bdopn', false, 100)
+add('bdcls', false, 100)
+add('itmbk', false, 100)
+add('flame', false, 32)
+add('flamst', false, 32)
+add('getpow', false, 60)
+add('bospit', false, 70)
+add('boscub', false, 70)
+add('bossit', false, 70)
+add('bospn', false, 70)
+add('bosdth', false, 70)
+add('manatk', false, 70)
+add('mandth', false, 70)
+add('sssit', false, 70)
+add('ssdth', false, 70)
+add('keenpn', false, 70)
+add('keendt', false, 70)
+add('skeact', false, 70)
+add('skesit', false, 70)
+add('skeatk', false, 70)
+add('radio', false, 60)
+
+return byName
