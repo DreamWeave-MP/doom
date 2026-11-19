@@ -1,0 +1,98 @@
+--!nonstrict
+-- The co-op director: monsters toughened for the party's size, waves of returning monsters only
+-- where nobody looks, and the same waves on every run. The wave test needs doom2.wad in the folder
+-- the tests run from, and passes without it.
+local director = require('@coopdirector')
+local fs = require('@dream/fs')
+local play = require('@doom/play')
+local setup = require('@doom/setup')
+local testing = require('@doom/testing')
+local test = require('@jess/test')
+
+local expect = test.expect
+local suite = test.new()
+local TestName = 'director.wad'
+
+local function present(count: number): { boolean }
+  return [for slot in range(1, 4) => slot <= count]
+end
+
+suite.afterEach(function() testing.remove(TestName) end)
+
+suite.describe('the co-op director', function()
+  suite.it('makes monsters take less damage the more players there are', function()
+    local path = testing.roomWad(TestName, {
+      things = { { 64, 64, 90, 1 }, { 128, 64, 90, 2 }, { 192, 64, 90, 3 }, { 256, 64, 90, 4 }, { 256, 400, 0, 3001 } },
+    })
+    local engine = play.engine
+    for players, taken in { [1] = 30, [2] = 20, [4] = 12 } do
+      local game = setup.start(path, { mode = 'coop', mods = { director }, players = present(players) })
+      local imp
+      local thinker = game.thinkercap.next
+      while thinker ~= game.thinkercap do
+        if thinker.think == 'mobj' and thinker.info.name == 'MT_TROOP' then imp = thinker end
+        thinker = thinker.next
+      end
+
+      local before = imp.health
+      engine.DamageMobj(imp, game.players[0].mo, game.players[0].mo, 30)
+      expect(before - imp.health).toBe(taken)
+    end
+  end)
+
+  suite.it('sends waves of returning monsters into a cooperative level, the same on every run', function()
+    local iwad = fs.join(fs.cwd() or '.', 'doom2.wad')
+    if not fs.exists(iwad) then return end
+
+    local engine = play.engine
+    local function run(): (number, string, number)
+      local game = setup.start(iwad, { mode = 'coop', mods = { director }, players = present(2), map = 'MAP01', skill = 3 })
+      local thinker = game.thinkercap.next
+      while thinker ~= game.thinkercap do
+        local following = thinker.next
+        if thinker.think == 'mobj' and bit32.band(thinker.flags, engine.MF_COUNTKILL) ~= 0 then
+          engine.DamageMobj(thinker, game.players[0].mo, game.players[0].mo, 10000)
+        end
+
+        thinker = following
+      end
+
+      for _ = 1, 35 * 45 do
+        play.tick {}
+      end
+
+      local living = 0
+      thinker = game.thinkercap.next
+      while thinker ~= game.thinkercap do
+        if thinker.think == 'mobj' and bit32.band(thinker.flags, engine.MF_COUNTKILL) ~= 0 and thinker.health > 0 then
+          living += 1
+        end
+        thinker = thinker.next
+      end
+
+      return game.modstate['org.dreamweave.doom.coop-director'].waves, play.hash(), living
+    end
+
+    local waves, hash, living = run()
+    expect(waves >= 1).toBe(true)
+    expect(living > 0).toBe(true)
+    local again, sameHash = run()
+    expect(again).toBe(waves)
+    expect(sameHash).toBe(hash)
+  end)
+
+  suite.it('stays out of deathmatch', function()
+    local path = testing.roomWad(TestName, {
+      things = { { 64, 64, 90, 1 }, { 128, 64, 90, 2 }, { 64, 448, 0, 11 }, { 448, 448, 0, 11 }, { 256, 400, 0, 3001 } },
+    })
+    local game = setup.start(path, { mode = 'ffa', mods = { director }, players = present(2) })
+    for _ = 1, 35 * 25 do
+      play.tick {}
+    end
+
+    expect(game.modstate and game.modstate['org.dreamweave.doom.coop-director']).toBe(nil)
+  end)
+end)
+
+
+return suite

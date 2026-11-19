@@ -1,0 +1,22 @@
+manifest_version = 1
+
+[package]
+id = "org.dreamweave.doom.coop-director"
+version = "1.0.0"
+jess_api = "1"
+include = ["src", "tests"]
+tests = ["tests/director_test.jsl"]
+
+[dependencies]
+"org.dreamweave.doom" = "^0.1"
+
+[modules]
+"@coopdirector" = "src/director.jsl"
+
+[[layer]]
+id = "org.dreamweave.doom.coop-director"
+exports = ["@coopdirector"]
+
+[managed.mod]
+module = "src/managed.jsl"
+interface = "doom.mods"

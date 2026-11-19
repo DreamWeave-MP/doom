@@ -1,0 +1,162 @@
+--!strict
+-- @coopdirector: a cooperative director for DOOM for Jess.
+--
+-- Every twenty seconds of a cooperative level it looks at the party: while everyone is healthy
+-- and nothing is fighting them, it brings back monsters the party killed, at their spawn points,
+-- wherever no player can see, a few more for every player; while the party is hurt, it waits.
+-- Monsters take less damage the more players there are, so a full party still has a fight. It
+-- runs inside the tic (its choices use the game's random numbers and its memory is saved with
+-- the game), so every peer of a netgame directs the same waves.
+local modApi = require('@doom/mod')
+
+local FracUnit = 65536
+local Interval = 35 * 20
+local MaxWaves = 6
+local NearUnits = 1024
+
+-- The party in the game now: the living players' bodies and their mean health.
+local function party(engine: any): ({ any }, number)
+  local game = engine.G
+  local bodies, health = {}, 0
+  for slot = 0, 3 do
+    local player = game.playeringame[slot] and game.players[slot]
+    if player and player.mo and player.playerstate == engine.PST_LIVE then
+      table.insert(bodies, player.mo)
+      health += player.health
+    end
+  end
+
+  return bodies, if #bodies > 0 then health / #bodies else 0
+end
+
+local function seen(engine: any, bodies: { any }, thing: any): boolean
+  for _, body in bodies do
+    if engine.CheckSight(body, thing) then return true end
+  end
+
+  return false
+end
+
+-- Living monsters within NearUnits of any player, and the corpses that can come back.
+local function census(engine: any, bodies: { any }): (number, { any })
+  local near, corpses = 0, {}
+  local cap = engine.G.thinkercap
+  local thinker = cap.next
+  while thinker ~= cap do
+    if thinker.think == 'mobj' and bit32.band(thinker.flags, engine.MF_COUNTKILL) ~= 0 then
+      if thinker.health > 0 then
+        for _, body in bodies do
+          if engine.AproxDistance(thinker.x - body.x, thinker.y - body.y) < NearUnits * FracUnit then
+            near += 1
+            break
+          end
+        end
+      elseif thinker.spawnpoint and thinker.info.raisestate ~= 0 then
+        table.insert(corpses, thinker)
+      end
+    end
+
+    thinker = thinker.next
+  end
+
+  return near, corpses
+end
+
+-- Brings `corpse` back as a fresh monster at its spawn point, as nightmare respawning does.
+local function revive(engine: any, corpse: any): ()
+  local spot = corpse.spawnpoint
+  local x, y = spot.x * FracUnit, spot.y * FracUnit
+  local mobj = engine.SpawnMobj(x, y, engine.ONFLOORZ, corpse.type)
+  mobj.spawnpoint = spot
+  mobj.angle = engine.ANG45 * (spot.angle // 45) % 4294967296
+  engine.SpawnMobj(x, y, mobj.floorz, engine.MT.MT_TFOG)
+  engine.RemoveMobj(corpse)
+end
+
+local function direct(registry: modApi.Registry): ()
+  local engine = registry.engine
+  local game = engine.G
+  if game.deathmatch ~= 0 then return end
+
+  local memory = registry.state()
+  if memory.map ~= game.mapname then
+    memory.map, memory.waves, memory.next = game.mapname, 0, Interval
+  end
+
+  if game.leveltime < memory.next or memory.waves >= MaxWaves then return end
+
+  memory.next = game.leveltime + Interval
+  local bodies, health = party(engine)
+  if #bodies == 0 or health < 50 then return end
+
+  local near, corpses = census(engine, bodies)
+  if near >= 2 * #bodies or #corpses == 0 then return end
+
+  local wanted = #bodies + 1 + memory.waves
+  local revived = 0
+  for _ = 1, #corpses do
+    if revived >= wanted or #corpses == 0 then break end
+
+    local index = registry.random() % #corpses + 1
+    local corpse = table.remove(corpses, index) :: any
+    if not seen(engine, bodies, corpse) then
+      revive(engine, corpse)
+      revived += 1
+    end
+  end
+
+  if revived == 0 then return end
+
+  memory.waves += 1
+  for slot = 0, 3 do
+    if game.playeringame[slot] then game.players[slot].message = `the director sends {revived} more` end
+  end
+end
+
+-- Damage to a monster from a player, scaled for the party: full with one player, two thirds with
+-- two, half with three, two fifths with four.
+local function toughen(engine: any, damage: number, target: any, source: any): number?
+  if target.player or not (source and source.player) then return nil end
+  if bit32.band(target.flags, engine.MF_COUNTKILL) == 0 then return nil end
+  if engine.G.deathmatch ~= 0 then return nil end
+
+  local players = 0
+  for slot = 0, 3 do
+    if engine.G.playeringame[slot] then players += 1 end
+  end
+
+  if players <= 1 then return nil end
+
+  return math.max(1, damage * 2 // (players + 1))
+end
+
+return modApi.define {
+  id = 'org.dreamweave.doom.coop-director',
+  version = '1.0.0',
+  api = 1,
+  title = 'Co-op director',
+  description = 'Paces waves of returning monsters to the size and health of a cooperative party.',
+  capabilities = { 'rules', 'hud' },
+  payload = jess.payload(),
+  register = function(registry: modApi.Registry)
+    local engine = registry.engine
+    registry.hook('tic', function()
+      direct(registry)
+    end)
+
+    registry.hook('damage', function(damage: number, target: any, _inflictor: any, source: any): number?
+      return toughen(engine, damage, target, source)
+    end)
+
+    -- A row of marks along the top right, one per wave sent this level.
+    registry.hud(function(frame: any, game: any, _slot: number)
+      local memory = game.modstate and game.modstate['org.dreamweave.doom.coop-director']
+      local waves = memory and memory.waves or 0
+      for wave = 1, waves do
+        for row = 2, 4 do
+          buffer.fill(frame.pixels, row * frame.width + frame.width - 6 * wave, 176, 4)
+        end
+      end
+    end)
+  end,
+}

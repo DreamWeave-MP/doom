@@ -1,0 +1,5 @@
+--!strict
+-- Adds the director to the application's composed `doom.mods`, after the mods composed before it.
+local modApi = require('@doom/mod')
+
+return modApi.provide(require('./director'))

@@ -1,0 +1,5 @@
+--!strict
+-- The mod pack's entry: the game's own command line, through @doom/launch.
+local launch = require('@doom/launch')
+
+launch.apply(launch.parse({ ... }))

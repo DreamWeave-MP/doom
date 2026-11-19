@@ -1,0 +1,29 @@
+manifest_version = 1
+
+# A modded game: DOOM for Jess with the arsenal and the co-op director. Neither mod depends on the
+# other, so they compose in package id order (the arsenal, then the director), after the rulesets.
+[package]
+id = "org.dreamweave.doom.modpack"
+version = "1.0.0"
+jess_api = "1"
+include = ["src"]
+default_target = "doom"
+
+[dependencies]
+"org.dreamweave.doom" = "^0.1"
+"org.dreamweave.doom.arsenal" = "^1"
+"org.dreamweave.doom.coop-director" = "^1"
+
+[targets.doom]
+kind = "application"
+entry = "src/entry.jsl"
+capabilities = [
+  "gpu.device",
+  "gpu.window",
+  "input.actions",
+  "input.configure",
+  "audio.output",
+  "network.transport",
+  "filesystem.read",
+  "filesystem.write",
+]

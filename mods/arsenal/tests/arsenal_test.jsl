@@ -1,0 +1,80 @@
+--!nonstrict
+-- The arsenal on a synthetic room: stalkers where demons stood, and nine pellets a shot.
+local arsenal = require('@arsenal')
+local play = require('@doom/play')
+local setup = require('@doom/setup')
+local testing = require('@doom/testing')
+local test = require('@jess/test')
+
+local expect = test.expect
+local suite = test.new()
+local TestName = 'arsenal.wad'
+
+local function count(game: any, name: string): number
+  local total = 0
+  local thinker = game.thinkercap.next
+  while thinker ~= game.thinkercap do
+    if thinker.think == 'mobj' and thinker.info.name == name then total += 1 end
+    thinker = thinker.next
+  end
+
+  return total
+end
+
+local function start(mods: { any }, quiet: boolean?): any
+  local path = testing.roomWad(TestName, {
+    things = { { 256, 64, 90, 1 }, { 256, 128, 0, 2001 }, { 64, 448, 0, 3002 }, { 448, 448, 0, 30100 } },
+  })
+  return setup.start(path, { mode = 'single', mods = mods, players = { true }, nomonsters = quiet })
+end
+
+-- Walks onto the shotgun, waits for it to come up, fires once, and counts the puffs it made.
+local function pelletsOfOneShot(game: any): number
+  for _ = 1, 40 do
+    play.tick { [0] = play.command { forward = 25 } }
+  end
+
+  for _ = 1, 30 do
+    play.tick {}
+  end
+
+  expect(game.players[0].readyweapon).toBe(2)
+  local most = 0
+  for tic = 1, 12 do
+    play.tick { [0] = play.command { attack = tic == 1 } }
+    most = math.max(most, count(game, 'MT_PUFF'))
+  end
+
+  return most
+end
+
+suite.afterEach(function() testing.remove(TestName) end)
+
+suite.describe('the arsenal', function()
+  suite.it('puts stalkers where demons stood, and where a map asks for one', function()
+    local game = start { arsenal }
+    expect(count(game, 'MT_SERGEANT')).toBe(0)
+    expect(count(game, 'MT_STALKER')).toBe(2)
+    local engine = play.engine
+    local info = engine.mobjinfo[engine.MT.MT_STALKER]
+    expect(info.spawnhealth).toBe(200)
+    expect(info.speed).toBe(14)
+
+    game = start {}
+    expect(count(game, 'MT_SERGEANT')).toBe(1)
+    expect(engine.MT.MT_STALKER).toBe(nil)
+  end)
+
+  suite.it('fires nine pellets where the shotgun fired seven', function()
+    expect(pelletsOfOneShot(start({}, true))).toBe(7)
+    expect(pelletsOfOneShot(start({ arsenal }, true))).toBe(9)
+  end)
+
+  suite.it('declares only what it uses and names itself by its package content', function()
+    expect(arsenal.capabilities).toEqual { 'weapons', 'actors', 'spawns' }
+    expect(arsenal.simulation).toBe(true)
+    expect(string.match(arsenal.digest, '^%x+$') ~= nil and #arsenal.digest == 64).toBe(true)
+  end)
+end)
+
+return suite

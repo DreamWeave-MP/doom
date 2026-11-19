@@ -1,0 +1,44 @@
+--!strict
+-- @arsenal: a weapon and a monster for DOOM for Jess.
+--
+-- The shotgun fires nine pellets instead of seven, the first three dead straight, so it reaches
+-- further for the same shell. Every demon (the pinky) a map places is a stalker instead: a demon
+-- that runs faster and takes more to put down, with its own editor number (30100) for maps that
+-- want one on purpose. Both are simulation changes, so a netgame's peers must all load them,
+-- which their content manifests prove.
+local modApi = require('@doom/mod')
+
+local Pellets, Straight = 9, 3
+
+return modApi.define {
+  id = 'org.dreamweave.doom.arsenal',
+  version = '1.0.0',
+  api = 1,
+  title = 'Arsenal',
+  description = 'A nine-pellet shotgun, and stalkers in place of demons.',
+  capabilities = { 'weapons', 'actors', 'spawns' },
+  payload = jess.payload(),
+  register = function(registry: modApi.Registry)
+    local engine = registry.engine
+
+    registry.action('A_FireShotgun', function(player: any, _psp: any)
+      engine.StartSound(player.mo, 'shotgn')
+      engine.SetMobjState(player.mo, engine.S.S_PLAY_ATK2)
+      engine.UseAmmo(player, 1)
+      engine.SetPsprite(player, 1, engine.weaponinfo[player.readyweapon].flashstate)
+      engine.BulletSlope(player.mo)
+      for pellet = 1, Pellets do
+        engine.GunShot(player.mo, pellet <= Straight)
+      end
+    end)
+
+    registry.actor {
+      name = 'MT_STALKER',
+      base = 'MT_SERGEANT',
+      doomednum = 30100,
+      info = { speed = 14, spawnhealth = 200, painchance = 120 },
+    }
+
+    registry.replace('MT_SERGEANT', 'MT_STALKER')
+  end,
+}

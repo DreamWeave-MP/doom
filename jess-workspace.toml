@@ -4,7 +4,7 @@
 manifest_version = 1
 
 [workspace]
-members = ["lua"]
+members = ["lua", "mods/arsenal", "mods/coop-director", "mods/modpack"]
 
 [dev-dependencies]
 "org.dreamweave.mod-template" = "0.4"
