@@ -89,6 +89,19 @@ for _, name in { 'doom.wad', 'doom2.wad', 'plutonia.wad', 'tnt.wad' } do
 end
 
 suite.describe('campaigns', function()
+  suite.it('plays E1M1 to its exit: walking, opening its doors, and throwing the exit switch', function()
+    local wad = iwad('doom.wad')
+    if not wad then return end
+
+    local autoplay = require('../src/autoplay')
+    local game = play.new(wad, { mapName = 'E1M1', skill = 2, nomonsters = true, intermissionTics = 2 })
+    local tics, left = autoplay.playLevel(game, 0, 35 * 120)
+    expect(left).toBe(true)
+    expect(game.gamestate).toBe('intermission')
+    expect(game.lastlevel.map).toBe('E1M1')
+    expect(tics < 35 * 60).toBe(true)
+  end)
+
   suite.it('takes each DOOM episode from its first map to its finale', function()
     local wad = iwad('doom.wad')
     if not wad then return end

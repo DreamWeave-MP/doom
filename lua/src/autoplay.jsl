@@ -1,0 +1,384 @@
+--!nonstrict
+-- A player that walks a level to its exit through the simulation itself. It plans on a grid,
+-- asking the simulation's own collision (P_CheckPosition, with a player-sized probe that picks
+-- nothing up) where a player fits, how high a step it can climb (24 units), and treating a closed
+-- door it can open as a way through; then it steers with turn and forward commands, presses use
+-- on doors and on the exit switch, and backs off and plans again when it is stuck. It sees the
+-- level as the simulation holds it, so a door that opened changes its plan. It plays without
+-- fighting: tests run it with no monsters, to prove a level can be walked, not to play it well.
+local play = require('@doom/play')
+
+local module = {}
+
+local FracUnit = 65536
+local Cell = 16
+local StepUp = 24
+local MaxExpanded = 120000
+
+-- Line specials a player opens by using the line, and lines that end the level when used or
+-- crossed.
+local DoorLines: { [number]: boolean } = {}
+for _, special in { 1, 26, 27, 28, 31, 32, 33, 34, 117, 118 } do
+  DoorLines[special] = true
+end
+
+local ExitSwitches = { [11] = true, [51] = true }
+local ExitWalks = { [52] = true, [124] = true }
+
+local function units(value: number): number
+  return value / FracUnit
+end
+
+-- A sector that is a door shut now, which a player can open by using it.
+local function closedDoor(sector: any, height: number): boolean
+  if sector.ceilingheight - sector.floorheight >= height then return false end
+
+  for _, line in sector.lines do
+    if DoorLines[line.special] then return true end
+  end
+
+  return false
+end
+
+export type Cell = { x: number, y: number, door: boolean }
+
+export type Goal = { x: number, y: number, line: any, use: boolean }
+
+-- Where a walk can end: in front of each exit switch, facing it; or past each exit line.
+local function goals(game: any): { Goal }
+  local list = {}
+  for _, line in game.lines do
+    local switch, walk = ExitSwitches[line.special], ExitWalks[line.special]
+    if not (switch or walk) then continue end
+
+    local mx, my = units(line.v1.x + line.v2.x) / 2, units(line.v1.y + line.v2.y) / 2
+    local dx, dy = units(line.dx), units(line.dy)
+    local length = math.max(1, math.sqrt(dx * dx + dy * dy))
+    -- The front of a line is on its right.
+    local nx, ny = dy / length, -dx / length
+    local away = if switch then 28 else -40
+    table.insert(list, { x = mx + nx * away, y = my + ny * away, line = line, use = switch == true })
+  end
+
+  return list
+end
+
+-- Plans from `mo` to the nearest exit: the cells to walk through, ending at the goal. Nil when no
+-- exit can be reached.
+function module.route(game: any, mo: any): ({ Cell }?, Goal?)
+  local engine = play.engine
+  local targets = goals(game)
+  if #targets == 0 then return nil, nil end
+
+  local probe = {
+    flags = engine.MF_SOLID,
+    radius = mo.radius,
+    height = mo.height,
+    player = mo.player,
+    x = mo.x,
+    y = mo.y,
+    z = mo.z,
+  }
+  local height = units(mo.height)
+
+  -- The player's own body would stand in the probe's way; it doesn't, while planning.
+  local flags = mo.flags
+  mo.flags = bit32.band(flags, bit32.bnot(engine.MF_SOLID))
+
+  local function key(cx: number, cy: number): number
+    return (cx + 32768) * 65536 + (cy + 32768)
+  end
+
+  -- What standing at a cell means: its floor, whether a player fits, whether it is a door.
+  local cache: { [number]: any } = {}
+  local function standAt(cx: number, cy: number): any
+    local id = key(cx, cy)
+    local known = cache[id]
+    if known then return known end
+
+    local x, y = cx * Cell * FracUnit, cy * Cell * FracUnit
+    -- A door is often as deep as a cell and lies on cell boundaries, so a cell is a door when the
+    -- body standing there would overlap one: any of five points across its width is in one.
+    local door = false
+    local reach = units(mo.radius)
+    for _, offset in { { 0, 0 }, { reach, 0 }, { -reach, 0 }, { 0, reach }, { 0, -reach } } do
+      local sector = engine.PointInSubsector(x + offset[1] * FracUnit, y + offset[2] * FracUnit).sector
+      if closedDoor(sector, mo.height) then door = true end
+    end
+
+    local sector = engine.PointInSubsector(x, y).sector
+    local result
+    if door then
+      result = { fits = true, door = true, floor = units(sector.floorheight) }
+    else
+      local fits = engine.CheckPosition(probe, x, y)
+      local floor, ceiling = units(engine.tmfloorz), units(engine.tmceilingz)
+      result = { fits = fits and ceiling - floor >= height, door = false, floor = floor }
+    end
+
+    cache[id] = result
+    return result
+  end
+
+  -- Whether a player walks from one cell to the next: the way checked in steps of a quarter cell,
+  -- each fitting and rising no more than a player climbs, as P_TryMove checks each small move (a
+  -- staircase whose treads are narrower than a cell is climbed tread by tread).
+  local function walkable(cx: number, cy: number, nx: number, ny: number, here: any, there: any): boolean
+    -- Through a door the walker opens it first; the way is checked as it will be once open.
+    if there.door or here.door then return true end
+
+    local floor = here.floor
+    for part = 1, 4 do
+      local x = (cx + (nx - cx) * part / 4) * Cell * FracUnit
+      local y = (cy + (ny - cy) * part / 4) * Cell * FracUnit
+      if not engine.CheckPosition(probe, x, y) then return false end
+
+      local next, ceiling = units(engine.tmfloorz), units(engine.tmceilingz)
+      if next - floor > StepUp or ceiling - next < height then return false end
+
+      floor = next
+    end
+
+    return true
+  end
+
+  local function nearestGoal(x: number, y: number): (number, Goal)
+    local best, chosen = math.huge, targets[1]
+    for _, goal in targets do
+      local distance = math.sqrt((goal.x - x) ^ 2 + (goal.y - y) ^ 2)
+      if distance < best then best, chosen = distance, goal end
+    end
+
+    return best, chosen
+  end
+
+  local sx, sy = math.round(units(mo.x) / Cell), math.round(units(mo.y) / Cell)
+  local startId = key(sx, sy)
+  local cost: { [number]: number } = { [startId] = 0 }
+  local cameFrom: { [number]: number } = {}
+  local where: { [number]: { number } } = { [startId] = { sx, sy } }
+  -- A binary heap of { priority, id }.
+  local heap = { { 0, startId } }
+  local function push(priority: number, id: number)
+    table.insert(heap, { priority, id })
+    local at = #heap
+    while at > 1 do
+      local parent = at // 2
+      if heap[parent][1] <= heap[at][1] then break end
+      heap[parent], heap[at] = heap[at], heap[parent]
+      at = parent
+    end
+  end
+
+  local function pop(): any
+    local top = heap[1]
+    local last = table.remove(heap)
+    if #heap > 0 then
+      heap[1] = last
+      local at = 1
+      while true do
+        local left, right, smallest = at * 2, at * 2 + 1, at
+        if heap[left] and heap[left][1] < heap[smallest][1] then smallest = left end
+        if heap[right] and heap[right][1] < heap[smallest][1] then smallest = right end
+        if smallest == at then break end
+        heap[smallest], heap[at] = heap[at], heap[smallest]
+        at = smallest
+      end
+    end
+
+    return top
+  end
+
+  local reached: number? = nil
+  local reachedGoal: Goal? = nil
+  local expanded = 0
+  local startFloor = units(mo.subsector.sector.floorheight)
+  cache[startId] = { fits = true, door = false, floor = startFloor }
+  while #heap > 0 and expanded < MaxExpanded do
+    local entry = pop()
+    local id = entry[2]
+    local cx, cy = where[id][1], where[id][2]
+    local here = standAt(cx, cy)
+    expanded += 1
+
+    local distance, goal = nearestGoal(cx * Cell, cy * Cell)
+    if distance <= Cell and not here.door then
+      reached, reachedGoal = id, goal
+      break
+    end
+
+    for dx = -1, 1 do
+      for dy = -1, 1 do
+        if dx == 0 and dy == 0 then continue end
+
+        local nx, ny = cx + dx, cy + dy
+        local there = standAt(nx, ny)
+        if not there.fits then continue end
+        if not walkable(cx, cy, nx, ny, here, there) then continue end
+        -- A diagonal squeezes past a corner only if both sides of it are open.
+        if dx ~= 0 and dy ~= 0 and not (standAt(cx + dx, cy).fits and standAt(cx, cy + dy).fits) then continue end
+
+        local step = (if dx ~= 0 and dy ~= 0 then 1.414 else 1) * Cell + (if there.door then 48 else 0)
+        local nid = key(nx, ny)
+        local total = cost[id] + step
+        if total < (cost[nid] or math.huge) then
+          cost[nid], cameFrom[nid], where[nid] = total, id, { nx, ny }
+          -- The distance left counts double: a walker wants a way, not the shortest one, and a
+          -- long level searched evenly is most of the level.
+          push(total + 2 * nearestGoal(nx * Cell, ny * Cell), nid)
+        end
+      end
+    end
+  end
+
+  mo.flags = flags
+  if not reached then return nil, nil end
+
+  local cells: { Cell } = {}
+  local id: number? = reached
+  while id do
+    local spot = where[id]
+    table.insert(cells, 1, { x = spot[1] * Cell, y = spot[2] * Cell, door = standAt(spot[1], spot[2]).door })
+    id = cameFrom[id]
+  end
+
+  return cells, reachedGoal
+end
+
+export type Walker = {
+  slot: number,
+  cells: { Cell }?,
+  goal: Goal?,
+  next: number,
+  lastDistance: number,
+  stuck: number,
+  backing: number,
+  pressing: number,
+  plans: number,
+  tics: number,
+}
+
+function module.new(slot: number): Walker
+  return { slot = slot, cells = nil, goal = nil, next = 1, lastDistance = math.huge, stuck = 0, backing = 0, pressing = 0, plans = 0, tics = 0 }
+end
+
+-- How far left of where `mo` faces the point is, in degrees (-180 to 180).
+local function bearing(mo: any, x: number, y: number): number
+  local wanted = math.atan2(y - units(mo.y), x - units(mo.x))
+  local facing = mo.angle / 4294967296 * 2 * math.pi
+  return math.deg((wanted - facing + math.pi) % (2 * math.pi) - math.pi)
+end
+
+local function facePress(walker: Walker, mo: any, x: number, y: number): any
+  local degrees = bearing(mo, x, y)
+  if math.abs(degrees) > 8 then return play.command { turn = math.clamp(degrees, -10, 10) } end
+
+  return play.command { use = walker.tics % 2 == 0 }
+end
+
+-- The command for this tic.
+function module.command(walker: Walker, game: any): any
+  walker.tics += 1
+  local player = game.players[walker.slot]
+  local mo = player.mo
+  if game.gamestate ~= 'level' or not mo or player.playerstate ~= play.engine.PST_LIVE then
+    return play.command { use = walker.tics % 2 == 0 }
+  end
+
+  if walker.backing > 0 then
+    walker.backing -= 1
+    return play.command { forward = -25, side = if walker.plans % 2 == 0 then 30 else -30 }
+  end
+
+  if not walker.cells then
+    walker.cells, walker.goal = module.route(game, mo)
+    walker.next, walker.lastDistance, walker.stuck = 1, math.huge, 0
+    walker.plans += 1
+    if not walker.cells then return play.command { turn = 10, forward = 10 } end
+  end
+
+  local cells = walker.cells :: { Cell }
+  local px, py = units(mo.x), units(mo.y)
+
+  -- Skip the cells already behind: the nearest of the next few is where the walk is.
+  for ahead = walker.next, math.min(#cells, walker.next + 6) do
+    local cell = cells[ahead]
+    if math.sqrt((cell.x - px) ^ 2 + (cell.y - py) ^ 2) < Cell then walker.next = ahead + 1 end
+  end
+
+  -- The goal reached: face the exit switch and use it, or walk on over the exit line.
+  if walker.next > #cells then
+    local goal = walker.goal :: Goal
+    if goal.use then
+      local line = goal.line
+      return facePress(walker, mo, units(line.v1.x + line.v2.x) / 2, units(line.v1.y + line.v2.y) / 2)
+    end
+
+    walker.cells = nil
+    return play.command { forward = 50 }
+  end
+
+  -- A shut door ahead: walk up to it, face it and use it, then wait for it to open.
+  for ahead = walker.next, math.min(#cells, walker.next + 3) do
+    local cell = cells[ahead]
+    if not cell.door then continue end
+
+    local sector = play.engine.PointInSubsector(cell.x * FracUnit, cell.y * FracUnit).sector
+    if sector.ceilingheight - sector.floorheight >= mo.height then
+      cell.door = false
+      walker.pressing = 0
+      continue
+    end
+
+    if math.sqrt((cell.x - px) ^ 2 + (cell.y - py) ^ 2) < 56 then
+      -- Using a door that is moving sends it back the way it came, so a moving door is waited
+      -- for; one that won't move however long it is used (locked, or worked from elsewhere) is
+      -- given up on, and the walk planned again.
+      walker.stuck = 0
+      if sector.specialdata then return play.command {} end
+
+      walker.pressing += 1
+      if walker.pressing > 70 then
+        walker.pressing, walker.cells, walker.backing = 0, nil, 10
+        return play.command { forward = -25 }
+      end
+
+      return facePress(walker, mo, cell.x, cell.y)
+    end
+  end
+
+  -- Steer for a cell a little ahead, so the walk is smooth rather than cell to cell.
+  local target = cells[math.min(#cells, walker.next + 2)]
+  local distance = math.sqrt((target.x - px) ^ 2 + (target.y - py) ^ 2)
+  if distance < walker.lastDistance - 0.5 then
+    walker.lastDistance, walker.stuck = distance, 0
+  else
+    walker.stuck += 1
+  end
+
+  if walker.stuck > 50 then
+    walker.cells, walker.backing = nil, 10
+    return play.command { forward = -25 }
+  end
+
+  if math.abs(walker.next - (walker.cells and walker.next or 0)) == 0 then walker.lastDistance = math.min(walker.lastDistance, distance) end
+
+  local degrees = bearing(mo, target.x, target.y)
+  local forward = if math.abs(degrees) < 30 then 50 elseif math.abs(degrees) < 70 then 20 else 0
+  return play.command { forward = forward, turn = math.clamp(degrees, -15, 15) }
+end
+
+-- Walks player `slot` until the level ends or `limit` tics pass. Returns the tics it took and
+-- whether the level was left.
+function module.playLevel(game: any, slot: number, limit: number): (number, boolean)
+  local walker = module.new(slot)
+  local map = game.mapname
+  for tic = 1, limit do
+    play.tick { [slot] = module.command(walker, game) }
+    if game.gamestate ~= 'level' or game.mapname ~= map then return tic, true end
+  end
+
+  return limit, false
+end
+
+return module

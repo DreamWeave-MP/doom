@@ -1,0 +1,19 @@
+--!nonstrict
+-- Walks levels to their exits by playing them: a player routed over each level's sectors, using
+-- doors and the exit switch, with no monsters. Prints how each level went.
+--
+--   jess run --package lua --capability filesystem.read lua/bin/doom-autoplay.jsl doom.wad E1M1 [E1M2 ...]
+local play = require('@doom/play')
+local autoplay = require('../src/autoplay')
+local wadModule = require('@doom/wad')
+
+local arguments = { ... }
+local wad = wadModule.open(arguments[1] or 'doom.wad')
+for index = 2, math.max(#arguments, 2) do
+  local map = arguments[index] or 'E1M1'
+  local game = play.new(wad, { mapName = map, skill = 2, nomonsters = true, intermissionTics = 2 })
+  local tics, left = autoplay.playLevel(game, 0, 35 * 60 * 5)
+  local mo = game.players[0].mo
+  print(string.format('%-6s %s in %d tics (%.1f s)%s', map, if left then 'left' else 'STUCK', tics, tics / 35,
+    if left then '' else string.format(' at %d,%d', mo.x // 65536, mo.y // 65536)))
+end
