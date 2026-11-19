@@ -18,6 +18,7 @@ export type Options = {
   players: number,
   mode: string,
   teamDamage: boolean,
+  keepInventory: boolean,
   fragLimit: number,
   timeLimit: number,
   scale: number,
@@ -48,6 +49,7 @@ local current: Options = {
   players = module.Defaults.players,
   mode = module.Defaults.mode,
   teamDamage = module.Defaults.teamDamage,
+  keepInventory = false,
   fragLimit = module.Defaults.fragLimit,
   timeLimit = module.Defaults.timeLimit,
   scale = module.Defaults.scale,
@@ -128,6 +130,8 @@ function module.parse(arguments: { string }): Options
       index += 1
     elseif switch == '-teamdamage' then
       parsed.teamDamage = true
+    elseif switch == '-keepinventory' then
+      parsed.keepInventory = true
     elseif switch == '-fraglimit' then
       parsed.fragLimit = number(arguments, index, '-fraglimit')
       index += 1

@@ -170,6 +170,7 @@ local ModeNames = { cooperative = 'coop', deathmatch = 'ffa', teamDeathmatch = '
 local function startHost(state: App, mode: string, players: number, skill: number, map: string?): ()
   local settings = rules.defaults(ModeNames[mode] or 'coop')
   settings.teamDamage = options.current.teamDamage
+  settings.keepInventory = options.current.keepInventory
   if options.current.fragLimit > 0 then settings.fragLimit = options.current.fragLimit end
   settings.timeLimit = options.current.timeLimit
 
@@ -328,12 +329,16 @@ local function afterTic(state: App): ()
   end
 
   local listeners = state.presentation and state.presentation.listeners or {}
+  local cues = state.presentation and state.presentation.sounds or {}
   for _, announcement in play.drainAnnouncements() do
     -- Announcements go out as named events for any package to hear; they can't reach the game.
     events.emit(`doom.{announcement.event}`, announcement)
     for _, listener in listeners[announcement.event] or {} do
       listener(announcement)
     end
+
+    local cue = cues[announcement.event]
+    if cue and mixer then sound.update(mixer, game, viewer, { { name = cue } }) end
   end
 
   if game.finaleDone and state.kind ~= 'client' then toTitle(state, 'the end') end
