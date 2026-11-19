@@ -23,9 +23,9 @@ tests = ["tests/wad_test.jsl", "tests/net_test.jsl", "tests/play_test.jsl", "tes
 "@doom/save" = "src/save.jsl"
 "@doom/net" = "src/net.jsl"
 "@doom/netgame" = "src/netgame.jsl"
-"@doom/rthings" = "src/rthings.jsl"
 "@doom/play" = "src/play/api.jsl"
 "@doom/agent" = "src/agent.jsl"
+"@doom/view" = "src/view/init.jsl"
 "@doom/spectator" = "src/spectator.jsl"
 "@doom/mod" = "src/mod/init.jsl"
 "@doom/rules" = "src/rules/init.jsl"
@@ -53,9 +53,9 @@ exports = [
   "@doom/save",
   "@doom/net",
   "@doom/netgame",
-  "@doom/rthings",
   "@doom/play",
   "@doom/agent",
+  "@doom/view",
   "@doom/spectator",
   "@doom/mod",
   "@doom/rules",
