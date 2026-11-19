@@ -5,15 +5,13 @@ local application = require('@jess/application')
 local fs = require('@dream/fs')
 local play = require('@doom/play')
 local wadModule = require('@doom/wad')
-local mapModule = require('@doom/map')
-local render = require('@doom/render')
+local viewModule = require('@doom/view')
 
 local clockModule = require('./clock')
 local controlsModule = require('./controls')
 local display = require('./display')
 local options = require('./options')
 
-local FracUnit = 65536
 
 type App = {
   display: display.Display,
@@ -21,8 +19,8 @@ type App = {
   clock: clockModule.Clock,
   wad: any,
   game: any,
-  map: any,
-  mapName: string?,
+  renderer: any,
+  palette: buffer,
   frame: buffer,
   paused: boolean,
   dirty: boolean,
@@ -52,28 +50,13 @@ local function firstMap(wad: any): string
   return if wad:find('MAP01') then 'MAP01' else 'E1M1'
 end
 
--- The temporary first-person view: where the console player stands, drawn with every other mobj.
+-- The console player's view of the whole screen, with the weapon in their hands.
 local function drawView(state: App): ()
   local game = state.game
-  local player = game.players[0]
-  local own = player.mo
-  if not own then return end
+  if not game.players[0].mo then return end
 
-  if state.mapName ~= game.mapname then
-    state.map, state.mapName = mapModule.load(game.wad, game.mapname), game.mapname
-  end
-
-  local things = {}
-  local cap = game.thinkercap
-  local thinker = cap.next
-  while thinker ~= cap do
-    if thinker.think == 'mobj' and thinker ~= own then table.insert(things, thinker) end
-    thinker = thinker.next
-  end
-
-  local frame, palette = render.view(state.map, game.wad, own.x / FracUnit, own.y / FracUnit, own.angle * 360 / 4294967296, things)
-  buffer.copy(state.frame, 0, frame.pixels, 0, 320 * 200)
-  display.present(state.display, state.frame, palette.rgb)
+  viewModule.render(state.renderer, game, 0, { pixels = state.frame, width = 320, height = 200 }, { size = 11 })
+  display.present(state.display, state.frame, state.palette)
 end
 
 local function startup(): ()
@@ -89,8 +72,8 @@ local function startup(): ()
     clock = clockModule.new(),
     wad = wad,
     game = game,
-    map = nil,
-    mapName = nil,
+    renderer = viewModule.new(wad),
+    palette = wad:read('PLAYPAL'),
     frame = buffer.create(320 * 200),
     paused = false,
     dirty = true,
