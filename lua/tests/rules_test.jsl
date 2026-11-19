@@ -319,6 +319,55 @@ suite.describe('team deathmatch', function()
   end)
 end)
 
+suite.describe('use', function()
+  -- A switch on the north wall (line 1) that exits the level.
+  local function switchRoom(x: number, y: number, angle: number): any
+    local path = rooms.roomWad(TestName, { things = { { x, y, angle, 1 } }, lineSpecials = { [1] = 11 } })
+    local game = setup.start(path, { mode = 'single', players = present(1), intermissionTics = 3 })
+
+    -- A player comes into the game with use held, as in vanilla; they let go first.
+    tic {}
+    tic {}
+    return game
+  end
+
+  local function press(tics: number?): ()
+    for _ = 1, tics or 1 do
+      tic { [0] = { use = true } }
+    end
+  end
+
+  suite.it('throws a switch the player faces within reach', function()
+    local game = switchRoom(256, 470, 90)
+    press()
+    tic {}
+    expect(game.gamestate).toBe('intermission')
+  end)
+
+  suite.it('does nothing facing away, out of reach, or while the button is still held from before', function()
+    local game = switchRoom(256, 470, 270)
+    press(5)
+    expect(game.gamestate).toBe('level')
+
+    game = switchRoom(256, 400, 90)
+    press(5)
+    expect(game.gamestate).toBe('level')
+
+    -- A player who walks up holding use must let go and press again, as P_PlayerThink requires.
+    game = switchRoom(256, 380, 90)
+    for _ = 1, 40 do
+      tic { [0] = { use = true, forward = 25 } }
+    end
+
+    expect(game.players[0].mo.y > 440 * FracUnit).toBe(true)
+    expect(game.gamestate).toBe('level')
+    tic {}
+    press()
+    tic {}
+    expect(game.gamestate).toBe('intermission')
+  end)
+end)
+
 suite.describe('players joining and leaving', function()
   suite.it('brings a joining player in at their start on the next tic, and takes a leaving one out', function()
     local game = start('coop', 2)
