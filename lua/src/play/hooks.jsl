@@ -77,7 +77,44 @@ function P.ClearHooks(): ()
 end
 
 -- Calls every handler of `name` for what it does.
+-- What the host may tell the screen and the speakers about, as plain values, after the tic. The
+-- queue is outside G, like the sound queue: saving, loading and hashing never see it.
+P.announcements = {}
+
+local function slotOf(mobj: any): number?
+  return mobj and mobj.player and mobj.player.index
+end
+
+local Announced = {
+  kill = function(source: any, target: any): any
+    return { killer = slotOf(source), victim = slotOf(target), thing = target.info and target.info.name }
+  end,
+  key = function(player: any, card: number): any
+    return { slot = player.index, card = card }
+  end,
+  levelStart = function(): any
+    return { map = G.mapname }
+  end,
+  levelExit = function(secret: boolean): any
+    return { map = G.mapname, secret = secret }
+  end,
+}
+
+local function announce(name: string, ...: any): ()
+  local describe = Announced[name]
+  if not describe then return end
+
+  local queue = P.announcements
+  if #queue >= 1024 then table.clear(queue) end
+
+  local payload = describe(...)
+  payload.event = name
+  payload.tic = G.gametic
+  table.insert(queue, payload)
+end
+
 function P.Notify(name: string, ...: any): ()
+  announce(name, ...)
   local list = P.hooks[name]
   if not list then return end
 

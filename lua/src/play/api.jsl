@@ -74,6 +74,15 @@ function module.drainSounds(): { SoundEvent }
   return sounds
 end
 
+-- What happened since the last drain that a screen, a speaker or a cosmetic mod may react to:
+-- kills (killer and victim slots, the thing killed), keys, level starts and exits, each with
+-- the tic. Like the sound queue it is not part of the game.
+function module.drainAnnouncements(): { any }
+  local announcements = P.announcements
+  P.announcements = {}
+  return announcements
+end
+
 export type Action = {
   forward: number?,
   side: number?,
