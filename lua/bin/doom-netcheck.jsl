@@ -1,0 +1,279 @@
+--!strict
+-- The multiplayer acceptance run: real sessions between separate jess processes on loopback, one
+-- host and one to three clients each running doom-peer.jsl with a bot, for every mode and the
+-- ways a session goes wrong. Every scenario checks the peers' reports: the same tic and the same
+-- state hash wherever the game should agree, the joins, leaves, timeouts, resyncs and rejections
+-- it set up, and no hash mismatch it didn't cause.
+--
+--   jess run --trusted lua/bin/doom-netcheck.jsl [IWAD] [scenario...]
+--
+-- Run it from the folder holding the IWAD (doom2.wad by default). It takes a few minutes.
+local fs = require('@dream/fs')
+local json = require('@jess/json')
+local process = require('@dream/process')
+
+local arguments = { ... }
+local iwad = arguments[1] or 'doom2.wad'
+local only: { [string]: boolean } = {}
+for index = 2, #arguments do
+  only[arguments[index]] = true
+end
+
+local here, problem = fs.cwd()
+local Folder = fs.join(fs.join(assert(here, problem), 'target'), 'doom-netcheck')
+local made, failure = fs.mkdir(Folder, { recursive = true })
+assert(made, failure)
+
+local Peer = 'lua/bin/doom-peer.jsl'
+local Grants = {
+  '--package',
+  'lua',
+  '--capability',
+  'network.transport',
+  '--capability',
+  'filesystem.read',
+  '--capability',
+  'filesystem.write',
+}
+
+type Spec = { name: string, args: { string }, delay: number? }
+type Running = { spec: Spec, child: dream_process_Child, log: { string }, report: string }
+
+local port = 42000
+
+local function start(scenario: string, spec: Spec): Running
+  local report = fs.join(Folder, `{scenario}-{spec.name}.json`)
+  fs.remove(report)
+  local args = { 'run' }
+  for _, grant in Grants do
+    table.insert(args, grant)
+  end
+
+  table.insert(args, Peer)
+  for _, value in spec.args do
+    table.insert(args, value)
+  end
+
+  for _, value in { '-iwad', iwad, '-name', spec.name, '-report', report } do
+    table.insert(args, value)
+  end
+
+  local child, message = process.start('jess', args, { stdout = 'pipe', stderr = 'pipe', timeoutMs = 180000 })
+  return { spec = spec, child = assert(child, message), log = {}, report = report }
+end
+
+local function drain(running: Running): ()
+  for _, read in { 'readStdout', 'readStderr' } do
+    while true do
+      local chunk = (running.child :: any)[read](running.child, 65536)
+      if not chunk then break end
+
+      table.insert(running.log, chunk)
+    end
+  end
+end
+
+-- Runs one scenario's peers to their end and returns each one's report by name.
+local function run(scenario: string, specs: { Spec }): ({ [string]: any }, { [string]: string })
+  local started = os.clock()
+  local pending = table.clone(specs)
+  local running: { Running } = {}
+  while #pending > 0 or #running > 0 do
+    for index = #pending, 1, -1 do
+      local spec = pending[index]
+      if os.clock() - started >= (spec.delay or 0) then
+        table.insert(running, start(scenario, spec))
+        table.remove(pending, index)
+      end
+    end
+
+    for index = #running, 1, -1 do
+      local peer = running[index]
+      drain(peer)
+      local status = peer.child:wait(0)
+      if status then
+        drain(peer)
+        peer.child:close()
+        table.remove(running, index)
+        local text = table.concat(peer.log)
+        fs.writeFile(fs.join(Folder, `{scenario}-{peer.spec.name}.log`), text)
+      end
+    end
+
+    process.sleep(0.05)
+  end
+
+  local reports: { [string]: any } = {}
+  local logs: { [string]: string } = {}
+  for _, spec in specs do
+    local data = fs.readFile(fs.join(Folder, `{scenario}-{spec.name}.json`))
+    reports[spec.name] = if data then json.decode(buffer.tostring(data)) else nil
+    local log = fs.readFile(fs.join(Folder, `{scenario}-{spec.name}.log`))
+    logs[spec.name] = if log then buffer.tostring(log) else ''
+  end
+
+  return reports, logs
+end
+
+local failures = 0
+local results: { string } = {}
+
+local function check(scenario: string, condition: boolean, what: string): ()
+  if condition then return end
+
+  failures += 1
+  table.insert(results, `  FAIL {scenario}: {what}`)
+end
+
+-- A host and `count - 1` clients; `client(index)` adds options for client `index` (2 to 4).
+local function session(mode: string, count: number, tics: number, hostExtra: { string }?, client: ((number) -> ({ string }, number?))?): { Spec }
+  port += 1
+  local tokens = fs.join(Folder, `tokens-{port}`)
+  local made, problem = fs.mkdir(tokens, { recursive = true })
+  assert(made, problem)
+  local hostArgs = { 'host', `127.0.0.1:{port}`, '-players', tostring(count), '-tokens', tokens, '-mode', mode, '-tics', tostring(tics), '-timeout', '4' }
+  for _, value in hostExtra or {} do
+    table.insert(hostArgs, value)
+  end
+
+  local specs: { Spec } = { { name = 'host', args = hostArgs } }
+  for index = 2, count do
+    local extra, delay = {}, nil
+    if client then extra, delay = client(index) end
+
+    local args = { 'join', fs.join(tokens, `slot{index}.token`), '-tics', tostring(tics), '-timeout', '6', '-team', tostring(if index <= 2 then 1 else 2) }
+    for _, value in extra do
+      table.insert(args, value)
+    end
+
+    table.insert(specs, { name = `player{index}`, args = args, delay = (delay or 0) + 2 })
+  end
+
+  return specs
+end
+
+-- Every report named in `names` reached `tic` with the host's hash.
+local function agree(scenario: string, reports: { [string]: any }, names: { string }, tic: number): ()
+  local host = reports.host
+  check(scenario, host ~= nil, 'the host wrote no report')
+  if not host then return end
+
+  check(scenario, host.tic == tic, `the host stopped at tic {host.tic}, not {tic}`)
+  for _, name in names do
+    local report = reports[name]
+    check(scenario, report ~= nil, `{name} wrote no report`)
+    if not report then continue end
+
+    check(scenario, report.tic == tic, `{name} stopped at tic {report.tic}, not {tic}`)
+    check(scenario, report.hash == host.hash, `{name} ended on hash {report.hash}, the host on {host.hash}`)
+    check(scenario, (report.matched or 0) > 0, `{name} matched no state hashes`)
+  end
+end
+
+local Scenarios: { { string } } = {}
+local function scenario(name: string, body: () -> ()): ()
+  if next(only) and not only[name] then return end
+
+  local clock = os.clock()
+  local before = failures
+  body()
+  table.insert(results, `{if failures == before then 'pass' else 'FAIL'} {name} ({math.round(os.clock() - clock)} s)`)
+  table.insert(Scenarios, { name })
+end
+
+local Tics = 525
+
+scenario('coop-2', function()
+  local reports = run('coop-2', session('coop', 2, Tics))
+  agree('coop-2', reports, { 'player2' }, Tics)
+  check('coop-2', reports.host and reports.host.mismatches == 0, 'the host saw a hash mismatch')
+end)
+
+scenario('coop-4-bad-link', function()
+  local reports = run('coop-4-bad-link', session('coop', 4, Tics, { '-latency', '40', '-jitter', '30', '-loss', '0.3' }, function(): ({ string }, number?)
+    return { '-latency', '60', '-jitter', '40', '-loss', '0.3' }, nil
+  end))
+  agree('coop-4-bad-link', reports, { 'player2', 'player3', 'player4' }, Tics)
+  check('coop-4-bad-link', reports.host and reports.host.mismatches == 0, 'the host saw a hash mismatch')
+  check('coop-4-bad-link', reports.host and #reports.host.present == 4 and reports.host.present[4], 'not all four players were in')
+end)
+
+scenario('ffa-4', function()
+  local reports = run('ffa-4', session('ffa', 4, Tics))
+  agree('ffa-4', reports, { 'player2', 'player3', 'player4' }, Tics)
+  for _, name in { 'player2', 'player3', 'player4' } do
+    local report = reports[name]
+    check('ffa-4', report and json.encodeTable(report.frags) == json.encodeTable(reports.host.frags), `{name}'s frags differ from the host's`)
+  end
+end)
+
+scenario('tdm-2v2', function()
+  local reports = run('tdm-2v2', session('tdm', 4, Tics))
+  agree('tdm-2v2', reports, { 'player2', 'player3', 'player4' }, Tics)
+  local host = reports.host
+  check('tdm-2v2', host and host.teams ~= nil, 'the host reported no team scores')
+  for _, name in { 'player2', 'player3', 'player4' } do
+    local report = reports[name]
+    check('tdm-2v2', report and host and json.encodeTable(report.teams) == json.encodeTable(host.teams), `{name}'s team scores differ from the host's`)
+  end
+end)
+
+scenario('join-late', function()
+  local specs = session('coop', 3, Tics + 175, { '-wait', '2' }, function(index: number): ({ string }, number?)
+    return {}, if index == 3 then 8 else 0
+  end)
+  local reports, logs = run('join-late', specs)
+  agree('join-late', reports, { 'player2', 'player3' }, Tics + 175)
+  check('join-late', string.find(logs.player3 or '', 'joining a game in progress', 1, true) ~= nil, 'player3 did not join a game in progress')
+  check('join-late', string.find(logs.player3 or '', 'loaded the game at tic', 1, true) ~= nil, 'player3 got no snapshot')
+  check('join-late', reports.host and reports.host.present[3] == true, 'the host does not have player3 in the game')
+end)
+
+scenario('leave', function()
+  local reports, logs = run('leave', session('coop', 3, Tics, nil, function(index: number): ({ string }, number?)
+    return if index == 3 then { '-leave-at', '200' } else {}, nil
+  end))
+  agree('leave', reports, { 'player2' }, Tics)
+  check('leave', string.find(logs.host or '', 'player 3 (player3) left', 1, true) ~= nil, 'the host did not see player3 leave')
+  check('leave', reports.host and reports.host.present[3] == false, 'player3 is still in the host\'s game')
+  check('leave', reports.player2 and reports.player2.present[3] == false, 'player3 is still in player2\'s game')
+end)
+
+scenario('timeout', function()
+  local reports, logs = run('timeout', session('coop', 3, Tics, nil, function(index: number): ({ string }, number?)
+    return if index == 3 then { '-freeze-at', '150' } else {}, nil
+  end))
+  agree('timeout', reports, { 'player2' }, Tics)
+  check('timeout', string.find(logs.host or '', 'timed out', 1, true) ~= nil, 'the host did not time player3 out')
+  check('timeout', reports.host and reports.host.present[3] == false, 'player3 is still in the game')
+end)
+
+scenario('desync', function()
+  local reports, logs = run('desync', session('coop', 2, Tics, nil, function(): ({ string }, number?)
+    return { '-desync-at', '140' }, nil
+  end))
+  agree('desync', reports, { 'player2' }, Tics)
+  check('desync', string.find(logs.player2 or '', 'out of step at tic', 1, true) ~= nil, 'player2 never noticed it was out of step')
+  check('desync', reports.player2 and reports.player2.resyncs >= 1, 'player2 never asked for a resync')
+  check('desync', string.find(logs.host or '', 'asked to be resynchronized', 1, true) ~= nil, 'the host never resynchronized player2')
+end)
+
+scenario('content-mismatch', function()
+  local extra = fs.join(Folder, 'extra.wad')
+  local lump = 'not a real map'
+  local wrote, failure = fs.writeFile(extra, 'PWAD' .. string.pack('<i4i4', 1, 12 + #lump) .. lump .. string.pack('<i4i4', 12, #lump) .. 'EXTRA\0\0\0')
+  assert(wrote, failure)
+  local reports, logs = run('content-mismatch', session('coop', 2, 105, { '-wait', '1' }, function(): ({ string }, number?)
+    return { '-file', extra }, nil
+  end))
+  local client = reports.player2
+  check('content-mismatch', client ~= nil and string.find(tostring(client.reason), 'content mismatch', 1, true) ~= nil, `player2 was not refused for its content: {client and client.reason}`)
+  check('content-mismatch', string.find(logs.host or '', 'extra.wad', 1, true) ~= nil, 'the host did not name the extra file')
+end)
+
+for _, line in results do
+  print(line)
+end
+
+print(`{#Scenarios} scenarios, {failures} failed checks; logs and reports in {Folder}`)
+if failures > 0 then error('doom-netcheck failed', 0) end

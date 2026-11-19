@@ -1,0 +1,308 @@
+--!strict
+-- A headless netgame peer: the same host and client sessions the game runs, driven by a bot at
+-- 35 tics a second, for servers without a screen and for the multi-process session tests.
+--
+--   doom-peer.jsl host <address> -players N [-tokens FOLDER] [options]
+--   doom-peer.jsl join <token file> [options]
+--
+-- Options: -iwad PATH, -file PWAD..., -mode coop|ffa|tdm, -map NAME, -skill 1-5, -tics N (stop at
+-- game tic N), -name TEXT, -team 1|2, -wait N (host: begin once N players are in), -latency MS,
+-- -jitter MS, -loss FRACTION, -leave-at TIC, -freeze-at TIC, -desync-at TIC, -no-resync,
+-- -timeout SECONDS, -fraglimit N, -teamdamage, -report FILE. The last line printed is the report,
+-- as JSON after `REPORT `.
+local fs = require('@dream/fs')
+local json = require('@jess/json')
+local process = require('@dream/process')
+local net = require('@doom/net')
+local play = require('@doom/play')
+local rules = require('@doom/rules')
+local session = require('@doom/session')
+local wadModule = require('@doom/wad')
+
+local arguments = { ... }
+local role, target = arguments[1], arguments[2]
+if role ~= 'host' and role ~= 'join' or not target then
+  print('usage: doom-peer.jsl host <address> -players N [options] | join <token file> [options]')
+  return
+end
+
+local options: { [string]: any } = {
+  iwad = 'doom2.wad',
+  files = {},
+  mode = 'coop',
+  skill = 4,
+  tics = 700,
+  players = 2,
+  name = role,
+  team = 0,
+  latency = 0,
+  jitter = 0,
+  loss = 0,
+  timeout = 10,
+  fraglimit = 0,
+  resync = true,
+}
+
+local Numbers = {
+  ['-skill'] = 'skill',
+  ['-tics'] = 'tics',
+  ['-players'] = 'players',
+  ['-team'] = 'team',
+  ['-wait'] = 'wait',
+  ['-latency'] = 'latency',
+  ['-jitter'] = 'jitter',
+  ['-loss'] = 'loss',
+  ['-leave-at'] = 'leaveAt',
+  ['-freeze-at'] = 'freezeAt',
+  ['-desync-at'] = 'desyncAt',
+  ['-timeout'] = 'timeout',
+  ['-fraglimit'] = 'fraglimit',
+}
+local Texts = { ['-iwad'] = 'iwad', ['-mode'] = 'mode', ['-map'] = 'map', ['-name'] = 'name', ['-tokens'] = 'tokens', ['-report'] = 'report' }
+
+local index = 3
+while index <= #arguments do
+  local switch = arguments[index]
+  if Numbers[switch] then
+    options[Numbers[switch]] = assert(tonumber(arguments[index + 1]), `{switch} takes a number`)
+    index += 2
+  elseif Texts[switch] then
+    options[Texts[switch]] = assert(arguments[index + 1], `{switch} takes a value`)
+    index += 2
+  elseif switch == '-file' then
+    index += 1
+    while arguments[index] and string.sub(arguments[index], 1, 1) ~= '-' do
+      table.insert(options.files, arguments[index])
+      index += 1
+    end
+  elseif switch == '-teamdamage' then
+    options.teamDamage = true
+    index += 1
+  elseif switch == '-no-resync' then
+    options.resync = false
+    index += 1
+  else
+    error(`doom-peer: unknown switch {switch}`)
+  end
+end
+
+local function log(line: string): ()
+  print(`[{role} {options.name}] {line}`)
+end
+
+local paths = { options.iwad }
+for _, file in options.files do
+  table.insert(paths, file)
+end
+
+local wad = wadModule.open(options.iwad, options.files)
+local conditioner = if options.latency > 0 or options.jitter > 0 or options.loss > 0
+  then session.common.conditioner(options.latency, options.jitter, options.loss, #options.name + options.team)
+  else nil
+
+-- The bot: turns toward the nearest enemy it can see and fires when it faces one; otherwise walks
+-- and turns away from walls. It reads only what its own peer's simulation shows it.
+local function enemyOf(game: any, slot: number, thing: any): boolean
+  if thing.kind == 'monster' then return game.deathmatch == 0 end
+  if thing.kind ~= 'player' or game.deathmatch == 0 then return false end
+
+  local teams = game.rules and game.rules.teams
+  return not (teams and teams[slot] and teams[slot] == teams[thing.slot])
+end
+
+local function botCommand(slot: number): net.Command
+  local game = play.game
+  if game.gamestate ~= 'level' or not game.playeringame[slot] then return net.neutral() end
+
+  local player = game.players[slot]
+  if player.playerstate ~= play.engine.PST_LIVE then
+    return { forwardmove = 0, sidemove = 0, angleturn = 0, buttons = if game.gametic % 20 == 0 then 2 else 0 }
+  end
+
+  local view = play.observe(slot, 1024)
+  for _, thing in view.things or {} do
+    if enemyOf(game, slot, thing) then
+      local turn = math.clamp(math.round(thing.bearing * 65536 / 360), -2000, 2000)
+      local facing = math.abs(thing.bearing) < 6
+      return play.command { turn = turn * 360 / 65536, attack = facing, forward = if thing.distance > 256 then 25 else 0 }
+    end
+  end
+
+  local ahead = view.walls and view.walls[1]
+  if ahead and ahead.clear < 96 then return play.command { turn = 12, use = game.gametic % 10 == 0 } end
+
+  local weave = if (game.gametic // 70 + slot) % 2 == 0 then 1 else -1
+  return play.command { forward = 40, side = 10 * weave, turn = weave }
+end
+
+local function now(): number
+  return os.clock()
+end
+
+local report: { [string]: any } = { role = role, name = options.name }
+
+local function finish(): ()
+  local game = play.game
+  report.tic = game.gametic
+  report.hash = if game.gametic then play.hash() else nil
+  report.map = game.mapname
+  if game.players then
+    report.frags = [for slot in range(0, 3) if game.playeringame[slot] => rules.frags(game, slot)]
+    report.present = [for slot in range(0, 3) => game.playeringame[slot] == true]
+    if game.rules and game.rules.mode == 'tdm' then
+      report.teams = { rules.teamScore(game, 1), rules.teamScore(game, 2) }
+    end
+  end
+
+  local line = json.encodeTable(report)
+  if options.report then
+    local wrote, problem = fs.writeFile(options.report, line)
+    assert(wrote, problem)
+  end
+  print(`REPORT {line}`)
+end
+
+local settings = rules.defaults(options.mode)
+settings.teamDamage = options.teamDamage == true
+settings.fragLimit = options.fraglimit
+
+local step = 1 / 35
+if role == 'host' then
+  local host = session.host.new {
+    address = target,
+    wad = wad,
+    paths = paths,
+    start = { mode = options.mode, settings = settings, map = options.map, skill = options.skill - 1 },
+    maxPlayers = options.players,
+    name = options.name,
+    team = options.team,
+    timeout = options.timeout,
+    conditioner = conditioner,
+    log = log,
+  }
+
+  if options.tokens then
+    local made, problem = fs.mkdir(options.tokens, { recursive = true })
+    assert(made, problem)
+    for slot = 1, options.players - 1 do
+      local wrote, failure = fs.writeFile(fs.join(options.tokens, `slot{slot + 1}.token`), session.host.token(host, slot))
+      assert(wrote, failure)
+    end
+
+    log(`tokens for {options.players - 1} players written to {options.tokens}`)
+  end
+
+  local wanted = options.wait or options.players
+  local deadline = now() + 60
+  while host.phase == 'lobby' do
+    session.host.pump(host)
+    local count = session.host.roster(host)
+    if count >= wanted then break end
+    if now() > deadline then error(`doom-peer: only {count} of {wanted} players arrived`) end
+
+    process.sleep(0.005)
+  end
+
+  session.host.begin(host)
+  local started = now()
+  local ran = 0
+  while play.game.gametic < options.tics do
+    session.host.pump(host)
+    local due = math.floor((now() - started) / step) - ran
+    for _ = 1, math.min(due, 5) do
+      if play.game.gametic >= options.tics then break end
+
+      session.host.tic(host, botCommand(0))
+      ran += 1
+    end
+
+    process.sleep(0.002)
+  end
+
+  -- Let the clients catch up on the last tics and hashes before saying goodbye.
+  local grace = now() + 4
+  while now() < grace do
+    session.host.pump(host)
+    process.sleep(0.005)
+  end
+
+  local summary = session.host.report(host)
+  report.matched, report.unverifiable = summary.matched, summary.unverifiable
+  report.mismatches = #summary.mismatches
+  report.starved = {}
+  for slot, player in summary.players do
+    report.starved[tostring(slot + 1)] = player.starved
+  end
+
+  session.host.stop(host, 'the match is over')
+  finish()
+  return
+end
+
+local token = assert(fs.readFile(target), `cannot read the token file {target}`)
+local client = session.client.new {
+  token = buffer.tostring(token),
+  wad = wad,
+  paths = paths,
+  name = options.name,
+  team = options.team,
+  timeout = options.timeout,
+  resync = options.resync,
+  conditioner = conditioner,
+  log = log,
+}
+
+local started, ran = now(), 0
+local frozen, corrupted = false, false
+while client.phase ~= 'ended' do
+  local game = play.game
+  if client.phase == 'game' and game.gametic and game.gametic >= options.tics then break end
+
+  if options.freezeAt and client.phase == 'game' and game.gametic >= options.freezeAt and not frozen then
+    frozen = true
+    log(`freezing at tic {game.gametic}`)
+  end
+
+  if frozen then
+    -- A frozen peer stops answering altogether, as a hung machine would; the host should drop it.
+    process.sleep(0.05)
+    if now() - started > 60 then break end
+
+    continue
+  end
+
+  session.client.pump(client)
+  if client.phase == 'lobby' then session.client.ready(client, true, options.team) end
+
+  if client.phase == 'game' then
+    if options.leaveAt and game.gametic >= options.leaveAt then
+      session.client.leave(client, 'leaving early')
+      break
+    end
+
+    if options.desyncAt and not corrupted and game.gametic >= options.desyncAt then
+      corrupted = true
+      local mo = game.players[client.slot :: number].mo
+      if mo then mo.health += 7 end
+      log(`corrupted this simulation at tic {game.gametic}`)
+    end
+
+    local due = math.floor((now() - started) / step) - ran
+    for _ = 1, math.min(due, 5) do
+      session.client.command(client, botCommand(client.slot :: number))
+      ran += 1
+    end
+
+    session.client.advance(client, 10)
+  end
+
+  process.sleep(0.002)
+end
+
+report.reason = client.reason
+report.slot = client.slot
+report.matched, report.unverifiable = client.hashes.matched, client.hashes.unverifiable
+report.mismatches = #client.hashes.mismatches
+report.resyncs = client.resyncs
+if client.phase ~= 'ended' then session.client.leave(client, 'done') end
+finish()

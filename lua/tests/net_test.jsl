@@ -1,32 +1,144 @@
 --!strict
-local doomNet = require('@doom/net')
+-- The netgame protocol's encodings and the session pieces that need no second process: tics with
+-- their controls, commands, hashes, snapshots in parts, content manifests, and the hash log that
+-- checks a hash however late it arrives. bin/doom-netcheck.jsl runs real sessions between
+-- processes.
+local content = require('@doom/content')
+local net = require('@doom/net')
+local session = require('@doom/session')
 local test = require('@jess/test')
+
 local suite = test.new()
 local expect = test.expect
 
-suite.describe('dream.net Doom protocol', function()
-    suite.it('round-trips tic commands, bundles, and state hashes', function()
-        local protocol = doomNet.protocol()
-        expect(protocol.schema.eventCount).toBe(3)
-        expect(protocol.schema:eventName(protocol.events.TICCMD)).toBe('TICCMD')
+suite.describe('the wire', function()
+  suite.it('declares one event per message and keeps hashes off the reliable channel', function()
+    local protocol = net.protocol()
+    expect(protocol.schema.eventCount).toBe(13)
+    expect(protocol.names[protocol.ids.TICS]).toBe('TICS')
+    expect(protocol.schema:channelId('hash') ~= nil).toBe(true)
+  end)
 
-        local command = doomNet.botCommand(42, { forward = 60, side = 12, turn = -7, attackEvery = 3 })
-        expect(doomNet.unpackTicCmd(doomNet.packTicCmd(command))).toEqual(command)
+  suite.it('round-trips a tic with every kind of control and the present players only', function()
+    local tic: net.Tic = {
+      tic = 1234,
+      controls = {
+        { kind = 'join', slot = 3, team = 2 },
+        { kind = 'leave', slot = 1 },
+        { kind = 'map', map = 'MAP07' },
+        { kind = 'pause', paused = true },
+      },
+      commands = {
+        [0] = { forwardmove = 50, sidemove = -40, angleturn = -1280, buttons = 1 },
+        [3] = { forwardmove = -25, sidemove = 0, angleturn = 32767, buttons = 6 },
+      },
+    }
 
-        local bundle = doomNet.botBundle(2, 100, 4, { attackEvery = 2 })
-        expect(doomNet.unpackTicBundle(doomNet.packTicBundle(bundle))).toEqual(bundle)
+    expect(net.decodeTic(net.encodeTic(tic))).toEqual(tic)
+    local bare: net.Tic = { tic = 0, controls = {}, commands = {} }
+    expect(net.decodeTic(net.encodeTic(bare))).toEqual(bare)
+  end)
 
-        local state = buffer.fromstring('deterministic Doom state')
-        local hash = doomNet.unpackStateHash(doomNet.packStateHash(123, state))
-        expect(hash.tic).toBe(123)
-        expect(buffer.tostring(hash.digest)).toBe(buffer.tostring(doomNet.hashState(state)))
-    end)
+  suite.it('numbers commands and carries hashes as numbers', function()
+    local sequence, command = net.decodeCmd(net.encodeCmd(77, { forwardmove = -128, sidemove = 127, angleturn = -32768, buttons = 255 }))
+    expect(sequence).toBe(77)
+    expect(command).toEqual { forwardmove = -128, sidemove = 127, angleturn = -32768, buttons = 255 }
 
-    suite.it('rejects malformed wire values and truncated packets', function()
-        expect(function() doomNet.packTicCmd({ forward = 200, side = 0, angleTurn = 0, consistency = 0, chat = 0, buttons = 0 }) end)
-            .toThrow('forward must be an integer')
-        expect(function() doomNet.unpackTicBundle(buffer.create(4)) end).toThrow('TIC_BUNDLE header is truncated')
-    end)
+    local tic, hash = net.decodeHash(net.encodeHash(350, '0badf00d'))
+    expect(tic).toBe(350)
+    expect(hash).toBe('0badf00d')
+  end)
+
+  suite.it('refuses values out of range and packets cut short or padded', function()
+    expect(function() net.encodeCmd(1, { forwardmove = 200, sidemove = 0, angleturn = 0, buttons = 0 }) end).toThrow('forwardmove')
+    expect(function() net.decodeTic(buffer.create(4)) end).toThrow('cut short')
+    local padded = net.encodeTic { tic = 1, controls = {}, commands = { [0] = net.neutral() } }
+    local longer = buffer.create(buffer.len(padded) + 1)
+    buffer.copy(longer, 0, padded)
+    expect(function() net.decodeTic(longer) end).toThrow('bytes after')
+    expect(function() net.encodeTic { tic = 1, controls = { { kind = 'map', map = 'no map!' } }, commands = {} } end).toThrow('not a map name')
+    expect(function() net.decodeCmd(buffer.create(3)) end).toThrow('wrong size')
+  end)
+
+  suite.it('sends a snapshot in parts that put the save back together in order', function()
+    local save = buffer.create(200000)
+    for index = 0, 199999, 7 do
+      buffer.writeu8(save, index, index % 251)
+    end
+
+    local parts = net.encodeSnapshot(99, save)
+    local assembly: net.Assembly? = nil
+    local whole: buffer? = nil
+    for _, part in parts do
+      expect(buffer.len(part) <= 12 + net.SnapshotPart).toBe(true)
+      assembly, whole = net.addSnapshotPart(assembly, part)
+    end
+
+    expect(assembly and assembly.tic).toBe(99)
+    expect(whole and buffer.tostring(whole) == buffer.tostring(save)).toBe(true)
+
+    if #parts > 1 then
+      expect(function() net.addSnapshotPart(net.addSnapshotPart(nil, parts[1]), parts[#parts]) end).toThrow('out of order')
+    end
+  end)
+
+  suite.it('passes connect tokens as text and refuses one of the wrong size', function()
+    expect(function() net.tokenBytes('AAAA') end).toThrow('connect token is 2048 bytes')
+    local token = buffer.create(2048)
+    expect(buffer.len(net.tokenBytes(net.tokenText(token)))).toBe(2048)
+  end)
+end)
+
+suite.describe('content manifests', function()
+  suite.it('compare files by digest and mods by identity, in order, and say what differs', function()
+    local host = { 'iwad aa11 doom2.wad', 'mod org.example.a@1.0.0#d1', 'mod org.example.b@1.0.0#d2' }
+    expect(content.difference(host, { 'iwad aa11 DOOM2.WAD', 'mod org.example.a@1.0.0#d1', 'mod org.example.b@1.0.0#d2' })).toBe(nil)
+    expect(content.difference(host, { 'iwad bb22 doom2.wad', host[2], host[3] })).toBe(
+      'entry 1 differs: the host has iwad aa11 doom2.wad, the joining player iwad bb22 doom2.wad'
+    )
+    expect(content.difference(host, { host[1], host[3], host[2] }) ~= nil).toBe(true)
+    expect(content.difference(host, { host[1], host[2] })).toBe('the host also loads mod org.example.b@1.0.0#d2')
+    expect(content.difference(host, { host[1], host[2], host[3], 'file cc33 extra.wad' })).toBe("the host doesn't load file cc33 extra.wad")
+    expect(content.fromEntries(host).digest).toBe(content.fromEntries(table.clone(host)).digest)
+  end)
+end)
+
+suite.describe('state hashes', function()
+  local common = session.common
+
+  suite.it('checks a hash that arrives before this peer reaches its tic, and one that arrives after', function()
+    local log = common.hashLog()
+    common.recordTheirs(log, 70, 0, 'aaaaaaaa', 35)
+    expect(log.matched).toBe(0)
+    common.recordOwn(log, 70, 'aaaaaaaa')
+    expect(log.matched).toBe(1)
+
+    common.recordOwn(log, 105, 'bbbbbbbb')
+    common.recordTheirs(log, 105, 2, 'cccccccc', 140)
+    expect(#log.mismatches).toBe(1)
+    expect(log.mismatches[1]).toEqual { tic = 105, from = 2, own = 'bbbbbbbb', theirs = 'cccccccc' }
+  end)
+
+  suite.it('counts a hash too old to check as unverifiable rather than matched', function()
+    local log = common.hashLog()
+    common.recordOwn(log, 35, 'aaaaaaaa')
+    common.recordOwn(log, 35 + common.HashWindow, 'bbbbbbbb')
+    common.recordTheirs(log, 35, 1, 'aaaaaaaa', 35 + common.HashWindow)
+    expect(log.matched).toBe(0)
+    expect(log.unverifiable).toBe(1)
+  end)
+
+  suite.it('delays what arrives through the conditioner in order, and drops only hashes', function()
+    local conditioner = common.conditioner(50, 0, 1)
+    common.hold(conditioner, 0, { kind = 'message', peer = 1i, event = 'TICS' })
+    common.hold(conditioner, 0, { kind = 'message', peer = 1i, event = 'HASH' })
+    common.hold(conditioner, 10, { kind = 'message', peer = 1i, event = 'CMD' })
+    expect(common.release(conditioner, 40)).toBe(nil)
+    expect((common.release(conditioner, 55) :: any).event).toBe('TICS')
+    expect(common.release(conditioner, 55)).toBe(nil)
+    expect((common.release(conditioner, 60) :: any).event).toBe('CMD')
+    expect(common.release(conditioner, 1000)).toBe(nil)
+  end)
 end)
 
 return suite

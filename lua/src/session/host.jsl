@@ -1,0 +1,521 @@
+--!strict
+-- A netgame's host. The host is player 1 (slot 0) and the authority on the tic stream: every tic
+-- it takes one queued command from each remote player (or repeats their last movement when none
+-- arrived in time, so a slow link never stalls the others), adds the controls it decided (who
+-- joined, who left, a map change, a pause), runs the tic itself, and sends it to everyone. Clients
+-- run exactly the tics they are sent, so every simulation holds the same state, which the state
+-- hashes both sides send prove or disprove.
+--
+-- The host never blocks: `pump` handles whatever arrived, `tic` runs one tic. The application or
+-- a headless peer calls them on its own clock.
+local content = require('@doom/content')
+local net = require('@doom/net')
+local play = require('@doom/play')
+local rules = require('@doom/rules')
+local setup = require('@doom/setup')
+local udp = require('@dream/udp')
+local common = require('./common')
+
+local module = {}
+
+-- How many commands a remote player may get ahead of the host before the oldest are dropped.
+local MaxQueued = 8
+
+-- Command buttons repeated from a player whose command didn't arrive: attack keeps firing, use
+-- and weapon changes aren't pressed twice.
+local RepeatedButtons = 1
+
+export type Remote = {
+  slot: number,
+  peer: integer,
+  name: string,
+  team: number,
+  ready: boolean,
+  greeted: boolean,
+  active: boolean,
+  queue: { net.Command },
+  last: net.Command,
+  sequence: number,
+  heard: number,
+  starved: number,
+  snapshot: boolean,
+}
+
+export type Options = {
+  address: string,
+  wad: any,
+  paths: { string },
+  start: setup.Start,
+  maxPlayers: number,
+  name: string,
+  team: number?,
+  timeout: number?,
+  tokenSeconds: number?,
+  conditioner: common.Conditioner?,
+  log: ((line: string) -> ())?,
+}
+
+export type Host = {
+  phase: 'lobby' | 'game' | 'ended',
+  options: Options,
+  protocol: net.Protocol,
+  server: dream_udp_Server,
+  scratch: buffer,
+  manifest: content.Manifest,
+  remotes: { [number]: Remote },
+  peers: { [integer]: number },
+  controls: { net.Control },
+  hashes: common.HashLog,
+  presentation: any,
+  teams: { [number]: number },
+  sent: number,
+  log: (line: string) -> (),
+}
+
+local function now(): number
+  return os.clock() * 1000
+end
+
+local function send(host: Host, peer: integer, event: net.EventName, payload: buffer): ()
+  host.server:sendEvent(peer, host.protocol.ids[event], payload)
+end
+
+-- Every remote that is in the game and running tics.
+local function activePeers(host: Host): { integer }
+  local list: { integer } = {}
+  for _, remote in host.remotes do
+    if remote.active then table.insert(list, remote.peer) end
+  end
+
+  return list
+end
+
+local function lobby(host: Host): any
+  local players = { { slot = 0, name = host.options.name, team = host.options.team or 0, ready = true } }
+  for slot = 1, net.MaxPlayers - 1 do
+    local remote = host.remotes[slot]
+    if remote and remote.greeted then
+      table.insert(players, { slot = slot, name = remote.name, team = remote.team, ready = remote.ready })
+    end
+  end
+
+  return { phase = host.phase, players = players, mode = host.options.start.mode, maxPlayers = host.options.maxPlayers }
+end
+
+local function broadcastLobby(host: Host): ()
+  local payload = net.encodeValue(lobby(host))
+  for _, remote in host.remotes do
+    if remote.greeted then send(host, remote.peer, 'LOBBY', payload) end
+  end
+end
+
+-- What a client needs to start or load the same game: everything but the WAD and the mods, which
+-- it brings itself and which the manifest has already proved are the same.
+local function startInfo(host: Host): any
+  local start = host.options.start
+  local settings = start.settings or rules.defaults(start.mode)
+  return {
+    mode = start.mode,
+    settings = settings,
+    map = start.map,
+    skill = start.skill,
+    nomonsters = start.nomonsters,
+    teams = host.teams,
+  }
+end
+
+function module.new(options: Options): Host
+  local protocol = net.protocol()
+  if options.maxPlayers < 1 or options.maxPlayers > net.MaxPlayers then
+    error(`doom: a netgame has 1 to {net.MaxPlayers} players`, 2)
+  end
+
+  local server = udp.server {
+    schema = protocol.schema,
+    address = options.address,
+    protocolId = net.ProtocolId,
+    maxClients = math.max(1, options.maxPlayers - 1),
+  }
+
+  local host: Host = {
+    phase = 'lobby',
+    options = options,
+    protocol = protocol,
+    server = server,
+    scratch = buffer.create(net.PollBufferSize),
+    manifest = content.manifest(options.paths, setup.negotiated(options.start.rulesets, options.start.mods)),
+    remotes = {},
+    peers = {},
+    controls = {},
+    hashes = common.hashLog(),
+    presentation = nil,
+    teams = {},
+    sent = 0,
+    log = options.log or function(_: string) end,
+  }
+
+  return host
+end
+
+-- The connect token for `slot` (1 to 3), as text. It carries the host's address and expires
+-- after `tokenSeconds` (an hour by default); whoever holds it can take the slot.
+function module.token(host: Host, slot: number): string
+  if slot < 1 or slot >= host.options.maxPlayers then error(`doom: no slot {slot} in this game`, 2) end
+
+  local seconds = host.options.tokenSeconds or 3600
+  local timeout = math.clamp(math.ceil(host.options.timeout or 10), 1, 300)
+  return net.tokenText(host.server:connectToken(integer.create(slot), seconds, timeout))
+end
+
+local function reject(host: Host, peer: integer, reason: string): ()
+  host.log(`rejected peer {peer}: {reason}`)
+  send(host, peer, 'REJECT', net.encodeValue { reason = reason })
+  host.server:flush()
+  host.server:disconnect(peer)
+end
+
+-- A remote player is gone: from the lobby, or from the game at the next tic.
+local function drop(host: Host, slot: number, reason: string): ()
+  local remote = host.remotes[slot]
+  if not remote then return end
+
+  host.remotes[slot] = nil
+  host.peers[remote.peer] = nil
+  host.log(`player {slot + 1} ({remote.name}) left: {reason}`)
+  if host.phase == 'game' and play.game.playeringame[slot] then
+    table.insert(host.controls, { kind = 'leave', slot = slot } :: net.Control)
+  end
+
+  broadcastLobby(host)
+end
+
+local function greet(host: Host, remote: Remote, hello: any): ()
+  if type(hello) ~= 'table' or hello.codec ~= net.CodecVersion then
+    reject(host, remote.peer, `this host speaks protocol {net.CodecVersion}`)
+    return
+  end
+
+  local entries = if type(hello.manifest) == 'table' then hello.manifest else {}
+  local difference = content.difference(host.manifest.entries, entries)
+  if difference then
+    reject(host, remote.peer, `content mismatch: {difference}`)
+    return
+  end
+
+  remote.name = string.sub(tostring(hello.name or `player {remote.slot + 1}`), 1, 16)
+  remote.team = if hello.team == 1 or hello.team == 2 then hello.team else 0
+  remote.greeted = true
+  remote.heard = now()
+
+  send(host, remote.peer, 'WELCOME', net.encodeValue {
+    slot = remote.slot,
+    phase = host.phase,
+    start = startInfo(host),
+  })
+
+  if host.phase == 'game' then
+    local team = 0
+    if host.options.start.mode == 'tdm' then
+      local counts = { 0, 0 }
+      for _, assigned in host.teams do
+        counts[assigned] += 1
+      end
+
+      team = if remote.team > 0 and counts[remote.team] <= counts[3 - remote.team] then remote.team
+        elseif counts[1] <= counts[2] then 1
+        else 2
+      host.teams[remote.slot] = team
+    end
+
+    remote.snapshot = true
+    table.insert(host.controls, { kind = 'join', slot = remote.slot, team = team } :: net.Control)
+    host.log(`player {remote.slot + 1} ({remote.name}) joins the game in progress`)
+  else
+    host.log(`player {remote.slot + 1} ({remote.name}) is in the lobby`)
+  end
+
+  broadcastLobby(host)
+end
+
+local function receive(host: Host, item: net.Received): ()
+  if item.kind == 'connected' then
+    local slot = item.clientId or 0
+    if slot < 1 or slot >= host.options.maxPlayers or host.remotes[slot] then
+      host.log(`refused a connection for slot {slot}`)
+      host.server:disconnect(item.peer)
+      return
+    end
+
+    host.remotes[slot] = {
+      slot = slot,
+      peer = item.peer,
+      name = `player {slot + 1}`,
+      team = 0,
+      ready = false,
+      greeted = false,
+      active = false,
+      queue = {},
+      last = net.neutral(),
+      sequence = -1,
+      heard = now(),
+      starved = 0,
+      snapshot = false,
+    }
+    host.peers[item.peer] = slot
+    return
+  end
+
+  local slot = host.peers[item.peer]
+  if item.kind == 'disconnected' then
+    if slot then drop(host, slot, item.reason or 'disconnected') end
+    return
+  end
+
+  if item.kind ~= 'message' or not slot then return end
+
+  local remote = host.remotes[slot]
+  local payload = item.payload :: buffer
+  remote.heard = now()
+  if item.event == 'HELLO' then
+    greet(host, remote, net.decodeValue(payload))
+  elseif not remote.greeted then
+    reject(host, remote.peer, 'say HELLO first')
+  elseif item.event == 'READY' then
+    local ready = net.decodeValue(payload)
+    remote.ready = ready.ready == true
+    if ready.team == 1 or ready.team == 2 or ready.team == 0 then remote.team = ready.team end
+    broadcastLobby(host)
+  elseif item.event == 'CMD' then
+    local sequence, command = net.decodeCmd(payload)
+    if sequence <= remote.sequence then return end
+
+    remote.sequence = sequence
+    table.insert(remote.queue, command)
+    while #remote.queue > MaxQueued do
+      table.remove(remote.queue, 1)
+    end
+  elseif item.event == 'HASH' then
+    local tic, hash = net.decodeHash(payload)
+    common.recordTheirs(host.hashes, tic, slot, hash, play.game.gametic)
+  elseif item.event == 'RESYNC' then
+    host.log(`player {slot + 1} asked to be resynchronized`)
+    remote.snapshot = true
+  elseif item.event == 'CHAT' then
+    local chat = net.decodeValue(payload)
+    local line = net.encodeValue { from = remote.name, text = string.sub(tostring(chat.text or ''), 1, 120) }
+    for _, other in host.remotes do
+      if other.greeted then send(host, other.peer, 'CHAT', line) end
+    end
+  elseif item.event == 'BYE' then
+    drop(host, slot, 'said goodbye')
+    host.server:disconnect(item.peer)
+  end
+end
+
+-- Handles everything that arrived, and drops remote players who have been silent too long.
+function module.pump(host: Host): ()
+  if host.phase == 'ended' then return end
+
+  host.server:update()
+  local conditioner = host.options.conditioner
+  while true do
+    local item = net.poll(host.protocol, host.server, host.scratch)
+    if not item then break end
+
+    if conditioner and item.kind == 'message' then
+      common.hold(conditioner, now(), item)
+    else
+      receive(host, item)
+    end
+  end
+
+  if conditioner then
+    while true do
+      local item = common.release(conditioner, now())
+      if not item then break end
+
+      receive(host, item)
+    end
+  end
+
+  local limit = (host.options.timeout or 10) * 1000
+  for slot, remote in host.remotes do
+    if now() - remote.heard > limit then
+      drop(host, slot, 'timed out')
+      host.server:disconnect(remote.peer)
+    end
+  end
+
+  host.server:flush()
+end
+
+-- How many players are in, the host included, and whether all of them said they are ready.
+function module.roster(host: Host): (number, boolean)
+  local count, ready = 1, true
+  for _, remote in host.remotes do
+    if remote.greeted then
+      count += 1
+      ready = ready and remote.ready
+    end
+  end
+
+  return count, ready
+end
+
+-- Leaves the lobby and starts the game at tic 0 for everyone greeted so far.
+function module.begin(host: Host): any
+  if host.phase ~= 'lobby' then error('doom: the game has already begun', 2) end
+
+  local present = { true, false, false, false }
+  local wanted: { [number]: number } = { [0] = host.options.team or 0 }
+  local slots = { 0 }
+  for slot, remote in host.remotes do
+    if remote.greeted then
+      present[slot + 1] = true
+      wanted[slot] = remote.team
+      table.insert(slots, slot)
+    end
+  end
+
+  if host.options.start.mode == 'tdm' then host.teams = rules.assignTeams(slots, wanted) end
+
+  local info = startInfo(host)
+  local start = table.clone(host.options.start)
+  local settings = table.clone(info.settings)
+  settings.teams = host.teams
+  start.settings = settings
+  start.players = present
+  start.consoleplayer = 0
+
+  local game, presentation = setup.start(host.options.wad, start)
+  host.presentation = presentation
+  host.phase = 'game'
+
+  local payload = net.encodeValue { start = info, players = present }
+  for _, remote in host.remotes do
+    if remote.greeted then
+      send(host, remote.peer, 'START', payload)
+      remote.active = true
+      remote.heard = now()
+    end
+  end
+
+  host.server:flush()
+  host.log(`the game begins with {#slots} players`)
+  return game
+end
+
+-- Asks every peer to change to `map` at the next tic.
+function module.changeMap(host: Host, map: string): ()
+  table.insert(host.controls, { kind = 'map', map = string.upper(map) } :: net.Control)
+end
+
+function module.setPaused(host: Host, paused: boolean): ()
+  table.insert(host.controls, { kind = 'pause', paused = paused } :: net.Control)
+end
+
+local function nextCommand(remote: Remote): net.Command
+  local command = table.remove(remote.queue, 1)
+  if command then
+    remote.last = command
+    return command
+  end
+
+  remote.starved += 1
+  local last = remote.last
+  return {
+    forwardmove = last.forwardmove,
+    sidemove = last.sidemove,
+    angleturn = 0,
+    buttons = bit32.band(last.buttons, RepeatedButtons),
+  }
+end
+
+-- Runs one tic with the host's own command and sends it to every client.
+function module.tic(host: Host, command: net.Command): ()
+  if host.phase ~= 'game' then return end
+
+  local game = play.game
+  local commands: { [number]: net.Command } = { [0] = command }
+  local joining: { [number]: boolean } = {}
+  for _, control in host.controls do
+    if control.kind == 'join' then joining[control.slot] = true end
+  end
+
+  for slot, remote in host.remotes do
+    if remote.greeted and (game.playeringame[slot] or joining[slot]) then commands[slot] = nextCommand(remote) end
+  end
+
+  local tic: net.Tic = { tic = game.gametic, controls = host.controls, commands = commands }
+  host.controls = {}
+  common.apply(tic)
+
+  local payload = net.encodeTic(tic)
+  for _, peer in activePeers(host) do
+    send(host, peer, 'TICS', payload)
+  end
+
+  host.sent += 1
+
+  -- Players who joined or fell out of step get the whole game as it stands after this tic, and
+  -- every tic after it.
+  for _, remote in host.remotes do
+    if not remote.snapshot then continue end
+
+    remote.snapshot = false
+    remote.active = true
+    for _, part in net.encodeSnapshot(game.gametic, play.save()) do
+      send(host, remote.peer, 'SNAPSHOT', part)
+    end
+  end
+
+  if game.gametic % common.HashInterval == 0 then
+    local hash = play.hash()
+    common.recordOwn(host.hashes, game.gametic, hash)
+    local packet = net.encodeHash(game.gametic, hash)
+    for _, peer in activePeers(host) do
+      send(host, peer, 'HASH', packet)
+    end
+  end
+
+  host.server:flush()
+end
+
+-- Says goodbye to everyone and stops.
+function module.stop(host: Host, reason: string?): ()
+  if host.phase == 'ended' then return end
+
+  local payload = net.encodeValue { reason = reason or 'the host left' }
+  for _, remote in host.remotes do
+    send(host, remote.peer, 'BYE', payload)
+  end
+
+  host.server:flush()
+  host.server:disconnectAll()
+  host.phase = 'ended'
+end
+
+-- What the session has seen, for a scoreboard or a log.
+function module.report(host: Host): any
+  local players = {}
+  for slot, remote in host.remotes do
+    players[slot] = {
+      name = remote.name,
+      queued = #remote.queue,
+      starved = remote.starved,
+      rtt = host.server:peerRtt(remote.peer),
+      loss = host.server:peerPacketLoss(remote.peer),
+    }
+  end
+
+  return {
+    tic = play.game.gametic,
+    sent = host.sent,
+    matched = host.hashes.matched,
+    unverifiable = host.hashes.unverifiable,
+    mismatches = host.hashes.mismatches,
+    players = players,
+  }
+end
+
+return module

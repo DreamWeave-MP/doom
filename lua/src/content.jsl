@@ -1,0 +1,72 @@
+--!strict
+-- @doom/content: what a game is made of, as a netgame compares it and a save records it. The
+-- IWAD and every file laid over it (by the BLAKE3 digest of its bytes, so a renamed copy is the
+-- same file and an edited one isn't), then every ruleset and mod that changes the simulation,
+-- in order. Two peers play together only when their manifests are the same, entry for entry.
+local bytes = require('@dream/bytes')
+local fs = require('@dream/fs')
+
+local module = {}
+
+export type Manifest = { entries: { string }, digest: string }
+
+local function basename(path: string): string
+  return string.match(path, '[^/\\]+$') or path
+end
+
+-- One entry per file: its role (`iwad` for the first, `file` for the rest), its digest, and its
+-- name, which is for people and isn't compared.
+function module.files(paths: { string }): { string }
+  local entries = {}
+  for index, path in paths do
+    local data = fs.readFile(path)
+    if not data then error(`doom: cannot read '{path}'`, 2) end
+
+    local digest = bytes.toHex(bytes.digest(data, 'blake3'))
+    table.insert(entries, `{if index == 1 then 'iwad' else 'file'} {digest} {basename(path)}`)
+  end
+
+  return entries
+end
+
+-- The manifest of the files at `paths` and the simulation content list (@doom/setup's
+-- `content`).
+function module.manifest(paths: { string }, simulation: { string }): Manifest
+  local entries = module.files(paths)
+  for _, item in simulation do
+    table.insert(entries, `mod {item}`)
+  end
+
+  return module.fromEntries(entries)
+end
+
+function module.fromEntries(entries: { string }): Manifest
+  local digest = bytes.toHex(bytes.digest(table.concat(entries, '\n'), 'blake3'))
+  return { entries = table.clone(entries), digest = digest }
+end
+
+-- What compares: an entry without the file name a person gave it.
+local function comparable(entry: string): string
+  local role, digest = string.match(entry, '^(%a+) (%x+) ')
+  if role and digest then return `{role} {digest}` end
+
+  return entry
+end
+
+-- Nil when `theirs` is the same content as `mine`; otherwise the first difference, said so a
+-- person can fix it.
+function module.difference(mine: { string }, theirs: { string }): string?
+  for index = 1, math.max(#mine, #theirs) do
+    local own, other = mine[index], theirs[index]
+    if own and other and comparable(own) == comparable(other) then continue end
+
+    if not other then return `the host also loads {own}` end
+    if not own then return `the host doesn't load {other}` end
+
+    return `entry {index} differs: the host has {own}, the joining player {other}`
+  end
+
+  return nil
+end
+
+return module

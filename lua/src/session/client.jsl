@@ -1,0 +1,300 @@
+--!strict
+-- A netgame's client: it says who it is and what it loaded, waits in the lobby, starts the game
+-- the host starts (or loads the snapshot of the one in progress), sends one command per local
+-- tic, and runs the tics the host sends in order. It checks the host's state hashes against its
+-- own, however late either arrives, and asks for a snapshot when they differ.
+local content = require('@doom/content')
+local net = require('@doom/net')
+local play = require('@doom/play')
+local setup = require('@doom/setup')
+local udp = require('@dream/udp')
+local common = require('./common')
+
+local module = {}
+
+export type Options = {
+  token: string,
+  wad: any,
+  paths: { string },
+  mods: { any }?,
+  rulesets: { [string]: any }?,
+  name: string,
+  team: number?,
+  timeout: number?,
+  resync: boolean?,
+  conditioner: common.Conditioner?,
+  log: ((line: string) -> ())?,
+}
+
+export type Client = {
+  phase: 'connecting' | 'lobby' | 'game' | 'ended',
+  options: Options,
+  protocol: net.Protocol,
+  handle: dream_udp_Client,
+  scratch: buffer,
+  slot: number?,
+  start: any,
+  lobby: any,
+  tics: { [number]: net.Tic },
+  sequence: number,
+  hashes: common.HashLog,
+  checked: number,
+  heard: number,
+  reason: string?,
+  presentation: any,
+  chat: { string },
+  resyncs: number,
+  assembly: net.Assembly?,
+  log: (line: string) -> (),
+}
+
+local function now(): number
+  return os.clock() * 1000
+end
+
+local function send(client: Client, event: net.EventName, payload: buffer): ()
+  client.handle:sendEvent(client.protocol.ids[event], payload)
+end
+
+local function startFor(client: Client, info: any, players: { boolean }?): setup.Start
+  local settings = info.settings
+  settings.teams = info.teams or settings.teams or {}
+  return {
+    mode = info.mode,
+    settings = settings,
+    rulesets = client.options.rulesets,
+    mods = client.options.mods,
+    map = info.map,
+    skill = info.skill,
+    nomonsters = info.nomonsters,
+    players = players,
+    consoleplayer = client.slot,
+  }
+end
+
+function module.new(options: Options): Client
+  local protocol = net.protocol()
+  local handle = udp.client { schema = protocol.schema }
+  handle:connect(net.tokenBytes(options.token))
+
+  return {
+    phase = 'connecting',
+    options = options,
+    protocol = protocol,
+    handle = handle,
+    scratch = buffer.create(net.PollBufferSize),
+    slot = nil,
+    start = nil,
+    lobby = nil,
+    tics = {},
+    sequence = 0,
+    hashes = common.hashLog(),
+    checked = 0,
+    heard = now(),
+    reason = nil,
+    presentation = nil,
+    chat = {},
+    resyncs = 0,
+    assembly = nil,
+    log = options.log or function(_: string) end,
+  }
+end
+
+local function finish(client: Client, reason: string): ()
+  if client.phase == 'ended' then return end
+
+  client.phase = 'ended'
+  client.reason = reason
+  client.log(`session ended: {reason}`)
+end
+
+local function hello(client: Client): ()
+  local manifest = content.manifest(client.options.paths, setup.negotiated(client.options.rulesets, client.options.mods))
+  send(client, 'HELLO', net.encodeValue {
+    codec = net.CodecVersion,
+    name = client.options.name,
+    team = client.options.team or 0,
+    manifest = manifest.entries,
+  })
+end
+
+local function receive(client: Client, item: net.Received): ()
+  if item.kind == 'connected' then
+    client.log('connected; saying hello')
+    hello(client)
+    return
+  end
+
+  if item.kind == 'disconnected' or item.kind == 'connectFailed' then
+    finish(client, client.reason or `the connection ended: {item.reason or 'unknown'}`)
+    return
+  end
+
+  if item.kind ~= 'message' then return end
+
+  client.heard = now()
+  local payload = item.payload :: buffer
+  local event = item.event
+  if event == 'WELCOME' then
+    local welcome = net.decodeValue(payload)
+    client.slot = welcome.slot
+    client.start = welcome.start
+    client.phase = if welcome.phase == 'game' then 'game' else 'lobby'
+    client.log(`welcomed as player {welcome.slot + 1}{if welcome.phase == 'game' then ', joining a game in progress' else ''}`)
+  elseif event == 'REJECT' then
+    client.reason = `rejected: {net.decodeValue(payload).reason}`
+  elseif event == 'LOBBY' then
+    client.lobby = net.decodeValue(payload)
+  elseif event == 'START' then
+    local start = net.decodeValue(payload)
+    client.start = start.start
+    local game, presentation = setup.start(client.options.wad, startFor(client, start.start, start.players))
+    client.presentation = presentation
+    client.phase = 'game'
+    table.clear(client.tics)
+    client.log(`the game begins on {game.mapname}`)
+  elseif event == 'SNAPSHOT' then
+    local assembly, save = net.addSnapshotPart(client.assembly, payload)
+    client.assembly = assembly
+    if not save then return end
+
+    local tic = assembly.tic
+    client.assembly = nil
+    local _, presentation = setup.load(client.options.wad, save, startFor(client, client.start, nil))
+    client.presentation = presentation
+    client.phase = 'game'
+    for buffered in client.tics do
+      if buffered < tic then client.tics[buffered] = nil end
+    end
+
+    client.hashes = common.hashLog()
+    client.log(`loaded the game at tic {tic}`)
+  elseif event == 'TICS' then
+    local tic = net.decodeTic(payload)
+    client.tics[tic.tic] = tic
+  elseif event == 'HASH' then
+    local tic, hash = net.decodeHash(payload)
+    common.recordTheirs(client.hashes, tic, 0, hash, play.game.gametic or 0)
+  elseif event == 'CHAT' then
+    local line = net.decodeValue(payload)
+    table.insert(client.chat, `{line.from}: {line.text}`)
+  elseif event == 'BYE' then
+    finish(client, `the host left: {net.decodeValue(payload).reason}`)
+  end
+end
+
+-- Handles everything that arrived; ends the session when the host has been silent too long.
+function module.pump(client: Client): ()
+  if client.phase == 'ended' then return end
+
+  client.handle:update()
+  local conditioner = client.options.conditioner
+  while true do
+    local item = net.poll(client.protocol, client.handle, client.scratch)
+    if not item then break end
+
+    if conditioner and item.kind == 'message' then
+      common.hold(conditioner, now(), item)
+    else
+      receive(client, item)
+    end
+  end
+
+  if conditioner then
+    while true do
+      local item = common.release(conditioner, now())
+      if not item then break end
+
+      receive(client, item)
+    end
+  end
+
+  local limit = (client.options.timeout or 10) * 1000
+  if client.phase ~= 'connecting' and now() - client.heard > limit then
+    finish(client, 'the host timed out')
+  elseif client.phase == 'connecting' and now() - client.heard > limit * 3 then
+    finish(client, client.reason or 'could not reach the host')
+  end
+
+  if client.phase ~= 'ended' then client.handle:flush() end
+end
+
+function module.ready(client: Client, ready: boolean, team: number?): ()
+  if client.phase ~= 'lobby' then return end
+
+  send(client, 'READY', net.encodeValue { ready = ready, team = team or client.options.team or 0 })
+  client.handle:flush()
+end
+
+function module.say(client: Client, text: string): ()
+  if client.phase ~= 'lobby' and client.phase ~= 'game' then return end
+
+  send(client, 'CHAT', net.encodeValue { text = text })
+end
+
+-- Sends this local tic's command.
+function module.command(client: Client, command: net.Command): ()
+  if client.phase ~= 'game' then return end
+
+  client.sequence += 1
+  send(client, 'CMD', net.encodeCmd(client.sequence, command))
+end
+
+-- Runs up to `limit` of the tics that have arrived, in order; returns how many ran.
+function module.advance(client: Client, limit: number): number
+  if client.phase ~= 'game' then return 0 end
+
+  local game = play.game
+  local ran = 0
+  while ran < limit do
+    local tic = client.tics[game.gametic]
+    if not tic then break end
+
+    client.tics[game.gametic] = nil
+    common.apply(tic)
+    ran += 1
+
+    if game.gametic % common.HashInterval == 0 then
+      local hash = play.hash()
+      common.recordOwn(client.hashes, game.gametic, hash)
+      send(client, 'HASH', net.encodeHash(game.gametic, hash))
+    end
+  end
+
+  -- A hash that disagrees means this simulation left the host's; the host's snapshot puts it
+  -- back, once per disagreement.
+  local mismatches = client.hashes.mismatches
+  if #mismatches > client.checked then
+    local first = mismatches[client.checked + 1]
+    client.log(`out of step at tic {first.tic}: host {first.theirs}, here {first.own}`)
+    client.checked = #mismatches
+    if client.options.resync ~= false then
+      client.resyncs += 1
+      send(client, 'RESYNC', net.encodeValue { tic = first.tic })
+    end
+  end
+
+  if ran > 0 then client.handle:flush() end
+  return ran
+end
+
+-- How many tics have arrived and not yet run.
+function module.backlog(client: Client): number
+  local count = 0
+  for _ in client.tics do
+    count += 1
+  end
+
+  return count
+end
+
+function module.leave(client: Client, reason: string?): ()
+  if client.phase == 'ended' then return end
+
+  send(client, 'BYE', net.encodeValue { reason = reason or 'left' })
+  client.handle:flush()
+  client.handle:disconnect()
+  finish(client, reason or 'left')
+end
+
+return module

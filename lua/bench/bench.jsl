@@ -184,29 +184,22 @@ local function stateWorkloads()
 end
 
 local function netWorkloads()
-  local bundle = { firstTic = 1000, player = 2, commands = {} }
-  for index = 1, net.MAX_BUNDLE_TICS do
-    bundle.commands[index] = {
-      forward = index * 4 - 25,
-      side = 25 - index * 3,
-      angleTurn = index * 512 - 3072,
-      consistency = index * 97,
-      chat = 0,
-      buttons = index % 4,
-    }
+  local tic: net.Tic = { tic = 1000, controls = { { kind = 'join', slot = 2, team = 1 } }, commands = {} }
+  for slot = 0, 3 do
+    tic.commands[slot] = { forwardmove = slot * 12 - 25, sidemove = 25 - slot * 9, angleturn = slot * 512, buttons = slot % 4 }
   end
 
-  workload('net: pack and unpack 64 tic bundles', function()
+  workload('net: encode and decode 64 four-player tics', function()
     return function(): unknown
       local total = 0
       for _ = 1, 64 do
-        local unpacked = net.unpackTicBundle(net.packTicBundle(bundle))
-        total += unpacked.commands[7].angleTurn + #unpacked.commands
+        local decoded = net.decodeTic(net.encodeTic(tic))
+        total += decoded.commands[3].angleturn + #decoded.controls
       end
 
       return total
     end
-  end, 33536)
+  end, 98368)
 end
 
 local function readerWorkloads(wad: wadModule.Wad)

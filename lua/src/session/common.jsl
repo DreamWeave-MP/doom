@@ -1,0 +1,147 @@
+--!strict
+-- What a netgame's host and clients share: running one tic from the wire, keeping state hashes
+-- until the other side's arrive, and a link conditioner that delays and drops what arrives, to
+-- test a session over a bad network on a good one.
+local net = require('@doom/net')
+local play = require('@doom/play')
+
+local module = {}
+
+-- A tic is hashed when it is a multiple of this, on every peer.
+module.HashInterval = 35
+
+-- Hashes are kept this many tics for the other side's to catch up with.
+module.HashWindow = 35 * 30
+
+-- Runs `tic` on this peer's simulation: its controls first, in order, then its commands.
+function module.apply(tic: net.Tic): ()
+  local engine = play.engine
+  local game = play.game
+  if game.gametic ~= tic.tic then
+    error(`doom session: tic {tic.tic} arrived for a game at tic {game.gametic}`, 2)
+  end
+
+  for _, control in tic.controls do
+    if control.kind == 'join' then
+      if control.team and control.team > 0 and game.rules and game.rules.teams then
+        game.rules.teams[control.slot] = control.team
+      end
+
+      engine.PlayerJoin(control.slot)
+    elseif control.kind == 'leave' then
+      engine.PlayerLeave(control.slot)
+    elseif control.kind == 'map' then
+      engine.ChangeMap(control.map)
+    elseif control.kind == 'pause' then
+      engine.SetPaused(control.paused)
+    end
+  end
+
+  play.tick(tic.commands)
+end
+
+-- The hashes one side made, and what the other side said, by tic.
+export type HashLog = {
+  own: { [number]: string },
+  theirs: { [number]: { [number]: string } },
+  matched: number,
+  unverifiable: number,
+  mismatches: { { tic: number, from: number, own: string, theirs: string } },
+}
+
+function module.hashLog(): HashLog
+  return { own = {}, theirs = {}, matched = 0, unverifiable = 0, mismatches = {} }
+end
+
+local function compare(log: HashLog, tic: number, from: number, own: string, theirs: string): ()
+  if own == theirs then
+    log.matched += 1
+    return
+  end
+
+  table.insert(log.mismatches, { tic = tic, from = from, own = own, theirs = theirs })
+end
+
+-- This peer's hash of `tic`: checked against what others already sent for it.
+function module.recordOwn(log: HashLog, tic: number, hash: string): ()
+  log.own[tic] = hash
+  local waiting = log.theirs[tic]
+  if waiting then
+    log.theirs[tic] = nil
+    for from, theirs in waiting do
+      compare(log, tic, from, hash, theirs)
+    end
+  end
+
+  local stale = tic - module.HashWindow
+  log.own[stale] = nil
+  if log.theirs[stale] then
+    log.unverifiable += 1
+    log.theirs[stale] = nil
+  end
+end
+
+-- Another peer's hash of `tic`, from `from` (a slot): compared now if this peer has reached the
+-- tic, kept until it does if it hasn't, and counted as unverifiable if it is older than the
+-- window. A late hash is still checked as long as the tic's own hash is kept.
+function module.recordTheirs(log: HashLog, tic: number, from: number, hash: string, reached: number): ()
+  local own = log.own[tic]
+  if own then
+    compare(log, tic, from, own, hash)
+    return
+  end
+
+  if tic <= reached - module.HashWindow then
+    log.unverifiable += 1
+    return
+  end
+
+  local waiting = log.theirs[tic]
+  if not waiting then
+    waiting = {}
+    log.theirs[tic] = waiting
+  end
+
+  waiting[from] = hash
+end
+
+-- A link conditioner: everything received waits `latency` milliseconds plus up to `jitter` more
+-- before the session sees it, in arrival order, and `loss` (0 to 1) of the unreliable hashes
+-- never arrive. Its randomness is its own, never the game's.
+export type Conditioner = {
+  latency: number,
+  jitter: number,
+  loss: number,
+  seed: number,
+  queue: { { at: number, item: net.Received } },
+  last: number,
+}
+
+function module.conditioner(latency: number, jitter: number, loss: number, seed: number?): Conditioner
+  return { latency = latency, jitter = jitter, loss = loss, seed = seed or 1, queue = {}, last = 0 }
+end
+
+local function random(conditioner: Conditioner): number
+  conditioner.seed = (conditioner.seed * 1103515245 + 12345) % 2147483648
+  return conditioner.seed / 2147483648
+end
+
+-- Passes a received record through the conditioner; `now` is in milliseconds.
+function module.hold(conditioner: Conditioner, now: number, item: net.Received): ()
+  if item.event == 'HASH' and random(conditioner) < conditioner.loss then return end
+
+  local at = math.max(now + conditioner.latency + random(conditioner) * conditioner.jitter, conditioner.last)
+  conditioner.last = at
+  table.insert(conditioner.queue, { at = at, item = item })
+end
+
+-- The next record whose time has come, or nil.
+function module.release(conditioner: Conditioner, now: number): net.Received?
+  local first = conditioner.queue[1]
+  if not first or first.at > now then return nil end
+
+  table.remove(conditioner.queue, 1)
+  return first.item
+end
+
+return module

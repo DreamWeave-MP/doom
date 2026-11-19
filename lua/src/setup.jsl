@@ -34,6 +34,21 @@ function module.definitions(start: Start): { modApi.Definition }
   return list
 end
 
+-- What two peers of a netgame compare before either knows the mode: every ruleset they would
+-- play by (coop, ffa, tdm, in that order) and then the mods, in order.
+function module.negotiated(rulesets: { [string]: modApi.Definition }?, mods: { modApi.Definition }?): { string }
+  local list: { modApi.Definition } = {}
+  for _, mode in { 'coop', 'ffa', 'tdm' } do
+    table.insert(list, (rulesets or rules.definitions)[mode])
+  end
+
+  for _, mod in mods or {} do
+    table.insert(list, mod)
+  end
+
+  return modApi.contentList(list)
+end
+
 -- What a netgame's peers and a save compare: the simulation content, in order.
 function module.content(start: Start): { string }
   return modApi.contentList(module.definitions(start))

@@ -1,482 +1,389 @@
 --!strict
--- Doom's dream-net wire protocol.
+-- @doom/net: DOOM's dream-net wire protocol, version 2.
 --
--- The transport owns no Doom state and retains no Luau buffers: sendEvent copies its
--- payload and pollInto fills a caller-owned buffer. Luau creates and drives servers;
--- dream.udp keeps the signing key private inside server userdata.
+-- The transport is dream.udp (dream-net): authenticated connect tokens the host mints, one
+-- reliable ordered channel for everything that must arrive in order, and one unreliable channel
+-- for state hashes, which a later hash supersedes. The protocol owns no game state; the sessions
+-- in @doom/session decide what every message means.
+--
+--   HELLO     client -> host   who is joining: name, team wanted, the content manifest
+--   WELCOME   host -> client   the slot, the rules, the phase (lobby or game)
+--   REJECT    host -> client   why not, before the host disconnects it
+--   LOBBY     host -> clients  who is in, ready, on which team
+--   READY     client -> host   ready or not, and the team wanted
+--   START     host -> clients  the game everyone starts at tic 0
+--   SNAPSHOT  host -> client   the whole game at a tic, for a player joining late or resyncing
+--   TICS      host -> clients  one tic: its control events and every present player's command
+--   CMD       client -> host   one local tic's command, numbered
+--   HASH      both ways        the state hash after a tic
+--   RESYNC    client -> host   a client that found itself out of step asks for a snapshot
+--   BYE       both ways        leaving, and why
+--   CHAT      both ways        a line of text
+local bytes = require('@dream/bytes')
+local state = require('@doom/state')
+local udp = require('@dream/udp')
 
-local bytes = require("@dream/bytes")
-
--- l3i 2.0 exposes this bridge as @dream/udp. A missing transport
--- is an environment error and must remain visible to the caller.
-local net = require("@dream/udp")
 local module = {}
 
-export type EventName = "TICCMD" | "TIC_BUNDLE" | "STATE_HASH"
-export type TicCmd = {
-    forward: number,
-    side: number,
-    angleTurn: number,
-    consistency: number,
-    chat: number,
-    buttons: number,
-}
-export type TicBundle = {
-    firstTic: number,
-    player: number,
-    commands: { TicCmd },
-}
-export type StateHash = {
-    tic: number,
-    digest: buffer,
-}
-export type EventIds = {
-    TICCMD: integer,
-    TIC_BUNDLE: integer,
-    STATE_HASH: integer,
-}
-export type Protocol = {
-    schema: dream_udp_Schema,
-    events: EventIds,
-}
-export type ClientOptions = {
-    bind: string?,
-}
-export type ServerOptions = {
-    address: string,
-    protocolId: integer,
-    maxClients: number?,
-}
-export type Client = {
-    handle: dream_udp_Client,
-    protocol: Protocol,
-}
-export type Server = {
-    handle: dream_udp_Server,
-    protocol: Protocol,
-}
-export type ClientEvent =
-    { kind: "message", peer: integer, event: EventName, eventId: integer, channel: integer, payload: buffer }
-    | { kind: "connected", peer: integer, clientId: integer }
-    | { kind: "disconnected", peer: integer, reason: string }
-    | { kind: "connectFailed", peer: integer, reason: string }
-export type ServerEvent =
-    { kind: "message", peer: integer, event: EventName, eventId: integer, channel: integer, payload: buffer }
-    | { kind: "connected", peer: integer, clientId: integer }
-    | { kind: "disconnected", peer: integer, reason: string }
-    | { kind: "rejected", peer: integer, clientId: integer, reason: string }
-export type BotOptions = {
-    forward: number?,
-    side: number?,
-    turn: number?,
-    period: number?,
-    attackEvery: number?,
-    chat: number?,
-    consistency: number?,
-    buttons: number?,
+module.SchemaVersion = 2
+module.CodecVersion = 2
+module.ProtocolId = 0x444f6f6d00000002i
+module.CommandSize = 5
+module.MaxPlayers = 4
+module.MaxControlPayload = 16384
+module.MaxSnapshot = 64 * 1024 * 1024
+module.SnapshotPart = 16384
+module.PollBufferSize = 32768
+
+export type EventName =
+  'HELLO'
+  | 'WELCOME'
+  | 'REJECT'
+  | 'LOBBY'
+  | 'READY'
+  | 'START'
+  | 'SNAPSHOT'
+  | 'TICS'
+  | 'CMD'
+  | 'HASH'
+  | 'RESYNC'
+  | 'BYE'
+  | 'CHAT'
+
+local EventNames: { EventName } = {
+  'HELLO',
+  'WELCOME',
+  'REJECT',
+  'LOBBY',
+  'READY',
+  'START',
+  'SNAPSHOT',
+  'TICS',
+  'CMD',
+  'HASH',
+  'RESYNC',
+  'BYE',
+  'CHAT',
 }
 
-module.SCHEMA_VERSION = 1
-module.CODEC_VERSION = 1
-module.TICCMD_SIZE = 8
-module.BUNDLE_HEADER_SIZE = 8
-module.MAX_BUNDLE_TICS = 12
-module.STATE_HASH_SIZE = 37
-module.STATE_DIGEST_SIZE = 32
-module.MAX_EVENT_PAYLOAD = 104
-module.TIC_BUNDLE_MAX_PAYLOAD = 104
-module.POLL_BUFFER_SIZE = 104
-module.PROTOCOL_ID = 0x444f6f6d00000001i
+-- A ticcmd as the simulation reads it.
+export type Command = { forwardmove: number, sidemove: number, angleturn: number, buttons: number }
+
+-- What changes between tics, as the host decided, applied at the start of the tic it rides on.
+export type Control =
+  { kind: 'join', slot: number, team: number? }
+  | { kind: 'leave', slot: number }
+  | { kind: 'map', map: string }
+  | { kind: 'pause', paused: boolean }
+
+export type Tic = { tic: number, controls: { Control }, commands: { [number]: Command } }
+
+export type Protocol = { schema: dream_udp_Schema, ids: { [EventName]: integer }, names: { [integer]: EventName } }
 
 local function fail(message: string): never
-    error("doom.net: " .. message, 2)
+  error(`doom.net: {message}`, 3)
 end
 
+local function whole(value: number, name: string, minimum: number, maximum: number): number
+  if type(value) ~= 'number' or value ~= math.floor(value) or value < minimum or value > maximum then
+    fail(`{name} must be a whole number from {minimum} to {maximum}, not {tostring(value)}`)
+  end
 
-local function requireInteger(value: number, name: string, minimum: number, maximum: number): number
-    if value ~= math.floor(value) or value < minimum or value > maximum then
-        fail(name .. " must be an integer in [" .. tostring(minimum) .. ", " .. tostring(maximum) .. "]")
-    end
-    return value
-end
-
-local function readRange(source: buffer, offset: number, size: number, label: string): number
-    requireInteger(offset, "offset", 0, math.max(0, buffer.len(source)))
-    local finish = offset + size
-    if finish > buffer.len(source) then
-        fail(label .. " is truncated")
-    end
-    return finish
-end
-
-local function validateCmd(cmd: TicCmd): TicCmd
-    requireInteger(cmd.forward, "forward", -128, 127)
-    requireInteger(cmd.side, "side", -128, 127)
-    requireInteger(cmd.angleTurn, "angleTurn", -32768, 32767)
-    requireInteger(cmd.consistency, "consistency", -32768, 32767)
-    requireInteger(cmd.chat, "chat", 0, 255)
-    requireInteger(cmd.buttons, "buttons", 0, 255)
-    return cmd
-end
-
-local function writeCmd(target: buffer, offset: number, cmd: TicCmd): number
-    validateCmd(cmd)
-    local nextOffset = offset + module.TICCMD_SIZE
-    if offset < 0 or offset ~= math.floor(offset) or nextOffset > buffer.len(target) then
-        fail("TICCMD target is too small")
-    end
-    buffer.writei8(target, offset, cmd.forward)
-    buffer.writei8(target, offset + 1, cmd.side)
-    buffer.writei16(target, offset + 2, cmd.angleTurn)
-    buffer.writei16(target, offset + 4, cmd.consistency)
-    buffer.writeu8(target, offset + 6, cmd.chat)
-    buffer.writeu8(target, offset + 7, cmd.buttons)
-    return nextOffset
-end
-
-local function readCmd(source: buffer, offset: number): (TicCmd, number)
-    local nextOffset = readRange(source, offset, module.TICCMD_SIZE, "TICCMD")
-    local cmd: TicCmd = {
-        forward = buffer.readi8(source, offset),
-        side = buffer.readi8(source, offset + 1),
-        angleTurn = buffer.readi16(source, offset + 2),
-        consistency = buffer.readi16(source, offset + 4),
-        chat = buffer.readu8(source, offset + 6),
-        buttons = buffer.readu8(source, offset + 7),
-    }
-    return cmd, nextOffset
-end
-
--- TICCMD is the little-endian wire image of Doom's ticcmd_t:
--- i8 forward, i8 side, i16 angleturn, i16 consistancy, u8 chatchar, u8 buttons.
-function module.writeTicCmd(target: buffer, offset: number, cmd: TicCmd): number
-    return writeCmd(target, offset, cmd)
-end
-
-function module.readTicCmd(source: buffer, offset: number?): (TicCmd, number)
-    return readCmd(source, offset or 0)
-end
-
-function module.packTicCmd(cmd: TicCmd): buffer
-    local target = buffer.create(module.TICCMD_SIZE)
-    writeCmd(target, 0, cmd)
-    return target
-end
-
-function module.unpackTicCmd(source: buffer): TicCmd
-    local cmd, nextOffset = readCmd(source, 0)
-    if nextOffset ~= buffer.len(source) then fail("TICCMD has trailing bytes") end
-    return cmd
-end
-
-local function validateBundle(bundle: TicBundle): number
-    requireInteger(bundle.firstTic, "firstTic", 0, 4294967295)
-    requireInteger(bundle.player, "player", 0, 255)
-    local count = #bundle.commands
-    if count < 1 or count > module.MAX_BUNDLE_TICS then
-        fail("TIC_BUNDLE command count must be in [1, " .. tostring(module.MAX_BUNDLE_TICS) .. "]")
-    end
-    return count
-end
-
--- TIC_BUNDLE header: u8 codec, u8 player, u8 count, u8 reserved, u32 firstTic;
--- followed by count TICCMD records. The reserved byte makes the header extensible
--- without changing command alignment. All integer fields are little-endian.
-function module.writeTicBundle(target: buffer, offset: number, bundle: TicBundle): number
-    local count = validateBundle(bundle)
-    local needed = module.BUNDLE_HEADER_SIZE + count * module.TICCMD_SIZE
-    if offset < 0 or offset ~= math.floor(offset) or offset + needed > buffer.len(target) then
-        fail("TIC_BUNDLE target is too small")
-    end
-    buffer.writeu8(target, offset, module.CODEC_VERSION)
-    buffer.writeu8(target, offset + 1, bundle.player)
-    buffer.writeu8(target, offset + 2, count)
-    buffer.writeu8(target, offset + 3, 0)
-    buffer.writeu32(target, offset + 4, bundle.firstTic)
-    local at = offset + module.BUNDLE_HEADER_SIZE
-    for _, cmd in bundle.commands do
-        at = writeCmd(target, at, cmd)
-    end
-    return at
-end
-
-function module.readTicBundle(source: buffer, offset: number?, length: number?): (TicBundle, number)
-    local start = offset or 0
-    local finish = if length then start + length else buffer.len(source)
-    if finish < start or finish > buffer.len(source) then fail("TIC_BUNDLE range is invalid") end
-    readRange(source, start, module.BUNDLE_HEADER_SIZE, "TIC_BUNDLE header")
-    if buffer.readu8(source, start) ~= module.CODEC_VERSION then fail("unsupported TIC_BUNDLE codec") end
-    local count = buffer.readu8(source, start + 2)
-    if count < 1 or count > module.MAX_BUNDLE_TICS then fail("invalid TIC_BUNDLE command count") end
-    local needed = module.BUNDLE_HEADER_SIZE + count * module.TICCMD_SIZE
-    if start + needed > finish then fail("TIC_BUNDLE is truncated") end
-    local commands: { TicCmd } = {}
-    local at = start + module.BUNDLE_HEADER_SIZE
-    for i = 1, count do
-        local cmd
-        cmd, at = readCmd(source, at)
-        commands[i] = cmd
-    end
-    return { firstTic = buffer.readu32(source, start + 4), player = buffer.readu8(source, start + 1), commands = commands }, at
-end
-
-function module.packTicBundle(bundle: TicBundle): buffer
-    local count = validateBundle(bundle)
-    local target = buffer.create(module.BUNDLE_HEADER_SIZE + count * module.TICCMD_SIZE)
-    module.writeTicBundle(target, 0, bundle)
-    return target
-end
-
-function module.unpackTicBundle(source: buffer): TicBundle
-    local bundle, nextOffset = module.readTicBundle(source)
-    if nextOffset ~= buffer.len(source) then fail("TIC_BUNDLE has trailing bytes") end
-    return bundle
-end
-
-function module.hashState(state: buffer | string): buffer
-    return bytes.digest(state, "blake3")
-end
-
--- STATE_HASH: u8 codec, u32 tic, 32 raw BLAKE3 digest bytes.
-function module.writeStateHash(target: buffer, offset: number, tic: number, digest: buffer): number
-    requireInteger(tic, "tic", 0, 4294967295)
-    if offset < 0 or offset ~= math.floor(offset) or offset + module.STATE_HASH_SIZE > buffer.len(target) then
-        fail("STATE_HASH target is too small")
-    end
-    if buffer.len(digest) ~= module.STATE_DIGEST_SIZE then fail("STATE_HASH digest must be 32 bytes") end
-    buffer.writeu8(target, offset, module.CODEC_VERSION)
-    buffer.writeu32(target, offset + 1, tic)
-    buffer.copy(target, offset + 5, digest, 0, module.STATE_DIGEST_SIZE)
-    return offset + module.STATE_HASH_SIZE
-end
-
-function module.readStateHash(source: buffer, offset: number?): (StateHash, number)
-    local at = offset or 0
-    local nextOffset = readRange(source, at, module.STATE_HASH_SIZE, "STATE_HASH")
-    if buffer.readu8(source, at) ~= module.CODEC_VERSION then fail("unsupported STATE_HASH codec") end
-    local digest = buffer.create(module.STATE_DIGEST_SIZE)
-    buffer.copy(digest, 0, source, at + 5, module.STATE_DIGEST_SIZE)
-    return { tic = buffer.readu32(source, at + 1), digest = digest }, nextOffset
-end
-
-function module.packStateHash(tic: number, state: buffer | string): buffer
-    local target = buffer.create(module.STATE_HASH_SIZE)
-    module.writeStateHash(target, 0, tic, module.hashState(state))
-    return target
-end
-
-function module.unpackStateHash(source: buffer): StateHash
-    local hash, nextOffset = module.readStateHash(source)
-    if nextOffset ~= buffer.len(source) then fail("STATE_HASH has trailing bytes") end
-    return hash
-end
-
-local function eventIds(schema: dream_udp_Schema): EventIds
-    local missing = "protocol schema is missing a Doom event"
-    local tic = schema:eventId("TICCMD") or fail(missing)
-    local bundle = schema:eventId("TIC_BUNDLE") or fail(missing)
-    local state = schema:eventId("STATE_HASH") or fail(missing)
-    return { TICCMD = tic, TIC_BUNDLE = bundle, STATE_HASH = state }
+  return value
 end
 
 function module.protocol(): Protocol
-    local schema = net.schema({
-        version = module.SCHEMA_VERSION,
-        maxMessagesPerPacket = 64,
-        channels = {
-            { name = "reliable", delivery = "reliableOrdered", capacity = 256 },
-            { name = "state", delivery = "unreliableUnordered", capacity = 64, overflow = "dropOldest" },
-        },
-        events = {
-            { name = "TICCMD", channel = "reliable", maxPayload = module.TICCMD_SIZE, codecVersion = module.CODEC_VERSION },
-            { name = "TIC_BUNDLE", channel = "reliable", maxPayload = module.MAX_EVENT_PAYLOAD, codecVersion = module.CODEC_VERSION },
-            { name = "STATE_HASH", channel = "state", maxPayload = module.STATE_HASH_SIZE, codecVersion = module.CODEC_VERSION },
-        },
-    })
-    return { schema = schema, events = eventIds(schema) }
+  local control = { channel = 'game', maxPayload = module.MaxControlPayload, codecVersion = module.CodecVersion }
+  local events = {}
+  for _, name in EventNames do
+    local event = table.clone(control) :: { [string]: any }
+    event.name = name
+    if name == 'SNAPSHOT' then event.maxPayload = 12 + module.SnapshotPart end
+    if name == 'HASH' then event.channel, event.maxPayload = 'hash', 8 end
+    if name == 'CMD' then event.maxPayload = 4 + module.CommandSize end
+    table.insert(events, event)
+  end
+
+  local schema = udp.schema {
+    version = module.SchemaVersion,
+    maxMessagesPerPacket = 64,
+    channels = {
+      { name = 'game', delivery = 'reliableOrdered', capacity = 4096 },
+      { name = 'hash', delivery = 'unreliableUnordered', capacity = 64, overflow = 'dropOldest' },
+    },
+    events = events,
+  }
+
+  local ids: { [EventName]: integer } = {}
+  local names: { [integer]: EventName } = {}
+  for _, name in EventNames do
+    local id = schema:eventId(name) or fail(`the schema lost the event {name}`)
+    ids[name], names[id] = id, name
+  end
+
+  return { schema = schema, ids = ids, names = names }
 end
 
-function module.newClient(protocol: Protocol, options: ClientOptions?): Client
-    local settings: ClientOptions = options or {}
-    return {
-        handle = net.client({ schema = protocol.schema, bind = settings.bind }),
-        protocol = protocol,
-    }
+-- Commands -----------------------------------------------------------------------------------
+
+-- A ticcmd on the wire: i8 forwardmove, i8 sidemove, i16 angleturn, u8 buttons, little-endian.
+function module.writeCommand(target: buffer, offset: number, command: Command): number
+  buffer.writei8(target, offset, whole(command.forwardmove, 'forwardmove', -128, 127))
+  buffer.writei8(target, offset + 1, whole(command.sidemove, 'sidemove', -128, 127))
+  buffer.writei16(target, offset + 2, whole(command.angleturn, 'angleturn', -32768, 32767))
+  buffer.writeu8(target, offset + 4, whole(command.buttons, 'buttons', 0, 255))
+  return offset + module.CommandSize
 end
 
-function module.newServer(protocol: Protocol, options: ServerOptions): Server
-    local handle = net.server({
-        schema = protocol.schema,
-        address = options.address,
-        protocolId = options.protocolId,
-        maxClients = options.maxClients,
-    })
-    return module.wrapServer(handle, protocol)
+function module.readCommand(source: buffer, offset: number): Command
+  if offset + module.CommandSize > buffer.len(source) then fail('a command is cut short') end
+
+  return {
+    forwardmove = buffer.readi8(source, offset),
+    sidemove = buffer.readi8(source, offset + 1),
+    angleturn = buffer.readi16(source, offset + 2),
+    buttons = buffer.readu8(source, offset + 4),
+  }
 end
 
-function module.wrapServer(handle: dream_udp_Server, protocol: Protocol): Server
-    return { handle = handle, protocol = protocol }
+function module.neutral(): Command
+  return { forwardmove = 0, sidemove = 0, angleturn = 0, buttons = 0 }
 end
 
-local function eventName(protocol: Protocol, id: integer): EventName
-    local name = protocol.schema:eventName(id)
-    if name == "TICCMD" or name == "TIC_BUNDLE" or name == "STATE_HASH" then return name end
-    return fail("transport returned an unknown Doom event id " .. tostring(id))
+-- CMD: u32 sequence (the sender's local tic count), then the command.
+function module.encodeCmd(sequence: number, command: Command): buffer
+  local target = buffer.create(4 + module.CommandSize)
+  buffer.writeu32(target, 0, whole(sequence, 'sequence', 0, 4294967295))
+  module.writeCommand(target, 4, command)
+  return target
 end
 
-local function clientSend(handle: dream_udp_Client, id: integer, payload: buffer): ()
-    handle:sendEvent(id, payload)
+function module.decodeCmd(source: buffer): (number, Command)
+  if buffer.len(source) ~= 4 + module.CommandSize then fail('CMD has the wrong size') end
+
+  return buffer.readu32(source, 0), module.readCommand(source, 4)
 end
 
-local function serverSend(handle: dream_udp_Server, peer: integer, id: integer, payload: buffer): ()
-    handle:sendEvent(peer, id, payload)
-end
+-- Tics ---------------------------------------------------------------------------------------
 
-function module.clientConnect(client: Client, token: buffer | string): ()
-    local rawToken: buffer | string = token
-    if type(token) == "string" and #token ~= net.CONNECT_TOKEN_BYTES then
-        rawToken = bytes.fromBase64(token)
+local ControlKinds = { join = 1, leave = 2, map = 3, pause = 4 }
+
+-- TICS: u32 tic, u8 slots present (bit per slot), u8 control count, the controls (u8 kind and
+-- its operand: a slot, a map name as u8 length and bytes, a pause flag), then each present
+-- slot's command in slot order.
+function module.encodeTic(tic: Tic): buffer
+  local parts = { string.pack('<I4', whole(tic.tic, 'tic', 0, 4294967295)) }
+  local mask = 0
+  for slot = 0, module.MaxPlayers - 1 do
+    if tic.commands[slot] then mask += bit32.lshift(1, slot) end
+  end
+
+  if #tic.controls > 255 then fail('a tic carries at most 255 controls') end
+
+  table.insert(parts, string.pack('<BB', mask, #tic.controls))
+  for _, control in tic.controls do
+    local kind = ControlKinds[control.kind] or fail(`unknown control {tostring(control.kind)}`)
+    if control.kind == 'join' then
+      local slot = whole(control.slot, 'slot', 0, module.MaxPlayers - 1)
+      table.insert(parts, string.pack('<BBB', kind, slot, whole(control.team or 0, 'team', 0, 2)))
+    elseif control.kind == 'leave' then
+      table.insert(parts, string.pack('<BB', kind, whole(control.slot, 'slot', 0, module.MaxPlayers - 1)))
+    elseif control.kind == 'map' then
+      if #control.map > 8 or not string.match(control.map, '^[%w_]+$') then fail(`'{control.map}' is not a map name`) end
+
+      table.insert(parts, string.pack('<Bs1', kind, control.map))
+    elseif control.kind == 'pause' then
+      table.insert(parts, string.pack('<BB', kind, if control.paused then 1 else 0))
     end
-    if (if type(rawToken) == "buffer" then buffer.len(rawToken) else #rawToken) ~= net.CONNECT_TOKEN_BYTES then
-        fail(`connect token must contain {net.CONNECT_TOKEN_BYTES} bytes (or be base64 text)`)
+  end
+
+  local commands = buffer.create(module.CommandSize)
+  for slot = 0, module.MaxPlayers - 1 do
+    local command = tic.commands[slot]
+    if not command then continue end
+
+    module.writeCommand(commands, 0, command)
+    table.insert(parts, buffer.tostring(commands))
+  end
+
+  return buffer.fromstring(table.concat(parts))
+end
+
+function module.decodeTic(source: buffer): Tic
+  local length = buffer.len(source)
+  if length < 6 then fail('TICS is cut short') end
+
+  local tic, mask, count = buffer.readu32(source, 0), buffer.readu8(source, 4), buffer.readu8(source, 5)
+  local at = 6
+  local function byte(): number
+    if at >= length then fail('TICS controls are cut short') end
+
+    at += 1
+    return buffer.readu8(source, at - 1)
+  end
+
+  local controls: { Control } = {}
+  for _ = 1, count do
+    local kind = byte()
+    if kind == 4 then
+      table.insert(controls, { kind = 'pause', paused = byte() ~= 0 } :: Control)
+    elseif kind == 3 then
+      local size = byte()
+      if at + size > length then fail('TICS map change is cut short') end
+
+      table.insert(controls, { kind = 'map', map = buffer.readstring(source, at, size) } :: Control)
+      at += size
+    elseif kind == 1 or kind == 2 then
+      local slot = byte()
+      if slot >= module.MaxPlayers then fail(`TICS names slot {slot}`) end
+
+      if kind == 2 then
+        table.insert(controls, { kind = 'leave', slot = slot } :: Control)
+      else
+        local team = byte()
+        table.insert(controls, { kind = 'join', slot = slot, team = if team > 0 then team else nil } :: Control)
+      end
+    else
+      fail(`TICS has an unknown control {kind}`)
     end
-    client.handle:connect(rawToken)
+  end
+
+  local commands: { [number]: Command } = {}
+  for slot = 0, module.MaxPlayers - 1 do
+    if bit32.band(mask, bit32.lshift(1, slot)) == 0 then continue end
+
+    commands[slot] = module.readCommand(source, at)
+    at += module.CommandSize
+  end
+
+  if at ~= length then fail('TICS has bytes after its commands') end
+
+  return { tic = tic, controls = controls, commands = commands }
 end
 
-function module.serverConnectToken(server: Server, clientId: integer): buffer
-    return server.handle:connectToken(clientId)
+-- Hashes -------------------------------------------------------------------------------------
+
+-- HASH: u32 tic, u32 state hash (@doom/play's hash, as a number).
+function module.encodeHash(tic: number, hash: string): buffer
+  local target = buffer.create(8)
+  buffer.writeu32(target, 0, whole(tic, 'tic', 0, 4294967295))
+  buffer.writeu32(target, 4, tonumber(hash, 16) or fail(`'{hash}' is not a hash`))
+  return target
 end
 
-function module.serverConnectTokenBase64(server: Server, clientId: integer): string
-    return bytes.toBase64(module.serverConnectToken(server, clientId))
+function module.decodeHash(source: buffer): (number, string)
+  if buffer.len(source) ~= 8 then fail('HASH has the wrong size') end
+
+  return buffer.readu32(source, 0), string.format('%08x', buffer.readu32(source, 4))
 end
 
-function module.clientDisconnect(client: Client): ()
-    client.handle:disconnect()
+-- A snapshot is the save compressed with Zstandard and sent in SNAPSHOT parts small enough for
+-- one event: u32 tic, u32 the compressed size, u32 this part's offset, then its bytes.
+function module.encodeSnapshot(tic: number, save: buffer): { buffer }
+  local packed = bytes.zstdCompress(save)
+  local total = buffer.len(packed)
+  local parts = {}
+  local offset = 0
+  repeat
+    local size = math.min(module.SnapshotPart, total - offset)
+    local part = buffer.create(12 + size)
+    buffer.writeu32(part, 0, whole(tic, 'tic', 0, 4294967295))
+    buffer.writeu32(part, 4, total)
+    buffer.writeu32(part, 8, offset)
+    buffer.copy(part, 12, packed, offset, size)
+    table.insert(parts, part)
+    offset += size
+  until offset >= total
+
+  return parts
 end
 
-function module.clientUpdate(client: Client): ()
-    client.handle:update()
+export type Assembly = { tic: number, total: number, data: buffer, received: number }
+
+-- Adds one part to `assembly` (nil to start one); returns it, and the whole save once the last
+-- part is in. Parts arrive in order on the reliable channel; one out of order is an error.
+function module.addSnapshotPart(assembly: Assembly?, source: buffer): (Assembly, buffer?)
+  if buffer.len(source) < 12 then fail('SNAPSHOT is cut short') end
+
+  local tic, total, offset = buffer.readu32(source, 0), buffer.readu32(source, 4), buffer.readu32(source, 8)
+  if total > module.MaxSnapshot then fail('SNAPSHOT is too large') end
+
+  local current: Assembly
+  if assembly and offset ~= 0 and assembly.tic == tic then
+    current = assembly
+  else
+    current = { tic = tic, total = total, data = buffer.create(total), received = 0 }
+  end
+
+  local size = buffer.len(source) - 12
+  if offset ~= current.received or offset + size > total then fail('SNAPSHOT parts arrived out of order') end
+
+  buffer.copy(current.data, offset, source, 12, size)
+  current.received += size
+  if current.received < total then return current, nil end
+
+  return current, bytes.zstdDecompress(current.data, { maxSize = 256 * 1024 * 1024 })
 end
 
-function module.clientFlush(client: Client): ()
-    client.handle:flush()
+-- Everything else is a table of plain values in @doom/state's canonical encoding.
+function module.encodeValue(value: any): buffer
+  local encoded = state.encode(value)
+  if buffer.len(encoded) > module.MaxControlPayload then fail('a control message is too large') end
+
+  return encoded
 end
 
-function module.clientPoll(client: Client, scratch: buffer): ClientEvent?
-    local kind, peer, a, b, c = client.handle:pollInto(scratch)
-    if kind == nil then return nil end
-    if kind == "message" then
-        local eventId = a :: integer
-        local channel = b :: integer
-        local size = c :: number
-        local payload = buffer.create(size)
-        buffer.copy(payload, 0, scratch, 0, size)
-        return { kind = "message", peer = peer :: integer, event = eventName(client.protocol, eventId), eventId = eventId, channel = channel, payload = payload }
-    elseif kind == "connected" then
-        return { kind = "connected", peer = peer :: integer, clientId = a :: integer }
-    elseif kind == "disconnected" then
-        return { kind = "disconnected", peer = peer :: integer, reason = a :: string }
-    elseif kind == "connectFailed" then
-        return { kind = "connectFailed", peer = peer :: integer, reason = a :: string }
-    end
-    return fail("transport returned unknown client poll kind " .. tostring(kind))
+function module.decodeValue(source: buffer): any
+  return state.decode(source)
 end
 
-function module.serverUpdate(server: Server): ()
-    server.handle:update()
+-- Transport ----------------------------------------------------------------------------------
+
+export type Received = {
+  kind: 'message' | 'connected' | 'disconnected' | 'rejected' | 'connectFailed',
+  peer: integer,
+  event: EventName?,
+  payload: buffer?,
+  clientId: number?,
+  reason: string?,
+}
+
+-- One record from a server's or a client's queue, or nil when it is empty. A message names its
+-- event and carries its payload, copied out of `scratch`.
+function module.poll(protocol: Protocol, handle: dream_udp_Server | dream_udp_Client, scratch: buffer): Received?
+  local kind, peer, first, second, third = (handle :: any):pollInto(scratch)
+  if kind == nil then return nil end
+
+  if kind == 'message' then
+    local event = protocol.names[first :: integer]
+    if not event then fail(`an unknown event id {tostring(first)}`) end
+
+    return { kind = 'message', peer = peer :: integer, event = event, payload = bytes.slice(scratch, 0, third :: number) }
+  elseif kind == 'connected' then
+    return { kind = 'connected', peer = peer :: integer, clientId = integer.tonumber(first :: integer) }
+  elseif kind == 'disconnected' then
+    return { kind = 'disconnected', peer = peer :: integer, reason = tostring(first) }
+  elseif kind == 'rejected' then
+    return { kind = 'rejected', peer = peer :: integer, clientId = integer.tonumber(first :: integer), reason = tostring(second) }
+  elseif kind == 'connectFailed' then
+    return { kind = 'connectFailed', peer = peer :: integer, reason = tostring(first) }
+  end
+
+  return fail(`the transport returned '{tostring(kind)}'`)
 end
 
-function module.serverFlush(server: Server): ()
-    server.handle:flush()
+-- A connect token as text a person can pass along, and back.
+function module.tokenText(token: buffer): string
+  return bytes.toBase64(token)
 end
 
-function module.serverPoll(server: Server, scratch: buffer): ServerEvent?
-    local kind, peer, a, b, c = server.handle:pollInto(scratch)
-    if kind == nil then return nil end
-    if kind == "message" then
-        local eventId = a :: integer
-        local channel = b :: integer
-        local size = c :: number
-        local payload = buffer.create(size)
-        buffer.copy(payload, 0, scratch, 0, size)
-        return { kind = "message", peer = peer :: integer, event = eventName(server.protocol, eventId), eventId = eventId, channel = channel, payload = payload }
-    elseif kind == "connected" then
-        return { kind = "connected", peer = peer :: integer, clientId = a :: integer }
-    elseif kind == "disconnected" then
-        return { kind = "disconnected", peer = peer :: integer, reason = a :: string }
-    elseif kind == "rejected" then
-        return { kind = "rejected", peer = peer :: integer, clientId = a :: integer, reason = b :: string }
-    end
-    return fail("transport returned unknown server poll kind " .. tostring(kind))
-end
+function module.tokenBytes(text: string): buffer
+  local token = bytes.fromBase64((string.gsub(text, '%s', '')))
+  if buffer.len(token) ~= udp.CONNECT_TOKEN_BYTES then
+    fail(`a connect token is {udp.CONNECT_TOKEN_BYTES} bytes, and this one is {buffer.len(token)}`)
+  end
 
-function module.clientSendTicCmd(client: Client, cmd: TicCmd): ()
-    clientSend(client.handle, client.protocol.events.TICCMD, module.packTicCmd(cmd))
-end
-
-function module.clientSendTicBundle(client: Client, bundle: TicBundle): ()
-    clientSend(client.handle, client.protocol.events.TIC_BUNDLE, module.packTicBundle(bundle))
-end
-
-function module.clientSendStateHash(client: Client, tic: number, state: buffer | string): ()
-    clientSend(client.handle, client.protocol.events.STATE_HASH, module.packStateHash(tic, state))
-end
-
-function module.serverSendTicCmd(server: Server, peer: integer, cmd: TicCmd): ()
-    serverSend(server.handle, peer, server.protocol.events.TICCMD, module.packTicCmd(cmd))
-end
-
-function module.serverSendTicBundle(server: Server, peer: integer, bundle: TicBundle): ()
-    serverSend(server.handle, peer, server.protocol.events.TIC_BUNDLE, module.packTicBundle(bundle))
-end
-
-function module.serverSendStateHash(server: Server, peer: integer, tic: number, state: buffer | string): ()
-    serverSend(server.handle, peer, server.protocol.events.STATE_HASH, module.packStateHash(tic, state))
-end
-
-function module.serverBroadcastTicBundle(server: Server, bundle: TicBundle): integer
-    return server.handle:broadcast(server.protocol.events.TIC_BUNDLE, module.packTicBundle(bundle))
-end
-
-function module.serverBroadcastStateHash(server: Server, tic: number, state: buffer | string): integer
-    return server.handle:broadcast(server.protocol.events.STATE_HASH, module.packStateHash(tic, state))
-end
-
--- A stateless deterministic square-patrol bot. No shared bot state is kept: the
--- caller supplies the tic, so replay and tests produce the same command sequence.
-function module.botCommand(tic: number, options: BotOptions?): TicCmd
-    requireInteger(tic, "tic", 0, 4294967295)
-    local settings: BotOptions = options or {}
-    local period = settings.period or 35
-    requireInteger(period, "period", 1, 4294967295)
-    local phase = math.floor(tic / period) % 4
-    local forward = if settings.forward == nil then 50 else settings.forward
-    local side = if settings.side == nil then 50 else settings.side
-    local attackEvery = settings.attackEvery or 0
-    if attackEvery < 0 or attackEvery ~= math.floor(attackEvery) then fail("attackEvery must be a non-negative integer") end
-    local buttons = settings.buttons or 0
-    if attackEvery > 0 and tic % attackEvery == 0 then buttons = bit32.bor(buttons, 1) end
-    local signedForward = if phase == 0 then forward elseif phase == 2 then -forward else 0
-    local signedSide = if phase == 1 then side elseif phase == 3 then -side else 0
-    return validateCmd({
-        forward = signedForward,
-        side = signedSide,
-        angleTurn = settings.turn or 0,
-        consistency = settings.consistency or 0,
-        chat = settings.chat or 0,
-        buttons = buttons,
-    })
-end
-
-function module.botBundle(player: number, firstTic: number, count: number, options: BotOptions?): TicBundle
-    requireInteger(player, "player", 0, 255)
-    requireInteger(firstTic, "firstTic", 0, 4294967295)
-    requireInteger(count, "count", 1, module.MAX_BUNDLE_TICS)
-    if firstTic + count - 1 > 4294967295 then fail("bot bundle tic range exceeds u32") end
-    local commands: { TicCmd } = {}
-    for i = 1, count do commands[i] = module.botCommand(firstTic + i - 1, options) end
-    return { firstTic = firstTic, player = player, commands = commands }
+  return token
 end
 
 return module
