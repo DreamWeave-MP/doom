@@ -23,6 +23,7 @@ local render = require '@doom/render'
 local save = require '@doom/save'
 local state = require '@doom/state'
 local textureModule = require '@doom/texture'
+local view = require '@doom/view'
 local wadModule = require '@doom/wad'
 
 -- A build without the verified toolchain runs Luau slower than a release does, so a number from
@@ -326,10 +327,14 @@ local function renderWorkloads(wad: wadModule.Wad)
   end, Pinned['render: automap of E1M1'])
 
   workload('render: view of E1M1', function()
-    local map = mapModule.load(wad, 'E1M1')
-    local start = mapModule.playerStart(map, 1)
+    -- One tic puts the player's eyes at their height.
+    local game = play.new(wad, { mapName = 'E1M1' })
+    play.tick()
+    local renderer = view.new(wad)
+    local frame = render.frame()
     return function(): unknown
-      return checksum((render.view(map, wad, start.x, start.y, start.angle)).pixels)
+      view.render(renderer, game, 0, frame)
+      return checksum(frame.pixels)
     end
   end, Pinned['render: view of E1M1'])
 end

@@ -4,12 +4,10 @@
 -- The software renderer draws each view into DOOM's indexed 8-bit frame as it always has; the
 -- frames are laid side by side in one indexed texture, which the GPU colors through the palette
 -- at the window's size. Every show draws the views again and pumps the window.
-local mapModule = require('@doom/map')
-local render = require('@doom/render')
+local view = require('@doom/view')
 
 local shader = jess.shader
 
-local FracUnit = 65536
 local FrameWidth, FrameHeight = 320, 200
 
 local module = {}
@@ -38,20 +36,6 @@ local function paletted(width: number, height: number, columns: number, rows: nu
       return shader.load(input.material.palette, shader.vec2u(index, shader.uint(0)), 0)
     end,
   }
-end
-
--- Where slot `slot` stands and looks, and every other thing it can see drawn.
-local function viewOf(game: any, slot: number): (number, number, number, { any })
-  local own = game.players[slot].mo
-  local things = {}
-  local cap = game.thinkercap
-  local thinker = cap.next
-  while thinker ~= cap do
-    if thinker.think == 'mobj' and thinker ~= own then table.insert(things, thinker) end
-    thinker = thinker.next
-  end
-
-  return own.x / FracUnit, own.y / FracUnit, own.angle * 360 / 4294967296, things
 end
 
 -- Opens a window for `slots` players' views, two across, `scale` window pixels to a frame pixel.
@@ -112,44 +96,43 @@ function module.open(slots: number, scale: number?, title: string?): any
     slots = slots,
     pixels = buffer.create(FrameWidth * columns * FrameHeight * rows),
     colors = buffer.create(1024),
-    map = nil,
-    mapName = nil,
+    frame = { pixels = buffer.create(FrameWidth * FrameHeight), width = FrameWidth, height = FrameHeight },
+    wad = nil,
   }
 end
 
--- Draws every slot's view of `game` into the window. False once the person closed it.
+-- Draws every slot's view of `game` into the window, each the whole screen with the weapon in
+-- their hands. False once the person closed it.
 function module.show(spectator: any, game: any): boolean
   if not spectator.window.open then return false end
 
-  if spectator.mapName ~= game.mapname then
-    spectator.map, spectator.mapName = mapModule.load(game.wad, game.mapname), game.mapname
+  local wad = game.wad
+  if spectator.wad ~= wad then
+    local playpal = wad:read('PLAYPAL')
+    for entry = 0, 255 do
+      buffer.writeu8(spectator.colors, entry * 4, buffer.readu8(playpal, entry * 3))
+      buffer.writeu8(spectator.colors, entry * 4 + 1, buffer.readu8(playpal, entry * 3 + 1))
+      buffer.writeu8(spectator.colors, entry * 4 + 2, buffer.readu8(playpal, entry * 3 + 2))
+      buffer.writeu8(spectator.colors, entry * 4 + 3, 255)
+    end
+
+    spectator.palette:write(spectator.colors)
+    spectator.wad = wad
   end
 
+  local renderer = view.new(wad)
+  local frame = spectator.frame
   local stride = FrameWidth * spectator.columns
-  local palette = nil
   for slot = 0, spectator.slots - 1 do
     local player = game.players[slot]
     if not (player and player.mo) then continue end
 
-    local east, north, angle, things = viewOf(game, slot)
-    local frame, colors = render.view(spectator.map, game.wad, east, north, angle, things)
-    palette = colors
+    view.render(renderer, game, slot, frame, { size = 11 })
     local left = (slot % spectator.columns) * FrameWidth
     local top = (slot // spectator.columns) * FrameHeight
     for row = 0, FrameHeight - 1 do
       buffer.copy(spectator.pixels, (top + row) * stride + left, frame.pixels, row * FrameWidth, FrameWidth)
     end
-  end
-
-  if palette then
-    for entry = 0, 255 do
-      buffer.writeu8(spectator.colors, entry * 4, buffer.readu8(palette.rgb, entry * 3))
-      buffer.writeu8(spectator.colors, entry * 4 + 1, buffer.readu8(palette.rgb, entry * 3 + 1))
-      buffer.writeu8(spectator.colors, entry * 4 + 2, buffer.readu8(palette.rgb, entry * 3 + 2))
-      buffer.writeu8(spectator.colors, entry * 4 + 3, 255)
-    end
-
-    spectator.palette:write(spectator.colors)
   end
 
   spectator.frames:write(spectator.pixels)
