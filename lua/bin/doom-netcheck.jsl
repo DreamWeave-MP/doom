@@ -11,6 +11,8 @@
 local fs = require('@dream/fs')
 local json = require('@jess/json')
 local process = require('@dream/process')
+-- The synthetic WAD writer, by path: this script runs without the package activated.
+local testing = require('../src/testing')
 
 local arguments = { ... }
 local iwad = arguments[1] or 'doom2.wad'
@@ -174,6 +176,24 @@ local function agree(scenario: string, reports: { [string]: any }, names: { stri
   end
 end
 
+-- Every report named in `names` saw the host's game: the same monsters killed and left, the same
+-- pickups, the same player deaths, and the same maps in the same order.
+local function sameGame(scenario: string, reports: { [string]: any }, names: { string }): ()
+  local host = reports.host
+  if not host then return end
+
+  for _, name in names do
+    local report = reports[name]
+    if not report then continue end
+
+    for _, field in { 'kills', 'items', 'monstersAlive', 'playerDeaths', 'respawns' } do
+      check(scenario, report[field] == host[field], `{name} counts {field} {report[field]}, the host {host[field]}`)
+    end
+
+    check(scenario, json.encodeTable(report.maps) == json.encodeTable(host.maps), `{name} played maps {json.encodeTable(report.maps)}, the host {json.encodeTable(host.maps)}`)
+  end
+end
+
 local Scenarios: { { string } } = {}
 local function scenario(name: string, body: () -> ()): ()
   if next(only) and not only[name] then return end
@@ -198,8 +218,47 @@ scenario('coop-4-bad-link', function()
     return { '-latency', '60', '-jitter', '40', '-loss', '0.3' }, nil
   end))
   agree('coop-4-bad-link', reports, { 'player2', 'player3', 'player4' }, Tics)
+  sameGame('coop-4-bad-link', reports, { 'player2', 'player3', 'player4' })
+  check('coop-4-bad-link', reports.host and reports.host.totalKills > 0, 'the map had no monsters')
+  check('coop-4-bad-link', reports.host and reports.host.kills > 0, 'the four players killed no monsters')
   check('coop-4-bad-link', reports.host and reports.host.mismatches == 0, 'the host saw a hash mismatch')
   check('coop-4-bad-link', reports.host and #reports.host.present == 4 and reports.host.present[4], 'not all four players were in')
+end)
+
+scenario('coop-exit', function()
+  local names = { 'player2', 'player3', 'player4' }
+  local reports = run('coop-exit', session('coop', 4, Tics * 2, { '-exit-at', '350' }))
+  agree('coop-exit', reports, names, Tics * 2)
+  sameGame('coop-exit', reports, names)
+  for _, name in { 'host', 'player2', 'player3', 'player4' } do
+    local report = reports[name]
+    check('coop-exit', report ~= nil and report.map == 'MAP02' and report.gamestate == 'level', `{name} is not playing MAP02 together: {report and report.map} {report and report.gamestate}`)
+    check('coop-exit', report ~= nil and report.intermissions == 1, `{name} saw {report and report.intermissions} intermissions, not one shared one`)
+    check('coop-exit', report ~= nil and report.present[4] == true, `{name} lost a player on the way`)
+  end
+
+  check('coop-exit', reports.host and json.encodeTable(reports.host.maps) == '["MAP01","MAP02"]', `the host played {reports.host and json.encodeTable(reports.host.maps)}`)
+end)
+
+scenario('coop-respawn', function()
+  -- MAP01 replaced by one room whose floor hurts 20 points every 32 tics: every player dies, and
+  -- respawns at their own start, over and over.
+  local hurt = testing.roomLumps({
+    things = { { 128, 64, 90, 1 }, { 384, 64, 90, 2 }, { 128, 448, 270, 3 }, { 384, 448, 270, 4 } },
+    sectorSpecial = 16,
+  }, 'MAP01')
+  local path = testing.writeWad('hurt.wad', hurt)
+  local names = { 'player2', 'player3', 'player4' }
+  local reports = run('coop-respawn', session('coop', 4, Tics * 2, { '-file', path, '-map', 'MAP01' }, function(): ({ string }, number?)
+    return { '-file', path }, nil
+  end))
+  agree('coop-respawn', reports, names, Tics * 2)
+  sameGame('coop-respawn', reports, names)
+  local host = reports.host
+  check('coop-respawn', host ~= nil and host.playerDeaths >= 8, `only {host and host.playerDeaths} players died`)
+  check('coop-respawn', host ~= nil and host.respawns >= 4, `only {host and host.respawns} players respawned`)
+  check('coop-respawn', host ~= nil and host.present[4] == true, 'a player was lost dying')
+  testing.remove('hurt.wad')
 end)
 
 scenario('ffa-4', function()

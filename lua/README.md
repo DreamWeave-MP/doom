@@ -188,19 +188,21 @@ The headless tools in `bin/doom.jsl` (`info`, `demo`, `statehash`, `save`, `load
 
 ## Checks
 
-    jess package test lua                 # 122 tests, run from the package source and its JPK
+    jess package test lua                 # 130 tests, run from the package source and its JPK
     jess workspace test                   # the package and both example mods
     jess package check lua                # strict types, every file
     jess run --trusted lua/bin/doom-stylecheck.jsl
     jess run --trusted lua/bin/doom-netcheck.jsl doom2.wad
     jess run --package lua --capability filesystem.read lua/bin/doom-profile.jsl
 
-The IWAD tests (all thirteen built-in demos in sync, rendering, the status bar, the intermission
-and finale, sound through a whole demo) run when the IWADs are in the folder you test from, and
+The IWAD tests (all thirteen built-in demos in sync, every map of every IWAD loaded, run and
+drawn, each campaign walked through its exits, interludes and secret levels to its finale,
+rendering, the status bar, the intermission and finale, sound through a whole demo) run when the IWADs are in the folder you test from, and
 pass without them. `doom-netcheck` is the multiplayer acceptance run: real sessions between
-separate jess processes on loopback, 2 and 4 players in every mode, a bad link, a late join, a
-leave, a timeout, a forced desync, a replay, modded sessions, and content and mod mismatches. It
-takes about five minutes. `doom-profile` times each tic's simulation, rendering, HUD and sound
+separate jess processes on loopback, 2 and 4 players in every mode, a bad link, a cooperative exit
+through a shared intermission, players dying and respawning, a late join, a leave, a timeout, a
+forced desync, a replay, modded sessions, and content and mod mismatches; every peer must agree
+on the state hash, kills, pickups, deaths and maps. It takes about six minutes. `doom-profile` times each tic's simulation, rendering, HUD and sound
 over the demos; `BENCHMARKS.md` holds what it and `bench/bench.jsl` measured.
 
 ## Limitations

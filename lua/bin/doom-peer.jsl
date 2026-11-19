@@ -8,7 +8,8 @@
 --
 -- Options: -iwad PATH, -file PWAD..., -mode coop|ffa|tdm, -map NAME, -skill 1-5, -tics N (stop at
 -- game tic N), -name TEXT, -team 1|2, -wait N (host: begin once N players are in), -latency MS,
--- -jitter MS, -loss FRACTION, -leave-at TIC, -freeze-at TIC, -desync-at TIC, -no-resync,
+-- -jitter MS, -loss FRACTION, -leave-at TIC, -freeze-at TIC, -desync-at TIC, -exit-at TIC (host:
+-- end the level for everyone at that tic), -no-resync,
 -- -timeout SECONDS, -fraglimit N, -teamdamage, -report FILE. The last line printed is the report,
 -- as JSON after `REPORT `.
 local fs = require('@dream/fs')
@@ -57,6 +58,7 @@ local Numbers = {
   ['-leave-at'] = 'leaveAt',
   ['-freeze-at'] = 'freezeAt',
   ['-desync-at'] = 'desyncAt',
+  ['-exit-at'] = 'exitAt',
   ['-timeout'] = 'timeout',
   ['-fraglimit'] = 'fraglimit',
 }
@@ -124,7 +126,12 @@ end
 
 local function botCommand(slot: number): net.Command
   local game = play.game
-  if game.gamestate ~= 'level' or not game.playeringame[slot] then return net.neutral() end
+  -- Between levels the bot presses use now and then, which moves the tally and the text screens on.
+  if game.gamestate ~= 'level' and game.playeringame[slot] then
+    return { forwardmove = 0, sidemove = 0, angleturn = 0, buttons = if game.gametic % 35 == 0 then 2 else 0 }
+  end
+
+  if not game.playeringame[slot] then return net.neutral() end
 
   local player = game.players[slot]
   if player.playerstate ~= play.engine.PST_LIVE then
@@ -153,14 +160,69 @@ end
 
 local report: { [string]: any } = { role = role, name = options.name }
 
+-- What happened in the game, from its announcements: the maps begun and the players killed.
+local maps: { string } = {}
+local playerDeaths = 0
+local respawns = 0
+local living: { [number]: boolean } = {}
+local intermissions = 0
+local lastState: string? = nil
+
+local function watch(): ()
+  local game = play.game
+  if game.gamestate ~= lastState then
+    if game.gamestate == 'intermission' then intermissions += 1 end
+    lastState = game.gamestate
+  end
+
+  -- A player who was dead and is alive again respawned.
+  for slot = 0, 3 do
+    local player = game.playeringame and game.playeringame[slot] and game.players[slot]
+    local alive = player and player.playerstate == play.engine.PST_LIVE and player.mo ~= nil
+    if alive and living[slot] == false then respawns += 1 end
+    living[slot] = if player then alive else nil
+  end
+
+  for _, announcement in play.drainAnnouncements() do
+    if announcement.event == 'levelStart' then table.insert(maps, announcement.map) end
+    if announcement.event == 'kill' and announcement.victim then playerDeaths += 1 end
+  end
+end
+
 local function finish(): ()
   local game = play.game
+  watch()
   report.tic = game.gametic
   report.hash = if game.gametic then play.hash() else nil
   report.map = game.mapname
   if game.players then
     report.frags = [for slot in range(0, 3) if game.playeringame[slot] => rules.frags(game, slot)]
     report.present = [for slot in range(0, 3) => game.playeringame[slot] == true]
+    report.kills = 0
+    report.items = 0
+    for slot = 0, 3 do
+      if game.playeringame[slot] then
+        report.kills += game.players[slot].killcount
+        report.items += game.players[slot].itemcount
+      end
+    end
+
+    local living = 0
+    local thinker = game.thinkercap.next
+    while thinker ~= game.thinkercap do
+      if thinker.think == 'mobj' and bit32.band(thinker.flags, play.engine.MF_COUNTKILL) ~= 0 and thinker.health > 0 then
+        living += 1
+      end
+      thinker = thinker.next
+    end
+
+    report.monstersAlive = living
+    report.totalKills = game.totalkills
+    report.gamestate = game.gamestate
+    report.maps = maps
+    report.playerDeaths = playerDeaths
+    report.respawns = respawns
+    report.intermissions = intermissions
     if game.rules and game.rules.mode == 'tdm' then
       report.teams = { rules.teamScore(game, 1), rules.teamScore(game, 2) }
     end
@@ -233,7 +295,10 @@ if role == 'host' then
     for _ = 1, math.min(due, 5) do
       if play.game.gametic >= options.tics then break end
 
+      if options.exitAt and play.game.gametic == options.exitAt then session.host.exitLevel(host) end
+
       session.host.tic(host, botCommand(0))
+      watch()
       ran += 1
     end
 
@@ -315,7 +380,11 @@ while client.phase ~= 'ended' do
       ran += 1
     end
 
-    session.client.advance(client, 10)
+    for _ = 1, 10 do
+      if session.client.advance(client, 1) == 0 then break end
+
+      watch()
+    end
   end
 
   process.sleep(0.002)

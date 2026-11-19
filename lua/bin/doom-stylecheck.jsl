@@ -28,6 +28,7 @@ if #paths == 0 then
         'lua/src/app/entry.jsl',
         'lua/src/app/main.jsl',
         'lua/tests/rules_test.jsl',
+        'lua/tests/campaign_test.jsl',
         'lua/src/testing.jsl',
         'mods/arsenal/src/arsenal.jsl',
         'mods/arsenal/src/managed.jsl',
