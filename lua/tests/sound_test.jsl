@@ -337,6 +337,14 @@ local function musLump(): string
 end
 
 suite.describe('music', function()
+  suite.it('pitches notes as DMX\'s OPL driver does, an octave above General MIDI', function()
+    local synth = sound.synth
+    expect(math.abs(synth.frequency(69) - 880) < 1e-9).toBe(true)
+    expect(math.abs(synth.frequency(60) - 523.2511306) < 1e-6).toBe(true)
+    expect(synth.frequency(-3)).toBe(synth.frequency(9))
+    expect(synth.frequency(100)).toBe(synth.frequency(88))
+  end)
+
   suite.it('parses a MUS score', function()
     local song = sound.mus.parse(buffer.fromstring(musLump()))
     expect(song.primaryChannels).toBe(1)

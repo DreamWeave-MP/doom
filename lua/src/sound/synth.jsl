@@ -292,8 +292,20 @@ local function carrierDecibels(noteVolume: number, channelVolume: number): numbe
   return (63 - math.min(full, 63)) * 0.75
 end
 
+-- The pitch DMX's OPL driver gives a note, in hertz. Its frequency table (Chocolate Doom's
+-- frequency_curve, read by FrequencyForVoice) sits an octave above General MIDI tuning: note 69
+-- sounds at 880 Hz, not 440. Notes the offsets push outside 0 to 95 wrap by octaves, as there.
 local function frequency(note: number): number
-  return 440 * 2 ^ ((note - 69) / 12)
+  local wrapped = note
+  while wrapped < 0 do
+    wrapped += 12
+  end
+
+  while wrapped > 95 do
+    wrapped -= 12
+  end
+
+  return 880 * 2 ^ ((wrapped - 69) / 12)
 end
 
 local function tune(player: Player, playing: Playing): ()
@@ -608,4 +620,5 @@ return {
   new = new,
   render = render,
   parseGenmidi = parseGenmidi,
+  frequency = frequency,
 }
