@@ -444,6 +444,12 @@ function module.setPaused(host: Host, paused: boolean): ()
   table.insert(host.controls, { kind = 'pause', paused = paused } :: net.Control)
 end
 
+-- Ends the level for everyone at the next tic, as an exit line would: the intermission, then the
+-- next map together.
+function module.exitLevel(host: Host, secret: boolean?): ()
+  table.insert(host.controls, { kind = 'exit', secret = secret == true } :: net.Control)
+end
+
 local function nextCommand(remote: Remote): net.Command
   local command = table.remove(remote.queue, 1)
   if command then

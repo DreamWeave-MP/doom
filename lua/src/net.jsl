@@ -75,6 +75,7 @@ export type Control =
   | { kind: 'leave', slot: number }
   | { kind: 'map', map: string }
   | { kind: 'pause', paused: boolean }
+  | { kind: 'exit', secret: boolean }
 
 export type Tic = { tic: number, controls: { Control }, commands: { [number]: Command } }
 
@@ -166,7 +167,7 @@ end
 
 -- Tics ---------------------------------------------------------------------------------------
 
-local ControlKinds = { join = 1, leave = 2, map = 3, pause = 4 }
+local ControlKinds = { join = 1, leave = 2, map = 3, pause = 4, exit = 5 }
 
 -- TICS: u32 tic, u8 slots present (bit per slot), u8 control count, the controls (u8 kind and
 -- its operand: a slot, a map name as u8 length and bytes, a pause flag), then each present
@@ -194,6 +195,8 @@ function module.encodeTic(tic: Tic): buffer
       table.insert(parts, string.pack('<Bs1', kind, control.map))
     elseif control.kind == 'pause' then
       table.insert(parts, string.pack('<BB', kind, if control.paused then 1 else 0))
+    elseif control.kind == 'exit' then
+      table.insert(parts, string.pack('<BB', kind, if control.secret then 1 else 0))
     end
   end
 
@@ -227,6 +230,8 @@ function module.decodeTic(source: buffer): Tic
     local kind = byte()
     if kind == 4 then
       table.insert(controls, { kind = 'pause', paused = byte() ~= 0 } :: Control)
+    elseif kind == 5 then
+      table.insert(controls, { kind = 'exit', secret = byte() ~= 0 } :: Control)
     elseif kind == 3 then
       local size = byte()
       if at + size > length then fail('TICS map change is cut short') end

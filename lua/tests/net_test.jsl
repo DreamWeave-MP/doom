@@ -27,6 +27,7 @@ suite.describe('the wire', function()
         { kind = 'leave', slot = 1 },
         { kind = 'map', map = 'MAP07' },
         { kind = 'pause', paused = true },
+        { kind = 'exit', secret = true },
       },
       commands = {
         [0] = { forwardmove = 50, sidemove = -40, angleturn = -1280, buttons = 1 },

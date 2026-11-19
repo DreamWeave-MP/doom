@@ -34,6 +34,8 @@ function module.apply(tic: net.Tic): ()
       engine.ChangeMap(control.map)
     elseif control.kind == 'pause' then
       engine.SetPaused(control.paused)
+    elseif control.kind == 'exit' then
+      if control.secret then engine.SecretExitLevel() else engine.ExitLevel() end
     end
   end
 
