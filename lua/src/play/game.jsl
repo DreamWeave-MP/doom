@@ -59,7 +59,10 @@ end
 P.SetFastTables = setFastTables
 
 function P.PlayerReborn(index: number): ()
-  blankPlayer(G.players[index], index)
+  local player = G.players[index]
+  local previous = if P.hooks.reborn then table.clone(player) else nil
+  blankPlayer(player, index)
+  if previous then P.Notify('reborn', player, previous) end
 end
 
 local function checkSpot(playernum: number, mthing: any): boolean
@@ -89,6 +92,17 @@ end
 
 function P.DeathMatchSpawnPlayer(playernum: number): ()
   local starts = G.deathmatchstarts
+  local ordered = P.hooks.deathmatchStarts and P.Ask('deathmatchStarts', playernum, starts)
+  if ordered then
+    for _, start in ordered do
+      if checkSpot(playernum, start) then
+        start.type = playernum + 1
+        P.SpawnPlayer(start)
+        return
+      end
+    end
+  end
+
   local selections = #starts
   if selections > 0 then
     for _ = 1, 20 do
@@ -112,14 +126,16 @@ local function doReborn(playernum: number): ()
     return
   end
 
-  G.players[playernum].mo.player = nil
+  local mo = G.players[playernum].mo
+  if mo then mo.player = nil end
+
   if G.deathmatch ~= 0 then
     P.DeathMatchSpawnPlayer(playernum)
     return
   end
 
   local starts = G.playerstarts
-  if checkSpot(playernum, starts[playernum]) then
+  if starts[playernum] and checkSpot(playernum, starts[playernum]) then
     P.SpawnPlayer(starts[playernum])
     return
   end
@@ -134,7 +150,12 @@ local function doReborn(playernum: number): ()
     end
   end
 
-  P.SpawnPlayer(starts[playernum])
+  -- A slot the map has no start for takes the first start there is, crowded or not.
+  local fallback = starts[playernum] or starts[0] or starts[1] or starts[2] or starts[3]
+  local own = fallback.type
+  fallback.type = playernum + 1
+  P.SpawnPlayer(fallback)
+  fallback.type = own
 end
 
 function P.MapName(episode: number, map: number): string
@@ -157,11 +178,13 @@ end
 
 function P.ExitLevel(): ()
   G.secretexit = false
+  P.Notify('levelExit', false)
   G.gameaction = 'completed'
 end
 
 function P.SecretExitLevel(): ()
   G.secretexit = not (G.commercial and not G.wad:find('MAP31'))
+  P.Notify('levelExit', true)
   G.gameaction = 'completed'
 end
 
@@ -229,6 +252,9 @@ local function doCompleted(): ()
   end
 
   G.nextmap = nextMap
+  local chosen = P.hooks.nextMap and P.Ask('nextMap', G.mapname, G.secretexit)
+  if chosen then P.SetNextMap(chosen) end
+
   G.gamestate = 'intermission'
   G.intermissiontic = 0
 end
@@ -258,12 +284,16 @@ end
 
 local function playTicker(): ()
   for index = 0, 3 do
-    if G.playeringame[index] then P.PlayerThink(G.players[index]) end
+    if G.playeringame[index] then
+      P.PlayerThink(G.players[index])
+      P.Notify('player', G.players[index])
+    end
   end
 
   P.RunThinkers()
   P.UpdateSpecials()
   P.RespawnSpecials()
+  P.Notify('tic')
   G.leveltime += 1
 end
 
@@ -300,7 +330,7 @@ function P.Ticker(cmds: any?): ()
     end
   end
 
-  if G.gamestate == 'level' then
+  if G.gamestate == 'level' and not G.paused then
     playTicker()
   elseif G.gamestate == 'intermission' then
     intermissionTicker()
@@ -323,6 +353,7 @@ export type Options = {
   respawn: boolean?,
   timelimit: number?,
   intermissionTics: number?,
+  rules: any?,
 }
 
 -- G_InitNew. `players` lists which of the four slots are in the game, in slot
@@ -330,6 +361,7 @@ export type Options = {
 function P.InitNew(wad: any, options: Options?): ()
   local settings: Options = options or {}
   table.clear(G)
+  G.rules = settings.rules
   P.OpenWad(wad)
   G.shareware = not G.commercial and not wad:find('E2M1')
 

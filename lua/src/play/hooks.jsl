@@ -1,0 +1,205 @@
+--!nonstrict
+--!native
+-- The simulation's extension points: the places where a ruleset or a mod changes what the game
+-- does. Every hook runs synchronously, inside the tic that reaches it, in registration order,
+-- so every peer of a netgame runs the same handlers in the same order on the same state.
+-- Nothing here is queued or deferred: cosmetic announcements are the host's business, made from
+-- what the tic left behind.
+--
+-- Hooks and the content they register (states, things, actions) are not part of G: a game
+-- registers them again whenever it starts or loads, from the same ordered list of rulesets and
+-- mods, which is what a netgame's negotiation and a save's header pin.
+local P: any = require('./core').shared
+
+local G = P.G
+
+-- Every hook name a handler may join, and what its handlers return.
+--   damage(damage, target, inflictor, source) -> number?   the damage to deal; nil keeps it
+--   kill(source, target)                                     after frags and counts are kept
+--   reborn(player, previous)                                 after G_PlayerReborn emptied player
+--   spawnPlayer(player)                                      after a player's body was spawned
+--   deathmatchStarts(playernum, starts) -> { start }?        the order to try deathmatch starts
+--   pickup(player, special) -> boolean?                      true: handled, the default is skipped
+--   key(player, card)                                        after a player got a key
+--   thingType(type, mthing) -> number?                       the thing type a map spot spawns; -1 none
+--   tic()                                                    after each level tic's thinkers ran
+--   levelStart()                                             after a level was set up
+--   levelExit(secret)                                        when a level is left
+--   player(player)                                           after each live player's think
+--   nextMap(mapname, secret) -> string?                      the map an exit leads to, as E1M3 or MAP07
+local Names = {
+  damage = true,
+  kill = true,
+  reborn = true,
+  spawnPlayer = true,
+  deathmatchStarts = true,
+  pickup = true,
+  key = true,
+  thingType = true,
+  tic = true,
+  levelStart = true,
+  levelExit = true,
+  player = true,
+  nextMap = true,
+}
+
+P.HookNames = Names
+
+-- name -> { { owner, handler } } in registration order. Absent until something joins, so the
+-- simulation pays one table read at each point when nothing listens.
+P.hooks = {}
+
+function P.AddHook(name: string, owner: string, handler: (...any) -> ...any): ()
+  if not Names[name] then error(`doom: '{name}' is not a hook; hooks are {table.concat(P.SortedHookNames(), ', ')}`, 2) end
+  if type(handler) ~= 'function' then error(`doom: {owner}'s {name} hook is not a function`, 2) end
+
+  local list = P.hooks[name]
+  if not list then
+    list = {}
+    P.hooks[name] = list
+  end
+
+  table.insert(list, { owner = owner, handler = handler })
+end
+
+function P.SortedHookNames(): { string }
+  local names = {}
+  for name in Names do
+    table.insert(names, name)
+  end
+
+  table.sort(names)
+  return names
+end
+
+function P.ClearHooks(): ()
+  table.clear(P.hooks)
+end
+
+-- Calls every handler of `name` for what it does.
+function P.Notify(name: string, ...: any): ()
+  local list = P.hooks[name]
+  if not list then return end
+
+  for _, entry in list do
+    entry.handler(...)
+  end
+end
+
+-- Passes `value` through every handler of `name` (as its first argument, before the rest), each
+-- seeing what the one before returned; a handler returning nil leaves it.
+function P.Filter(name: string, value: any, ...: any): any
+  local list = P.hooks[name]
+  if not list then return value end
+
+  for _, entry in list do
+    local result = entry.handler(value, ...)
+    if result ~= nil then value = result end
+  end
+
+  return value
+end
+
+-- The first handler of `name` that answers decides; nil when none does.
+function P.Ask(name: string, ...: any): any
+  local list = P.hooks[name]
+  if not list then return nil end
+
+  for _, entry in list do
+    local result = entry.handler(...)
+    if result ~= nil then return result end
+  end
+
+  return nil
+end
+
+-- Content: the state, thing and action tables a mod may extend. The built-in tables are kept as
+-- they were generated; a game's registrations are undone before the next game registers its own.
+local pristine: any
+
+local function snapshot(): any
+  local states, mobjinfo = {}, {}
+  for index, state in P.states do
+    states[index] = table.clone(state)
+  end
+
+  for index, info in P.mobjinfo do
+    mobjinfo[index] = table.clone(info)
+  end
+
+  local weaponinfo = {}
+  for index, weapon in P.weaponinfo do
+    weaponinfo[index] = table.clone(weapon)
+  end
+
+  return {
+    states = states,
+    mobjinfo = mobjinfo,
+    weaponinfo = weaponinfo,
+    actions = table.clone(P.actions),
+    S = table.clone(P.S),
+    MT = table.clone(P.MT),
+  }
+end
+
+local function restoreInto(target: any, source: any): ()
+  for key in target do
+    if source[key] == nil then target[key] = nil end
+  end
+
+  for key, value in source do
+    local existing = target[key]
+    if type(value) == 'table' and type(existing) == 'table' then
+      table.clear(existing)
+      for field, item in value do
+        existing[field] = item
+      end
+    else
+      target[key] = if type(value) == 'table' then table.clone(value) else value
+    end
+  end
+end
+
+-- Puts every content table back as generated and drops every hook, with the fast-monster
+-- tables slow again (InitNew sets them for its game).
+function P.ResetContent(): ()
+  P.ClearHooks()
+  P.SetFastTables(false)
+
+  restoreInto(P.states, pristine.states)
+  restoreInto(P.mobjinfo, pristine.mobjinfo)
+  restoreInto(P.weaponinfo, pristine.weaponinfo)
+  restoreInto(P.actions, pristine.actions)
+  restoreInto(P.S, pristine.S)
+  restoreInto(P.MT, pristine.MT)
+end
+
+-- What a game was started or loaded with, for the save header and a netgame's negotiation.
+function P.SetContentList(list: { string }): ()
+  P.contentList = table.clone(list)
+end
+
+function P.ContentList(): { string }
+  return P.contentList or {}
+end
+
+-- Where a mod keeps what it must remember across tics and saves: plain values only, under its id.
+function P.ModState(owner: string): any
+  local states = G.modstate
+  if not states then
+    states = {}
+    G.modstate = states
+  end
+
+  local state = states[owner]
+  if not state then
+    state = {}
+    states[owner] = state
+  end
+
+  return state
+end
+
+pristine = snapshot()
+
+return nil

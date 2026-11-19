@@ -343,6 +343,8 @@ function P.SpawnPlayer(mthing: any): ()
       player.cards[card] = true
     end
   end
+
+  P.Notify('spawnPlayer', player)
 end
 
 function P.SpawnMapThing(mthing: any): ()
@@ -368,6 +370,11 @@ function P.SpawnMapThing(mthing: any): ()
   if band(mthing.options, bit) == 0 then return end
 
   local type = typeForDoomednum(mthing.type)
+  if P.hooks.thingType then
+    type = P.Filter('thingType', type, mthing)
+    if type == -1 then return end
+  end
+
   if not type then return end
 
   local info = mobjinfo[type]
@@ -582,6 +589,7 @@ function P.TouchSpecialThing(special: any, toucher: any): ()
 
   local player = toucher.player
   if toucher.health <= 0 then return end
+  if P.hooks.pickup and P.Ask('pickup', player, special) then return end
 
   local sprite = special.sprite
   local dropped = band(special.flags, P.MF_DROPPED) ~= 0
@@ -610,6 +618,8 @@ function P.TouchSpecialThing(special: any, toucher: any): ()
       player.bonuscount = 6
       player.cards[card] = true
     end
+
+    P.Notify('key', player, card)
 
     if G.netgame then return end
   elseif sprite == 'STIM' then
@@ -674,6 +684,8 @@ local function killMobj(source: any, target: any): ()
     P.DropWeapon(player)
   end
 
+  P.Notify('kill', source, target)
+
   if target.health < -target.info.spawnhealth and target.info.xdeathstate ~= 0 then
     setMobjState(target, target.info.xdeathstate)
   else
@@ -693,6 +705,10 @@ end
 function P.DamageMobj(target: any, inflictor: any, source: any, damage: number): ()
   if band(target.flags, MF_SHOOTABLE) == 0 then return end
   if target.health <= 0 then return end
+  if P.hooks.damage then
+    damage = P.Filter('damage', damage, target, inflictor, source)
+    if damage <= 0 then return end
+  end
 
   if band(target.flags, MF_SKULLFLY) ~= 0 then
     target.momx, target.momy, target.momz = 0, 0, 0

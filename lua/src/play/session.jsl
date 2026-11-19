@@ -1,0 +1,97 @@
+--!nonstrict
+-- What a netgame's host can change between tics, as the tic stream's control events: players
+-- joining and leaving a game in progress, the map changing under everyone, and the game pausing.
+-- Each runs at the start of a tic on every peer, before that tic's commands, so the change lands
+-- on the same tic everywhere.
+local P: any = require('./core').shared
+
+local G = P.G
+local MT = P.MT
+
+-- A player enters slot `slot`: an empty player who is reborn at the next tic's start, at their
+-- own start in a cooperative game or a deathmatch start otherwise.
+function P.PlayerJoin(slot: number): ()
+  if G.playeringame[slot] then return end
+
+  G.playeringame[slot] = true
+  local player = G.players[slot]
+  player.frags = { [0] = 0, 0, 0, 0 }
+  player.killcount, player.itemcount, player.secretcount = 0, 0, 0
+  P.PlayerReborn(slot)
+  player.mo = nil
+  player.playerstate = P.PST_REBORN
+  for other = 0, 3 do
+    G.players[other].frags[slot] = 0
+  end
+end
+
+-- A player leaves slot `slot`: their body goes in a flash of teleport fog, and the slot is free.
+function P.PlayerLeave(slot: number): ()
+  if not G.playeringame[slot] then return end
+
+  local player = G.players[slot]
+  local mo = player.mo
+  if mo then mo.player = nil end
+
+  -- A living body vanishes; a corpse stays where it fell, as anyone's does.
+  if mo and G.gamestate == 'level' and player.playerstate == P.PST_LIVE then
+    P.SpawnMobj(mo.x, mo.y, mo.subsector.sector.floorheight, MT.MT_TFOG)
+    P.RemoveMobj(mo)
+  end
+
+  player.mo = nil
+  G.playeringame[slot] = false
+end
+
+-- Every peer loads `marker` at this tic. Players keep what they carry, as they do through an
+-- exit, without the keys and powers a level exit takes; the dead are reborn.
+function P.ChangeMap(marker: string): ()
+  local name = string.upper(marker)
+  if not G.wad:find(name) then error(`doom: no map {name} in this WAD`) end
+
+  local episode, map = string.match(name, '^E(%d)M(%d)$')
+  local commercial = string.match(name, '^MAP(%d%d)$')
+  G.mapOverride = nil
+  if episode and map then
+    G.gameepisode, G.gamemap = tonumber(episode), tonumber(map)
+  elseif commercial then
+    G.gamemap = tonumber(commercial)
+  else
+    G.mapOverride = name
+  end
+
+  for index = 0, 3 do
+    if not G.playeringame[index] then continue end
+
+    local player = G.players[index]
+    player.powers = { [0] = 0, 0, 0, 0, 0, 0 }
+    player.cards = { [0] = false, false, false, false, false, false }
+    player.damagecount, player.bonuscount = 0, 0
+    if player.mo then player.mo.player = nil end
+    player.mo = nil
+  end
+
+  G.gamestate = 'level'
+  G.gameaction = 'loadlevel'
+end
+
+-- The map the current exit leads to, named as a marker: an E#M# of this episode or a MAP##.
+function P.SetNextMap(marker: string): ()
+  local name = string.upper(marker)
+  local episode, map = string.match(name, '^E(%d)M(%d)$')
+  local commercial = string.match(name, '^MAP(%d%d)$')
+  if episode and tonumber(episode) == G.gameepisode then
+    G.nextmap = tonumber(map)
+  elseif commercial and G.commercial then
+    G.nextmap = tonumber(commercial)
+  else
+    error(`doom: an exit can lead to a map of this episode, not {name}`)
+  end
+end
+
+-- A paused game runs no level tics; menus, intermissions and finales are not paused.
+function P.SetPaused(paused: boolean): ()
+  G.paused = paused
+end
+
+return nil

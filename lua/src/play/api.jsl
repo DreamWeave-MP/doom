@@ -9,6 +9,8 @@ require('./penemy')
 require('./pspec')
 require('./game')
 require('./save')
+require('./hooks')
+require('./session')
 
 local wadModule = require('../wad')
 local demoModule = require('../demo')
@@ -23,10 +25,22 @@ module.game = G
 module.engine = P
 module.BT_ATTACK, module.BT_USE, module.BT_CHANGE = 1, 2, 4
 
--- Starts a game on an opened WAD (or a path) and returns the game state.
+-- Undoes the last game's registrations and lets `setup` make this one's: rulesets and mods add
+-- their hooks and content here, in the order a netgame negotiated. `content` names them, in that
+-- order, for saves and negotiation.
+local function prepare(setup: ((engine: any) -> ())?, content: { string }?): ()
+  P.ResetContent()
+  P.SetContentList(content or {})
+  if setup then setup(P) end
+end
+
+-- Starts a game on an opened WAD (or a path) and returns the game state. `options.setup` and
+-- `options.content` are the registrations above.
 function module.new(wad: any, options: any?): any
   if type(wad) == 'string' then wad = wadModule.open(wad) end
+  prepare(options and options.setup, options and options.content)
   P.InitNew(wad, options)
+  G.content = P.ContentList()
   return G
 end
 
@@ -67,9 +81,18 @@ function module.save(): buffer
   return P.Save()
 end
 
-function module.load(wad: any, data: buffer): any
+-- Restores a save made with the same registrations; `setup` and `content` are as for `new`, and a
+-- save made with other content is refused rather than run on rules it wasn't made with.
+function module.load(wad: any, data: buffer, setup: ((engine: any) -> ())?, content: { string }?): any
   if type(wad) == 'string' then wad = wadModule.open(wad) end
+  prepare(setup, content)
   P.Restore(wad, data)
+  local saved = G.content or {}
+  local expected = P.ContentList()
+  if table.concat(saved, '\n') ~= table.concat(expected, '\n') then
+    error(`doom: this save was made with [{table.concat(saved, ', ')}], not [{table.concat(expected, ', ')}]`, 2)
+  end
+
   return G
 end
 
