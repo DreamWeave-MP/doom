@@ -1,0 +1,13 @@
+--!strict
+-- Provides the interface `doom.rules`: the ruleset each mode registers, by mode (coop, ffa,
+-- tdm). A mod package that depends on this one and provides `doom.rules` too replaces it, keeping
+-- what it wants of this table through `interfaceOverride` (see the mod authoring guide).
+local rules = require('@doom/rules')
+
+return {
+  interface = {
+    coop = rules.definitions.coop,
+    ffa = rules.definitions.ffa,
+    tdm = rules.definitions.tdm,
+  },
+}

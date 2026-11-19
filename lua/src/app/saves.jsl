@@ -1,0 +1,95 @@
+--!strict
+-- Saved games on disk: six slots in a `saves` folder beside where the game runs. A save file is
+-- a versioned header (what the game was started with: mode, rules, skill, the simulation content
+-- in order, a description) and then the play simulation's own save. Loading a save made with
+-- other rules or mods is refused, by @doom/setup, rather than run on content it wasn't made with.
+local fs = require('@dream/fs')
+local state = require('@doom/state')
+
+local module = {}
+
+local Magic = 'DOOMJSAV'
+module.FormatVersion = 1
+module.Slots = 6
+
+export type Header = {
+  format: number,
+  description: string,
+  mode: string,
+  settings: any,
+  skill: number?,
+  map: string,
+  content: { string },
+}
+
+local folder: string? = nil
+
+-- Where saves go: `saves` beside where the game runs, unless set otherwise.
+function module.folder(): string
+  return folder or fs.join(fs.cwd() or '.', 'saves')
+end
+
+function module.setFolder(path: string?): ()
+  folder = path
+end
+
+function module.path(slot: number): string
+  return fs.join(module.folder(), `doomsav{slot - 1}.dsg`)
+end
+
+-- Writes `save` (the simulation's bytes) with `header` to `slot`, through a staged copy renamed
+-- over the old file, so a crash mid-write leaves the old save whole.
+function module.write(slot: number, header: Header, save: buffer): ()
+  local made, problem = fs.mkdir(module.folder(), { recursive = true })
+  assert(made, problem)
+
+  local encoded = state.encode(header)
+  local data = buffer.create(#Magic + 4 + buffer.len(encoded) + buffer.len(save))
+  buffer.writestring(data, 0, Magic)
+  buffer.writeu32(data, #Magic, buffer.len(encoded))
+  buffer.copy(data, #Magic + 4, encoded)
+  buffer.copy(data, #Magic + 4 + buffer.len(encoded), save)
+
+  local path = module.path(slot)
+  local staged = path .. '.part'
+  local wrote, failure = fs.writeFile(staged, data)
+  assert(wrote, failure)
+  local moved, reason = fs.rename(staged, path)
+  assert(moved, reason)
+end
+
+-- The header and the simulation's bytes of `slot`, or nil and why.
+function module.read(slot: number): (Header?, buffer | string)
+  local data = fs.readFile(module.path(slot))
+  if not data then return nil, 'empty slot' end
+
+  if buffer.len(data) < #Magic + 4 or buffer.readstring(data, 0, #Magic) ~= Magic then
+    return nil, 'not a DOOM for Jess save'
+  end
+
+  local size = buffer.readu32(data, #Magic)
+  if #Magic + 4 + size > buffer.len(data) then return nil, 'the save is cut short' end
+
+  local header = state.decode(buffer.fromstring(buffer.readstring(data, #Magic + 4, size)))
+  if type(header) ~= 'table' or header.format ~= module.FormatVersion then
+    return nil, `a save of format {tostring(type(header) == 'table' and header.format)}; this game reads {module.FormatVersion}`
+  end
+
+  local offset = #Magic + 4 + size
+  local save = buffer.create(buffer.len(data) - offset)
+  buffer.copy(save, 0, data, offset)
+  return header :: Header, save
+end
+
+-- Every slot's description, for the menu.
+function module.descriptions(): { [number]: string }
+  local list: { [number]: string } = {}
+  for slot = 1, module.Slots do
+    local header = module.read(slot)
+    if header then list[slot] = header.description end
+  end
+
+  return list
+end
+
+return module

@@ -1,0 +1,208 @@
+--!nonstrict
+-- The application's parts that need no window: the 35 Hz clock inside 60 Hz frames, the controls
+-- through a headless Jess input runtime with a synthetic keyboard, pointer and gamepad, the
+-- command line, and saved games on disk.
+local fs = require('@dream/fs')
+local play = require('@doom/play')
+local setup = require('@doom/setup')
+local test = require('@jess/test')
+local rooms = require('./support/rooms')
+local clock = require('../src/app/clock')
+local controls = require('../src/app/controls')
+local options = require('../src/app/options')
+local saves = require('../src/app/saves')
+
+local expect = test.expect
+local suite = test.new()
+
+suite.describe('the game clock', function()
+  suite.it('runs exactly 35 tics a second from 60 frames a second, without drifting', function()
+    local game = clock.new()
+    local total = 0
+    for _ = 1, 60 * 10 do
+      total += clock.advance(game, 1 / 60)
+    end
+
+    expect(total).toBe(350)
+
+    local uneven = clock.new()
+    total = 0
+    for frame = 1, 1000 do
+      total += clock.advance(uneven, if frame % 3 == 0 then 0.031 else 0.009)
+    end
+
+    expect(total).toBe(math.floor((333 * 0.031 + 667 * 0.009) * 35))
+  end)
+
+  suite.it('drops what a long stall lost instead of running it in a burst, and stops while paused', function()
+    local game = clock.new(5)
+    expect(clock.advance(game, 2)).toBe(5)
+    expect(clock.advance(game, 1 / 35)).toBe(1)
+
+    clock.setPaused(game, true)
+    expect(clock.advance(game, 1)).toBe(0)
+    clock.setPaused(game, false)
+    expect(clock.advance(game, 1 / 35)).toBe(1)
+  end)
+end)
+
+suite.describe('the controls', function()
+  local function headless(): (any, any)
+    local runtime = jess.input.runtime()
+    local hands = controls.new(runtime)
+    return runtime, hands
+  end
+
+  local function frame(runtime: any, hands: any): { [string]: boolean }
+    runtime:advance(1 / 60)
+    runtime:tick()
+    return controls.frame(hands)
+  end
+
+  suite.it('walks, runs, strafes, turns slowly then fast, fires and uses from the keyboard', function()
+    local runtime, hands = headless()
+    local keyboard = runtime:connect('keyboard')
+    runtime:press(keyboard, 'key:KeyW')
+    frame(runtime, hands)
+    local command = controls.build(hands)
+    expect(command.forwardmove).toBe(0x19)
+    expect(command.buttons).toBe(0)
+
+    runtime:press(keyboard, 'key:ShiftLeft')
+    runtime:press(keyboard, 'key:KeyD')
+    runtime:press(keyboard, 'key:ControlLeft')
+    runtime:press(keyboard, 'key:Space')
+    frame(runtime, hands)
+    command = controls.build(hands)
+    expect(command.forwardmove).toBe(0x32)
+    expect(command.sidemove).toBe(0x28)
+    expect(command.buttons).toBe(3)
+
+    runtime:release(keyboard, 'key:ShiftLeft')
+    runtime:release(keyboard, 'key:KeyW')
+    runtime:release(keyboard, 'key:KeyD')
+    runtime:release(keyboard, 'key:ControlLeft')
+    runtime:release(keyboard, 'key:Space')
+    runtime:press(keyboard, 'key:ArrowLeft')
+    local turns = {}
+    for _ = 1, 8 do
+      frame(runtime, hands)
+      table.insert(turns, controls.build(hands).angleturn)
+    end
+
+    expect(turns[1]).toBe(320)
+    expect(turns[8]).toBe(640)
+
+    runtime:press(keyboard, 'key:AltLeft')
+    frame(runtime, hands)
+    command = controls.build(hands)
+    expect(command.angleturn).toBe(0)
+    expect(command.sidemove).toBe(-0x18)
+  end)
+
+  suite.it('changes weapon once per key press, and turns with the mouse', function()
+    local runtime, hands = headless()
+    local keyboard = runtime:connect('keyboard')
+    local mouse = runtime:connect('pointer')
+    runtime:press(keyboard, 'key:Digit3')
+    local pressed = frame(runtime, hands)
+    expect(pressed.weapon3).toBe(true)
+    local command = controls.build(hands)
+    expect(command.buttons).toBe(4 + 2 * 8)
+    frame(runtime, hands)
+    expect(controls.build(hands).buttons).toBe(0)
+
+    runtime:axis(mouse, 'pointerAxis:DeltaX', 10)
+    frame(runtime, hands)
+    command = controls.build(hands)
+    expect(command.angleturn < 0).toBe(true)
+  end)
+
+  suite.it('moves and turns with a gamepad, and opens the menu from Start', function()
+    local runtime, hands = headless()
+    local pad = runtime:connect('gamepad')
+    runtime:axis(pad, 'gamepadAxis:LeftStickY', 1)
+    runtime:axis(pad, 'gamepadAxis:RightStickX', 1)
+    runtime:axis(pad, 'gamepadAxis:RightTrigger', 1)
+    runtime:press(pad, 'gamepadButton:Start')
+    local pressed = frame(runtime, hands)
+    local command = controls.build(hands)
+    expect(command.forwardmove).toBe(0x19)
+    expect(command.angleturn).toBe(-1280)
+    expect(command.buttons).toBe(1)
+    expect(pressed.menu).toBe(true)
+  end)
+
+  suite.it('cycles to the next owned weapon', function()
+    local _, hands = headless()
+    local player = { readyweapon = 1, weaponowned = { [0] = true, true, true, false, true, false, false, false, false } }
+    controls.cycleWeapon(hands, player, 1, false)
+    expect(controls.build(hands).buttons).toBe(4 + 2 * 8)
+    player.readyweapon = 2
+    controls.cycleWeapon(hands, player, 1, false)
+    expect(controls.build(hands).buttons).toBe(4 + 4 * 8)
+  end)
+end)
+
+suite.describe('the command line', function()
+  suite.it('reads vanilla switches and the network and mod ones', function()
+    local parsed = options.parse { '-iwad', 'doom.wad', '-file', 'a.wad', 'b.wad', '-warp', '1', '3', '-skill', '4', '-host', '10.0.0.2:5029', '-players', '4', '-mode', 'tdm', '-fraglimit', '15' }
+    expect(parsed.iwad).toBe('doom.wad')
+    expect(parsed.files).toEqual { 'a.wad', 'b.wad' }
+    expect(parsed.warp).toBe('E1M3')
+    expect(parsed.skill).toBe(4)
+    expect(parsed.host).toBe('10.0.0.2:5029')
+    expect(parsed.players).toBe(4)
+    expect(parsed.mode).toBe('tdm')
+    expect(parsed.fragLimit).toBe(15)
+    expect(options.parse({ '-warp', '7' }).warp).toBe('MAP07')
+    expect(function() options.parse { '-iwda', 'x' } end).toThrow("unknown switch '-iwda'")
+    expect(function() options.parse { '-mode', 'ctf' } end).toThrow('-mode is coop, ffa or tdm')
+  end)
+end)
+
+suite.describe('saved games', function()
+  suite.it('write a versioned header with the content, and load back to the same future', function()
+    local folder = rooms.path('saves')
+    saves.setFolder(folder)
+    local path = rooms.roomWad('app.wad', { things = { { 256, 64, 90, 1 }, { 256, 320, 270, 3004 } } })
+    local start = { mode = 'single', players = { true } }
+    local game = setup.start(path, start)
+    for _ = 1, 40 do
+      play.tick { [0] = play.command { forward = 10, attack = true } }
+    end
+
+    saves.write(3, {
+      format = saves.FormatVersion,
+      description = 'before the zombie',
+      mode = 'single',
+      settings = {},
+      map = game.mapname,
+      content = setup.content(start),
+    }, play.save())
+
+    for _ = 1, 100 do
+      play.tick { [0] = play.command { turn = 2, attack = true } }
+    end
+
+    local expected = play.hash()
+    expect(saves.descriptions()[3]).toBe('before the zombie')
+    local header, data = saves.read(3)
+    expect(header.format).toBe(saves.FormatVersion)
+    setup.load(path, data, start)
+    for _ = 1, 100 do
+      play.tick { [0] = play.command { turn = 2, attack = true } }
+    end
+
+    expect(play.hash()).toBe(expected)
+
+    local empty, reason = saves.read(5)
+    expect(empty).toBe(nil)
+    expect(reason).toBe('empty slot')
+    fs.remove(folder, { recursive = true })
+    saves.setFolder(nil)
+    rooms.remove('app.wad')
+  end)
+end)
+
+return suite

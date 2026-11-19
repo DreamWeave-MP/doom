@@ -1,29 +1,74 @@
 --!strict
--- The `doom` application: one window, the game ticking at 35 Hz inside Jess's 60 Hz frames, and
--- the player's hands through Jess's input runtime.
+-- The `doom` application: one window, the game ticking at 35 Hz inside Jess's 60 Hz frames, the
+-- player's hands through Jess's input runtime, sound through Jess's audio output, and netgames
+-- through @doom/session over dream.udp.
+--
+-- What the person sees moves between three places: the title (pages and demos, as the original
+-- attract loop), the lobby of a netgame being hosted or joined, and a game (single player, host,
+-- or client). The menu opens over any of them. The simulation only ever advances in whole tics,
+-- from the clock in single player and on the host, and from the host's tic stream on a client.
 local application = require('@jess/application')
+local events = require('@jess/events')
+local interfaces = require('@jess/interfaces')
 local fs = require('@dream/fs')
+local demoModule = require('@doom/demo')
+local hudModule = require('@doom/hud')
+local paletteModule = require('@doom/palette')
 local play = require('@doom/play')
-local wadModule = require('@doom/wad')
+local rules = require('@doom/rules')
+local screens = require('@doom/screens')
+local session = require('@doom/session')
+local setup = require('@doom/setup')
+local sound = require('@doom/sound')
 local viewModule = require('@doom/view')
+local wadModule = require('@doom/wad')
 
 local clockModule = require('./clock')
 local controlsModule = require('./controls')
 local display = require('./display')
 local options = require('./options')
+local saves = require('./saves')
 
+local Width, Height = 320, 200
+
+type Settings = {
+  screenSize: number,
+  mouseSensitivity: number,
+  sfxVolume: number,
+  musicVolume: number,
+  messages: boolean,
+}
 
 type App = {
   display: display.Display,
   controls: controlsModule.Controls,
   clock: clockModule.Clock,
   wad: any,
-  game: any,
+  paths: { string },
   renderer: any,
-  palette: buffer,
+  hud: any,
+  screens: any,
+  menu: any,
+  mixer: any,
+  palettes: { [number]: buffer },
   frame: buffer,
+  target: { pixels: buffer, width: number, height: number },
+  settings: Settings,
+  place: 'title' | 'lobby' | 'game',
+  kind: 'single' | 'host' | 'client' | 'demo' | 'none',
+  host: any,
+  client: any,
+  presentation: any,
+  start: any,
   paused: boolean,
-  dirty: boolean,
+  attract: number,
+  page: string?,
+  pageTics: number,
+  demo: { frames: { any }, index: number }?,
+  music: string?,
+  text: { string },
+  notice: string?,
+  noticeTics: number,
   frames: number,
 }
 
@@ -44,41 +89,646 @@ local function findIwad(): string
   error('doom: no IWAD found; name one with -iwad (DOOM, DOOM II, Final DOOM, or Freedoom)', 0)
 end
 
-local function firstMap(wad: any): string
-  if options.current.warp then return options.current.warp end
-
-  return if wad:find('MAP01') then 'MAP01' else 'E1M1'
+-- The mods the application's packages composed, in load order, and the rulesets by mode.
+local function composedMods(): { any }
+  local composition = interfaces.tryGet('doom.mods')
+  return if composition then table.clone(composition.list) else {}
 end
 
--- The console player's view of the whole screen, with the weapon in their hands.
-local function drawView(state: App): ()
-  local game = state.game
-  if not game.players[0].mo then return end
+local function composedRules(): { [string]: any }?
+  return interfaces.tryGet('doom.rules')
+end
 
-  viewModule.render(state.renderer, game, 0, { pixels = state.frame, width = 320, height = 200 }, { size = 11 })
-  display.present(state.display, state.frame, state.palette)
+local function slot(state: App): number
+  if state.kind == 'client' and state.client and state.client.slot then return state.client.slot end
+  if state.kind == 'demo' then return play.game.consoleplayer or 0 end
+
+  return 0
+end
+
+local function notice(state: App, text: string): ()
+  state.notice, state.noticeTics = text, 35 * 5
+  print(`doom: {text}`)
+end
+
+local function playMusic(state: App, lump: string): ()
+  local mixer = state.mixer
+  if not mixer or options.current.noMusic or state.music == lump then return end
+
+  state.music = lump
+  sound.playMusic(mixer, lump, true)
+end
+
+local function menuContext(state: App): ()
+  screens.setMenuContext(state.menu, state.place == 'game' and state.kind ~= 'demo', state.kind == 'host' or state.kind == 'client')
+end
+
+-- Leaves whatever is running for the title loop.
+local function toTitle(state: App, reason: string?): ()
+  if state.host then session.host.stop(state.host, reason or 'the host ended the game') end
+  if state.client then session.client.leave(state.client, reason or 'left') end
+
+  state.host, state.client, state.presentation, state.start = nil, nil, nil, nil
+  state.place, state.kind, state.paused = 'title', 'none', false
+  state.page, state.pageTics, state.demo = nil, 0, nil
+  clockModule.setPaused(state.clock, false)
+  if state.mixer then sound.stopAll(state.mixer) end
+  if reason then notice(state, reason) end
+  menuContext(state)
+end
+
+local function enterGame(state: App, kind: 'single' | 'host' | 'client' | 'demo', presentation: any?): ()
+  state.place, state.kind, state.presentation = 'game', kind, presentation
+  state.paused = false
+  state.music = nil
+  clockModule.setPaused(state.clock, false)
+  controlsModule.clear(state.controls)
+  if state.menu.active then screens.menuInput(state.menu, 'escape') end
+  menuContext(state)
+end
+
+local function startSingle(state: App, start: any): ()
+  local game, presentation = setup.start(state.wad, start)
+  state.start = start
+  enterGame(state, 'single', presentation)
+  notice(state, `{game.mapname}, skill {(start.skill or 2) + 1}`)
+end
+
+local function singleStart(map: string?, skill: number?): any
+  return {
+    mode = 'single',
+    mods = composedMods(),
+    rulesets = composedRules(),
+    map = map,
+    skill = skill,
+    players = { true },
+  }
+end
+
+local ModeNames = { cooperative = 'coop', deathmatch = 'ffa', teamDeathmatch = 'tdm', coop = 'coop', ffa = 'ffa', tdm = 'tdm' }
+
+local function startHost(state: App, mode: string, players: number, skill: number, map: string?): ()
+  local settings = rules.defaults(ModeNames[mode] or 'coop')
+  settings.teamDamage = options.current.teamDamage
+  if options.current.fragLimit > 0 then settings.fragLimit = options.current.fragLimit end
+  settings.timeLimit = options.current.timeLimit
+
+  local address = options.current.host or '127.0.0.1:5029'
+  local host = session.host.new {
+    address = address,
+    wad = state.wad,
+    paths = state.paths,
+    start = {
+      mode = ModeNames[mode] or 'coop',
+      settings = settings,
+      rulesets = composedRules(),
+      mods = composedMods(),
+      map = map,
+      skill = skill,
+    },
+    maxPlayers = players,
+    name = options.current.name,
+    log = function(line: string) notice(state, line) end,
+  }
+
+  local folder = fs.join(fs.cwd() or '.', 'tokens')
+  local made, problem = fs.mkdir(folder, { recursive = true })
+  assert(made, problem)
+  for index = 1, players - 1 do
+    local wrote, failure = fs.writeFile(fs.join(folder, `slot{index + 1}.token`), session.host.token(host, index))
+    assert(wrote, failure)
+  end
+
+  state.host, state.client = host, nil
+  state.place, state.kind = 'lobby', 'host'
+  menuContext(state)
+  notice(state, `hosting on {address}; give each player a token from {folder}`)
+end
+
+-- `token` is the token's text or the path of a file holding it.
+local function startJoin(state: App, token: string): ()
+  local text = token
+  if fs.exists(token) then
+    local data = fs.readFile(token)
+    if not data then error(`doom: cannot read {token}`, 0) end
+
+    text = buffer.tostring(data)
+  end
+
+  state.client = session.client.new {
+    token = text,
+    wad = state.wad,
+    paths = state.paths,
+    mods = composedMods(),
+    rulesets = composedRules(),
+    name = options.current.name,
+    team = 0,
+    log = function(line: string) notice(state, line) end,
+  }
+  state.host = nil
+  state.place, state.kind = 'lobby', 'client'
+  menuContext(state)
+end
+
+local function saveGame(state: App, slotNumber: number, description: string): ()
+  if state.kind ~= 'single' or play.game.gamestate ~= 'level' then
+    notice(state, 'you can only save a single player game in a level')
+    return
+  end
+
+  local start = state.start
+  saves.write(slotNumber, {
+    format = saves.FormatVersion,
+    description = description,
+    mode = 'single',
+    settings = rules.defaults('single'),
+    skill = play.game.gameskill,
+    map = play.game.mapname,
+    content = setup.content(start),
+  }, play.save())
+  screens.setSaveSlots(state.menu, saves.descriptions())
+  notice(state, 'game saved')
+end
+
+local function loadGame(state: App, slotNumber: number): ()
+  local header, data = saves.read(slotNumber)
+  if not header then
+    notice(state, `cannot load: {data}`)
+    return
+  end
+
+  local start = singleStart(header.map, header.skill)
+  -- A refused save (other mods, a damaged file) leaves the game as it was and says why.
+  local ok, failure, presentation = pcall(setup.load, state.wad, data :: buffer, start)
+  if not ok then
+    notice(state, `cannot load: {failure}`)
+    return
+  end
+
+  state.start = start
+  enterGame(state, 'single', presentation)
+  notice(state, `loaded {header.description}`)
+end
+
+local function applySetting(state: App, name: string, value: any): ()
+  local settings = state.settings :: any
+  settings[name] = value
+  if name == 'mouseSensitivity' then state.controls.settings.mouseSensitivity = value end
+  if name == 'sfxVolume' and state.mixer then sound.setVolume(state.mixer, value) end
+  if name == 'musicVolume' and state.mixer then sound.setMusicVolume(state.mixer, value) end
+end
+
+local function menuCommand(state: App, command: any, effect: string?): ()
+  if effect and state.mixer then
+    sound.update(state.mixer, play.game, 0, { { name = effect } })
+  end
+
+  if not command then return end
+
+  local kind = command.kind
+  if kind == 'newGame' then
+    local map = if state.wad:find('MAP01') then 'MAP01' else `E{command.episode or 1}M1`
+    startSingle(state, singleStart(map, command.skill))
+  elseif kind == 'quit' then
+    toTitle(state)
+    application.exit(0)
+  elseif kind == 'endGame' then
+    toTitle(state)
+  elseif kind == 'save' then
+    saveGame(state, command.slot, command.description or 'saved game')
+  elseif kind == 'load' then
+    loadGame(state, command.slot)
+  elseif kind == 'setting' then
+    applySetting(state, command.name, command.value)
+  elseif kind == 'host' then
+    startHost(state, command.mode, command.players or 2, command.skill or 2, command.map)
+  elseif kind == 'join' then
+    startJoin(state, command.token or '')
+  end
+end
+
+-- The tic's effects that aren't simulation: the HUD, sound, music, cosmetic announcements.
+local function afterTic(state: App): ()
+  local game = play.game
+  local viewer = slot(state)
+  hudModule.tick(state.hud, game, viewer)
+
+  local mixer = state.mixer
+  if mixer then
+    sound.update(mixer, game, viewer, play.drainSounds())
+    if game.gamestate == 'level' then
+      playMusic(state, sound.musicFor(game, 'level'))
+    elseif game.gamestate == 'intermission' then
+      playMusic(state, sound.musicFor(game, 'intermission'))
+    elseif game.gamestate == 'finale' then
+      playMusic(state, sound.musicFor(game, if game.finale and game.finale.stage == 2 then 'cast' else 'finale'))
+    end
+  else
+    play.drainSounds()
+  end
+
+  local listeners = state.presentation and state.presentation.listeners or {}
+  for _, announcement in play.drainAnnouncements() do
+    -- Announcements go out as named events for any package to hear; they can't reach the game.
+    events.emit(`doom.{announcement.event}`, announcement)
+    for _, listener in listeners[announcement.event] or {} do
+      listener(announcement)
+    end
+  end
+
+  if game.finaleDone and state.kind ~= 'client' then toTitle(state, 'the end') end
+end
+
+local function tickSingle(state: App, due: number): ()
+  for _ = 1, due do
+    play.tick { [0] = controlsModule.build(state.controls) }
+    afterTic(state)
+    if state.place ~= 'game' then return end
+  end
+end
+
+local function tickHost(state: App, due: number): ()
+  local host = state.host
+  session.host.pump(host)
+  if host.phase == 'lobby' then
+    local count, ready = session.host.roster(host)
+    if count >= host.options.maxPlayers and ready then
+      session.host.begin(host)
+      enterGame(state, 'host', host.presentation)
+    end
+
+    return
+  end
+
+  for _ = 1, due do
+    session.host.tic(host, controlsModule.build(state.controls))
+    afterTic(state)
+  end
+end
+
+local function tickClient(state: App, due: number): ()
+  local client = state.client
+  session.client.pump(client)
+  if client.phase == 'ended' then
+    toTitle(state, client.reason or 'the session ended')
+    return
+  end
+
+  if client.phase == 'lobby' then
+    session.client.ready(client, true)
+    return
+  end
+
+  if state.place ~= 'game' then enterGame(state, 'client', client.presentation) end
+
+  for _ = 1, due do
+    session.client.command(client, controlsModule.build(state.controls))
+  end
+
+  -- Run what arrived, a little faster than real time while behind, so a client that fell back
+  -- catches up without a jump.
+  local backlog = session.client.backlog(client)
+  for _ = 1, math.min(backlog, due + (if backlog > 4 then 2 else 0)) do
+    if session.client.advance(client, 1) == 0 then break end
+
+    afterTic(state)
+  end
+end
+
+-- The title loop: pages for their tics, demos to their end, as D_DoAdvanceDemo.
+local function tickTitle(state: App, due: number): ()
+  for _ = 1, due do
+    if state.demo then
+      local demo = state.demo
+      demo.index += 1
+      local frame = demo.frames[demo.index]
+      if not frame or play.game.gamestate ~= 'level' then
+        state.demo = nil
+        state.kind = 'none'
+        state.place = 'title'
+      else
+        local commands = {}
+        for player = 0, 3 do
+          commands[player] = frame[player + 1]
+        end
+
+        play.tick(commands)
+        afterTic(state)
+      end
+
+      continue
+    end
+
+    if state.pageTics > 0 then
+      state.pageTics -= 1
+      continue
+    end
+
+    local step, following = screens.attract(state.screens, state.attract)
+    state.attract = following
+    if step.demo and state.wad:find(step.demo) then
+      local header, frames = demoModule.parseFull(state.wad:read(step.demo))
+      -- A demo from another version of the game is skipped, not fatal to the title loop.
+      if header.version < 109 then continue end
+
+      play.new(state.wad, {
+        skill = header.skill,
+        episode = header.episode,
+        map = header.map,
+        deathmatch = header.deathmatch,
+        respawn = header.respawn ~= 0,
+        fast = header.fast ~= 0,
+        nomonsters = header.nomonsters ~= 0,
+        consoleplayer = header.consolePlayer,
+        players = header.players,
+        netgame = header.players[2],
+      })
+      state.demo = { frames = frames, index = 0 }
+      state.place, state.kind = 'game', 'demo'
+    elseif step.page then
+      state.page, state.pageTics = step.page, step.tics or 170
+      playMusic(state, sound.musicFor({ commercial = state.wad:find('MAP01') ~= nil } :: any, 'title'))
+    end
+  end
+end
+
+-- Draws text lines from `top`, eight rows apart.
+local function lines(state: App, top: number, list: { string }): ()
+  for index, line in list do
+    hudModule.drawText(state.hud, state.target, 8, top + (index - 1) * 9, line)
+  end
+end
+
+local function drawLobby(state: App): ()
+  buffer.fill(state.frame, 0, 0, Width * Height)
+  local list: { string } = {}
+  if state.kind == 'host' then
+    local host = state.host
+    local count, ready = session.host.roster(host)
+    table.insert(list, string.upper(`hosting {host.options.start.mode} on {host.options.address}`))
+    table.insert(list, `{count} OF {host.options.maxPlayers} PLAYERS{if ready then '' else ', NOT ALL READY'}`)
+    table.insert(list, 'TOKENS ARE IN THE TOKENS FOLDER')
+    table.insert(list, 'ENTER STARTS NOW, ESCAPE GIVES UP')
+  else
+    local client = state.client
+    table.insert(list, string.upper(if client.phase == 'connecting' then 'connecting...' else 'in the lobby, waiting for the host'))
+    local lobby = client.lobby
+    if lobby then table.insert(list, string.upper(`mode {lobby.mode}`)) end
+  end
+
+  local lobby = if state.host then nil else state.client and state.client.lobby
+  local players = if lobby then lobby.players elseif state.host then { { slot = 0, name = options.current.name, ready = true, team = 0 } } else {}
+  if state.host then
+    for index = 1, 3 do
+      local remote = state.host.remotes[index]
+      if remote and remote.greeted then
+        table.insert(players, { slot = index, name = remote.name, ready = remote.ready, team = remote.team })
+      end
+    end
+  end
+
+  table.insert(list, '')
+  for _, player in players do
+    local team = if player.team == 1 then ' RED' elseif player.team == 2 then ' BLUE' else ''
+    table.insert(list, string.upper(`{player.slot + 1}: {player.name}{team}{if player.ready then ' READY' else ''}`))
+  end
+
+  lines(state, 20, list)
+end
+
+local function drawScoreboard(state: App, game: any): ()
+  local list: { string } = { 'FRAGS' }
+  for index = 0, 3 do
+    if game.playeringame[index] then
+      local team = game.rules and game.rules.teams and game.rules.teams[index]
+      local tag = if team then ` ({string.upper(rules.TeamNames[team])})` else ''
+      table.insert(list, `PLAYER {index + 1}{tag}: {rules.frags(game, index)}`)
+    end
+  end
+
+  if game.rules and game.rules.mode == 'tdm' then
+    table.insert(list, `RED {rules.teamScore(game, 1)}  BLUE {rules.teamScore(game, 2)}`)
+  end
+
+  lines(state, 40, list)
+end
+
+local function draw(state: App): ()
+  local target = state.target
+  local game = play.game
+  local viewer = slot(state)
+  local paletteIndex = 0
+  if state.place == 'lobby' then
+    drawLobby(state)
+  elseif state.place == 'game' and game.gamestate == 'level' and game.players[viewer] and game.players[viewer].mo then
+    local size = state.settings.screenSize + 3
+    viewModule.render(state.renderer, game, viewer, target, { size = size })
+    if size <= 10 then
+      hudModule.draw(state.hud, game, viewer, target)
+    else
+      if hudModule.automap(state.hud).active then hudModule.drawAutomap(state.hud, game, viewer, target, Height) end
+      if state.settings.messages then hudModule.drawMessages(state.hud, viewer, target) end
+    end
+
+    for _, entry in state.presentation and state.presentation.huds or {} do
+      entry.drawer(target, game, viewer)
+    end
+
+    if game.deathmatch ~= 0 and state.controls.runtime:action('scoreboard') and (state.controls.runtime:action('scoreboard') :: any).active then
+      drawScoreboard(state, game)
+    end
+
+    paletteIndex = hudModule.paletteIndex(game, viewer)
+  elseif state.place == 'game' and game.gamestate == 'intermission' then
+    screens.drawIntermission(state.screens, game, viewer, target)
+  elseif state.place == 'game' and game.gamestate == 'finale' then
+    screens.drawFinale(state.screens, game, target)
+  else
+    buffer.fill(state.frame, 0, 0, Width * Height)
+    screens.drawPage(state.screens, state.page or 'TITLEPIC', target)
+  end
+
+  if state.paused and not state.menu.active then screens.drawPause(state.screens, target) end
+
+  if state.notice and state.noticeTics > 0 and state.place ~= 'game' then
+    hudModule.drawText(state.hud, target, 4, Height - 10, string.upper(state.notice))
+  end
+
+  screens.drawMenu(state.menu, target)
+
+  local palette = state.palettes[paletteIndex]
+  if not palette then
+    palette = paletteModule.fromPlaypal(state.wad:read('PLAYPAL'), paletteIndex).rgb
+    state.palettes[paletteIndex] = palette
+  end
+
+  display.present(state.display, state.frame, palette)
+end
+
+-- The menu's keys from this frame's edges and typed text.
+local MenuKeys: { [string]: string } = {
+  menu = 'escape',
+  menuUp = 'up',
+  menuDown = 'down',
+  menuLeft = 'left',
+  menuRight = 'right',
+  menuEnter = 'enter',
+  menuBack = 'back',
+}
+
+local function handleKeys(state: App, pressed: { [string]: boolean }): ()
+  local menu = state.menu
+  if menu.active then
+    for action, key in MenuKeys do
+      if pressed[action] then menuCommand(state, screens.menuInput(menu, key)) end
+    end
+
+    for _, text in state.text do
+      for character in string.gmatch(text, utf8.charpattern) do
+        if #character == 1 and string.byte(character) >= 32 and string.byte(character) < 127 then
+          menuCommand(state, screens.menuInput(menu, character))
+        end
+      end
+    end
+
+    return
+  end
+
+  if pressed.menu then
+    if state.place == 'lobby' then
+      toTitle(state, 'left the lobby')
+      return
+    end
+
+    menuCommand(state, screens.menuInput(menu, 'escape'))
+    return
+  end
+
+  if state.place == 'lobby' and state.kind == 'host' and pressed.menuEnter and state.host.phase == 'lobby' then
+    session.host.begin(state.host)
+    enterGame(state, 'host', state.host.presentation)
+    return
+  end
+
+  if state.place == 'title' and (pressed.menuEnter or pressed.use) then
+    menuCommand(state, screens.menuInput(menu, 'escape'))
+    return
+  end
+
+  if state.place ~= 'game' or state.kind == 'demo' then
+    if state.kind == 'demo' and (pressed.menuEnter or pressed.menu) then toTitle(state) end
+    return
+  end
+
+  if pressed.pause then
+    if state.kind == 'single' then
+      state.paused = not state.paused
+    elseif state.kind == 'host' then
+      state.paused = not state.paused
+      session.host.setPaused(state.host, state.paused)
+    end
+  end
+
+  if pressed.automap then hudModule.automapCommand(state.hud, 'toggle') end
+  if pressed.automapFollow then hudModule.automapCommand(state.hud, 'follow') end
+  if pressed.automapGrid then hudModule.automapCommand(state.hud, 'grid') end
+
+  local automapOpen = hudModule.automap(state.hud).active
+  if automapOpen and pressed.automapZoomIn then hudModule.automapCommand(state.hud, 'zoomIn') end
+  if automapOpen and pressed.automapZoomOut then hudModule.automapCommand(state.hud, 'zoomOut') end
+  if not automapOpen and pressed.sizeUp then state.settings.screenSize = math.min(8, state.settings.screenSize + 1) end
+  if not automapOpen and pressed.sizeDown then state.settings.screenSize = math.max(0, state.settings.screenSize - 1) end
+
+  if pressed.quickSave and state.kind == 'single' then saveGame(state, 1, 'quicksave') end
+  if pressed.quickLoad and state.kind == 'single' then loadGame(state, 1) end
+
+  local player = play.game.players[slot(state)]
+  if player and pressed.weaponNext then controlsModule.cycleWeapon(state.controls, player, 1, play.game.commercial) end
+  if player and pressed.weaponPrevious then controlsModule.cycleWeapon(state.controls, player, -1, play.game.commercial) end
 end
 
 local function startup(): ()
   local settings = options.current
-  local wad = wadModule.open(findIwad(), settings.files)
-  local game = play.new(wad, { mapName = firstMap(wad), skill = settings.skill - 1 })
-  local view = display.open('DOOM', settings.scale)
-  local runtime = jess.input.runtime()
+  local iwad = findIwad()
+  local paths = { iwad }
+  for _, file in settings.files do
+    table.insert(paths, file)
+  end
 
-  app = {
+  local wad = wadModule.open(iwad, settings.files)
+  local view = display.open('DOOM', settings.scale)
+  if settings.fullscreen then view.window:fullscreen('borderless' :: any) end
+
+  local mixer = nil
+  if not settings.noSound then
+    -- No sound device (or a jess built without one) means a silent game, not none.
+    -- jess.audio.output raises when no device opens.
+    local ok, context = pcall(function(): AudioContext
+      return jess.audio.output()
+    end)
+
+    if ok then
+      mixer = sound.new(wad, context)
+    else
+      print(`doom: no sound: {context}`)
+    end
+  end
+
+  local frame = buffer.create(Width * Height)
+  local preferences: Settings = { screenSize = 7, mouseSensitivity = 5, sfxVolume = 8, musicVolume = 8, messages = true }
+  local state: App = {
     display = view,
-    controls = controlsModule.new(runtime),
+    controls = controlsModule.new(jess.input.runtime()),
     clock = clockModule.new(),
     wad = wad,
-    game = game,
+    paths = paths,
     renderer = viewModule.new(wad),
-    palette = wad:read('PLAYPAL'),
-    frame = buffer.create(320 * 200),
+    hud = hudModule.new(wad),
+    screens = screens.new(wad),
+    menu = screens.newMenu(wad, {
+      screenSize = preferences.screenSize,
+      mouseSensitivity = preferences.mouseSensitivity,
+      sfxVolume = preferences.sfxVolume,
+      musicVolume = preferences.musicVolume,
+      messages = preferences.messages,
+      saveSlots = saves.descriptions(),
+    }),
+    mixer = mixer,
+    palettes = {},
+    frame = frame,
+    target = { pixels = frame, width = Width, height = Height },
+    settings = preferences,
+    place = 'title',
+    kind = 'none',
+    host = nil,
+    client = nil,
+    presentation = nil,
+    start = nil,
     paused = false,
-    dirty = true,
+    attract = 0,
+    page = nil,
+    pageTics = 0,
+    demo = nil,
+    music = nil,
+    text = {},
+    notice = nil,
+    noticeTics = 0,
     frames = 0,
   }
+  app = state
+
+  local mods = composedMods()
+  if #mods > 0 then
+    notice(state, `mods: {table.concat([for mod in mods => `{mod.id} {mod.version}`], ', ')}`)
+  end
+
+  if settings.host then
+    startHost(state, settings.mode, settings.players, settings.skill - 1, settings.warp)
+  elseif settings.join then
+    startJoin(state, settings.join)
+  elseif settings.warp then
+    startSingle(state, singleStart(settings.warp, settings.skill - 1))
+  end
 end
 
 local function update(seconds: number): ()
@@ -86,32 +736,49 @@ local function update(seconds: number): ()
   if not state then return end
 
   local pressed = controlsModule.frame(state.controls)
-  if pressed.pause then
-    state.paused = not state.paused
-    clockModule.setPaused(state.clock, state.paused)
-    controlsModule.clear(state.controls)
-  end
+  handleKeys(state, pressed)
+  table.clear(state.text)
 
-  if pressed.menu then application.exit(0) end
-
-  local player = state.game.players[0]
-  if pressed.weaponNext then controlsModule.cycleWeapon(state.controls, player, 1, state.game.commercial) end
-  if pressed.weaponPrevious then controlsModule.cycleWeapon(state.controls, player, -1, state.game.commercial) end
-
+  -- Single player stops while the menu is open or the game is paused; a netgame never waits for
+  -- one player's menu.
+  local stopped = state.kind == 'single' and (state.menu.active or state.paused)
+  clockModule.setPaused(state.clock, stopped)
   local due = clockModule.advance(state.clock, seconds)
-  for _ = 1, due do
-    play.tick { [0] = controlsModule.build(state.controls) }
-    state.dirty = true
+  if stopped then controlsModule.clear(state.controls) end
+
+  if state.menu.active then
+    for _ = 1, due do
+      screens.menuTick(state.menu)
+    end
   end
 
-  if state.dirty then
-    drawView(state)
-    state.dirty = false
+  if state.noticeTics > 0 then state.noticeTics = math.max(0, state.noticeTics - due) end
+
+  if state.kind == 'host' then
+    tickHost(state, due)
+  elseif state.kind == 'client' then
+    tickClient(state, due)
+  elseif state.kind == 'single' then
+    tickSingle(state, due)
+  else
+    tickTitle(state, due)
   end
+
+  if state.mixer then sound.pumpMusic(state.mixer) end
+
+  draw(state)
 
   state.frames += 1
   local limit = options.current.frames
   if limit and state.frames >= limit then application.exit(0) end
+end
+
+local function shutdown(): ()
+  local state = app
+  if not state then return end
+
+  if state.host then session.host.stop(state.host, 'the host quit') end
+  if state.client then session.client.leave(state.client, 'quit') end
 end
 
 local function windowEvents(): ()
@@ -124,17 +791,22 @@ local function windowEvents(): ()
       display.resized(state.display, event.width, event.height)
     elseif event.kind == 'closed' then
       application.exit(0)
-    elseif event.kind == 'pointerButton' and event.pressed then
+    elseif event.kind == 'text' then
+      table.insert(state.text, event.text)
+    elseif event.kind == 'pointerButton' and event.pressed and state.place == 'game' and not state.menu.active then
       window:cursor('captured')
     elseif event.kind == 'focused' and not event.focused then
       window:cursor('normal')
     end
   end
+
+  if state.menu.active or state.place ~= 'game' then window:cursor('normal') end
+  window:textInput(state.menu.active)
 end
 
 return {
   on = {
-    host = { startup = startup, update = update },
+    host = { startup = startup, update = update, shutdown = shutdown },
     event = { ['jess.window'] = windowEvents },
   },
 }
