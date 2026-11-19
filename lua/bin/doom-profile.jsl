@@ -1,0 +1,114 @@
+--!strict
+-- Where a frame's time goes: plays the IWADs' built-in demos tic by tic and times what the game
+-- does each tic (the simulation, the renderer, the status bar and HUD, sound mixing into an
+-- offline context, and the state hash a netgame takes every 35 tics), so the 28.6 ms a 35 Hz tic
+-- allows can be compared with what it costs. Numbers mean something only from a release jess.
+--
+--   jess run --package lua --capability filesystem.read lua/bin/doom-profile.jsl [IWAD...]
+local demoModule = require('@doom/demo')
+local fs = require('@dream/fs')
+local hudModule = require('@doom/hud')
+local play = require('@doom/play')
+local sound = require('@doom/sound')
+local viewModule = require('@doom/view')
+local wadModule = require('@doom/wad')
+
+local arguments = { ... }
+local iwads = if #arguments > 0 then arguments else { 'doom.wad', 'doom2.wad', 'plutonia.wad', 'tnt.wad' }
+
+type Timing = { total: number, worst: number }
+
+local function measure(timing: Timing, started: number): ()
+  local spent = (os.clock() - started) * 1000
+  timing.total += spent
+  timing.worst = math.max(timing.worst, spent)
+end
+
+print(`jess {jess.version}{if jess.bench.verified then '' else ' (unverified build: numbers are not representative)'}`)
+print('demo                     tics   sim ms (worst)   view ms (worst)  hud ms (worst)  sound ms (worst)  hash ms')
+for _, path in iwads do
+  if not fs.exists(path) then continue end
+
+  local wad = wadModule.open(path)
+  local renderer = viewModule.new(wad)
+  local hud = hudModule.new(wad)
+  local mixer = sound.new(wad, jess.audio.offline { rate = 44100 })
+  local pixels = buffer.create(320 * 200)
+  local target = { pixels = pixels, width = 320, height = 200 }
+
+  for demo = 1, 4 do
+    local name = `DEMO{demo}`
+    if not wad:find(name) then continue end
+
+    local header, frames = demoModule.parseFull(wad:read(name))
+    if header.version < 109 then continue end
+
+    local game = play.new(wad, {
+      skill = header.skill,
+      episode = header.episode,
+      map = header.map,
+      deathmatch = header.deathmatch,
+      respawn = header.respawn ~= 0,
+      fast = header.fast ~= 0,
+      nomonsters = header.nomonsters ~= 0,
+      consoleplayer = header.consolePlayer,
+      players = header.players,
+      netgame = header.players[2],
+    })
+    local viewer = header.consolePlayer
+    local sim: Timing = { total = 0, worst = 0 }
+    local view: Timing = { total = 0, worst = 0 }
+    local status: Timing = { total = 0, worst = 0 }
+    local mixing: Timing = { total = 0, worst = 0 }
+    local hashing: Timing = { total = 0, worst = 0 }
+    local tics = 0
+    local commands = {}
+    for _, frame in frames do
+      for slot = 0, 3 do
+        commands[slot] = frame[slot + 1]
+      end
+
+      local started = os.clock()
+      play.tick(commands)
+      measure(sim, started)
+      if game.gamestate ~= 'level' then break end
+
+      started = os.clock()
+      viewModule.render(renderer, game, viewer, target, { size = 10 })
+      measure(view, started)
+
+      started = os.clock()
+      hudModule.tick(hud, game, viewer)
+      hudModule.draw(hud, game, viewer, target)
+      measure(status, started)
+
+      started = os.clock()
+      sound.update(mixer, game, viewer, play.drainSounds())
+      mixer.context:render(1260)
+      measure(mixing, started)
+
+      if game.gametic % 35 == 0 then
+        started = os.clock()
+        play.hash()
+        measure(hashing, started)
+      end
+
+      tics += 1
+    end
+
+    local function show(timing: Timing): string
+      return string.format('%6.3f (%6.2f)', timing.total / math.max(tics, 1), timing.worst)
+    end
+
+    print(string.format(
+      '%-24s %5d   %s   %s   %s   %s   %6.3f',
+      `{path} {name}`,
+      tics,
+      show(sim),
+      show(view),
+      show(status),
+      show(mixing),
+      hashing.total / math.max(tics // 35, 1)
+    ))
+  end
+end

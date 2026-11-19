@@ -158,3 +158,34 @@ each table's keys in the order Luau walks them, and that order depends on whethe
 ran between a field being set to nil and set again, so two runs of one demo can save different
 bytes for the same game. Both restore to the same future, and the hashes agree. The bench checks
 a save's length for that reason.
+
+## Frame budget
+
+What each tic of the game costs, measured with `bin/doom-profile.jsl` over the IWADs' built-in
+demos on the installed release jess 0.3.0 (`jess.bench.verified`), one run, milliseconds a tic
+averaged over the demo, worst tic in parentheses. A 35 Hz tic allows 28.6 ms. The renderer draws
+the screen size 10 view with the weapon; the HUD is the status bar, messages and face; sound is
+the mixer's tic plus rendering a tic's audio offline. The hash column is one `play.hash()`, which
+a netgame takes every 35 tics.
+
+| Demo | Tics | Simulation | Renderer | HUD | Sound | Hash |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| doom.wad DEMO1 | 1710 | 0.130 (0.63) | 0.718 (3.46) | 0.153 (0.47) | 0.362 (1.07) | 0.123 |
+| doom.wad DEMO2 | 2347 | 0.112 (0.55) | 0.679 (1.90) | 0.143 (0.40) | 0.192 (0.82) | 0.141 |
+| doom.wad DEMO3 | 3863 | 0.084 (0.54) | 0.661 (1.40) | 0.144 (0.40) | 0.166 (1.09) | 0.136 |
+| doom.wad DEMO4 | 818 | 0.162 (0.72) | 1.134 (2.66) | 0.152 (0.42) | 0.364 (0.97) | 0.102 |
+| doom2.wad DEMO1 | 1205 | 0.149 (0.75) | 0.874 (3.82) | 0.146 (0.35) | 0.292 (0.88) | 0.106 |
+| doom2.wad DEMO2 | 2001 | 0.130 (1.07) | 0.732 (2.24) | 0.149 (0.34) | 0.273 (0.96) | 0.105 |
+| doom2.wad DEMO3 | 4471 | 0.152 (0.96) | 0.822 (2.61) | 0.153 (0.43) | 0.292 (1.42) | 0.122 |
+| plutonia.wad DEMO1 | 7403 | 0.138 (1.47) | 0.968 (3.57) | 0.150 (0.50) | 0.258 (1.12) | 0.119 |
+| plutonia.wad DEMO2 | 3483 | 0.159 (0.74) | 0.908 (2.35) | 0.151 (0.53) | 0.336 (1.74) | 0.098 |
+| plutonia.wad DEMO3 | 5662 | 0.241 (1.40) | 0.800 (2.18) | 0.153 (0.44) | 0.369 (1.20) | 0.131 |
+| tnt.wad DEMO1 | 4531 | 0.050 (0.41) | 0.739 (3.55) | 0.146 (0.53) | 0.180 (1.13) | 0.048 |
+| tnt.wad DEMO2 | 3653 | 0.133 (1.40) | 0.835 (2.40) | 0.142 (0.43) | 0.228 (1.01) | 0.144 |
+| tnt.wad DEMO3 | 3433 | 0.143 (1.02) | 0.852 (2.38) | 0.151 (0.42) | 0.210 (0.86) | 0.180 |
+
+A whole tic is 1.1 to 1.8 ms on average and under 7 ms at its worst, a quarter of the budget at
+most; the worst renderer tics build a texture the first time a wall shows it. A player joining a
+netgame in progress costs the host one save and its Zstandard compression, once: 3.8 + 5.1 ms
+for doom2 MAP01 (404 KB saved, 86 KB sent in 6 parts), 11.1 + 13.6 ms for MAP29 (1.34 MB, 267 KB
+in 17 parts).
