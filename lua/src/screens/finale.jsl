@@ -55,7 +55,7 @@ end
 -- F_CastDrawer: BOSSBACK, the monster's name centered at the foot, and its current frame.
 local function drawCast(screens: Screens, game: any, target: Frame)
   local finale = game.finale
-  draw.drawPatch(screens, target, 0, 0, 'BOSSBACK')
+  draw.drawFullscreen(screens, target, 'BOSSBACK')
 
   local cast = text.CastOrder[finale.castnum] or text.CastOrder[1]
   local width = draw.textWidth(screens, cast.name)
@@ -100,7 +100,7 @@ function module.draw(screens: Screens, game: any, target: Frame)
     return
   end
 
-  draw.drawPatch(screens, target, 0, 0, module.endArt(screens, game.gameepisode))
+  draw.drawFullscreen(screens, target, module.endArt(screens, game.gameepisode))
 end
 
 return module

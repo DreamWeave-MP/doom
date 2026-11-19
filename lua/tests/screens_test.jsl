@@ -494,4 +494,34 @@ suite.describe('IWAD screens', function()
   end)
 end)
 
+suite.describe('full-screen pages', function()
+  suite.it('shows the middle of a page wider than the screen, as the 2024 re-release draws them', function()
+    local patchModule = require('@doom/patch')
+    for _, name in { 'doom.wad', 'doom2.wad', 'plutonia.wad', 'tnt.wad' } do
+      local path = fs.join(fs.cwd(), name)
+      if not fs.exists(path) then continue end
+
+      local wad = wadModule.open(path)
+      local page = patchModule.open(wad:read('TITLEPIC'))
+      local drawn = frame()
+      expect(screens.drawPage(screens.new(wad), 'TITLEPIC', drawn)).toBe(true)
+
+      -- The page drawn alone into a frame its own width, to read its middle 320 columns from.
+      local whole = buffer.create(page.width * 200)
+      patchModule.draw(whole, page.width, 200, page, 0, 0)
+      local shift = math.max(0, (page.width - 320) // 2)
+      local same = true
+      for row = 0, 199, 7 do
+        for column = 0, 319, 5 do
+          if buffer.readu8(drawn.pixels, row * 320 + column) ~= buffer.readu8(whole, row * page.width + column + shift) then
+            same = false
+          end
+        end
+      end
+
+      expect(same).toBe(true)
+    end
+  end)
+end)
+
 return suite

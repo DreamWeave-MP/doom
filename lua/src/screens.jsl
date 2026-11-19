@@ -41,7 +41,7 @@ end
 -- D_PageDrawer: a full-screen page such as TITLEPIC, CREDIT, HELP1, HELP2, or INTERPIC. False
 -- when the WAD lacks it.
 function module.drawPage(screens: Screens, name: string, target: Frame): boolean
-  return draw.drawPatch(screens, target, 0, 0, name)
+  return draw.drawFullscreen(screens, target, name)
 end
 
 -- Read This!'s page 1 or 2 for this WAD (HELP1 and HELP2, or HELP and CREDIT).

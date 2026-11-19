@@ -818,7 +818,7 @@ function module.helpPage(screens: Screens, page: number): string
 end
 
 function module.drawHelp(screens: Screens, page: number, target: Frame)
-  draw.drawPatch(screens, target, 0, 0, module.helpPage(screens, page))
+  draw.drawFullscreen(screens, target, module.helpPage(screens, page))
 end
 
 local function drawMessage(menu: Menu, target: Frame, message: string)

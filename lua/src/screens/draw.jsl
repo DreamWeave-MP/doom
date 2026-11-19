@@ -71,6 +71,19 @@ function module.drawPatch(screens: Screens, target: Frame, left: number, top: nu
   return true
 end
 
+-- A full-screen page (TITLEPIC, CREDIT, INTERPIC, WIMAP0, BOSSBACK, ...). The 2024 re-release
+-- draws these 560 wide, the original 320 columns in the middle and more of the picture either
+-- side; a page wider than the frame is centered on it, so the frame shows the original
+-- picture and everything drawn over it in 320-column coordinates still lands where it did.
+function module.drawFullscreen(screens: Screens, target: Frame, name: string): boolean
+  local patch = module.patch(screens, name)
+  if not patch then return false end
+
+  local left = if patch.width > target.width then (target.width - patch.width) // 2 else 0
+  patchModule.draw(target.pixels, target.width, target.height, patch, left, 0)
+  return true
+end
+
 -- Walks the posts of one column of `patch`, calling `each(row, color)` for every pixel, row
 -- counted from the patch's top.
 local function eachPixel(patch: Patch, column: number, each: (number, number) -> ())

@@ -374,7 +374,7 @@ function module.draw(screens: Screens, game: any, slot: number, target: Frame)
     me = slot,
   }
 
-  draw.drawPatch(screens, target, 0, 0, module.background(screens, episode + 1))
+  draw.drawFullscreen(screens, target, module.background(screens, episode + 1))
   drawAnimatedBack(context)
   if wi.state == 'StatCount' then
     if game.deathmatch ~= 0 then
