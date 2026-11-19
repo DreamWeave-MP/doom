@@ -1,0 +1,134 @@
+--!nonstrict
+-- Whole games on the IWADs: every map loads, runs and draws with its HUD, and every campaign goes
+-- from its first map through each exit, intermission and text screen to its end, by the routes
+-- the original takes, secret ones included. Each IWAD's tests run when it sits in the folder the
+-- tests run from, and pass without it.
+local fs = require('@dream/fs')
+local hudModule = require('@doom/hud')
+local play = require('@doom/play')
+local test = require('@jess/test')
+local viewModule = require('@doom/view')
+local wadModule = require('@doom/wad')
+
+local expect = test.expect
+local suite = test.new()
+
+local function iwad(name: string): any?
+  local path = fs.join(fs.cwd() or '.', name)
+  if not fs.exists(path) then return nil end
+
+  return wadModule.open(path)
+end
+
+local function maps(wad: any): { string }
+  local list = {}
+  for _, lump in wad.lumps do
+    if string.match(lump.name, '^E%dM%d$') or string.match(lump.name, '^MAP%d%d$') then table.insert(list, lump.name) end
+  end
+
+  return list
+end
+
+local function colors(pixels: buffer): number
+  local seen, count = {}, 0
+  for index = 0, buffer.len(pixels) - 1, 7 do
+    local color = buffer.readu8(pixels, index)
+    if not seen[color] then
+      seen[color] = true
+      count += 1
+    end
+  end
+
+  return count
+end
+
+-- Ends levels and presses use between them until the game reaches `stop`; returns the maps in the
+-- order they were played.
+local function walk(game: any, route: { [string]: boolean }?, limit: number): { string }
+  local played = { game.mapname }
+  for _ = 1, limit do
+    if game.gamestate == 'level' then
+      if route and route[game.mapname] then play.engine.SecretExitLevel() else play.engine.ExitLevel() end
+    end
+
+    play.tick { [0] = play.command { use = game.gametic % 4 == 0 } }
+    if game.gamestate == 'level' and game.mapname ~= played[#played] then table.insert(played, game.mapname) end
+    if game.gamestate == 'finale' and game.finaleDone then break end
+  end
+
+  return played
+end
+
+for _, name in { 'doom.wad', 'doom2.wad', 'plutonia.wad', 'tnt.wad' } do
+  suite.describe(name, function()
+    suite.it('loads, runs and draws every map with its status bar', function()
+      local wad = iwad(name)
+      if not wad then return end
+
+      local renderer, hud = viewModule.new(wad), hudModule.new(wad)
+      local pixels = buffer.create(320 * 200)
+      local target = { pixels = pixels, width = 320, height = 200 }
+      local list = maps(wad)
+      expect(#list > 0).toBe(true)
+      for _, map in list do
+        local game = play.new(wad, { mapName = map, skill = 3 })
+        for tic = 1, 70 do
+          play.tick { [0] = play.command { turn = 3, forward = if tic % 20 < 10 then 25 else -25 } }
+          hudModule.tick(hud, game, 0)
+        end
+
+        expect(game.gamestate).toBe('level')
+        expect(game.mapname).toBe(map)
+        viewModule.render(renderer, game, 0, target, { size = 10 })
+        hudModule.draw(hud, game, 0, target)
+        local count = colors(pixels)
+        if count <= 16 then error(`{map} drew only {count} colors`) end
+      end
+    end)
+  end)
+end
+
+suite.describe('campaigns', function()
+  suite.it('takes each DOOM episode from its first map to its finale', function()
+    local wad = iwad('doom.wad')
+    if not wad then return end
+
+    local episodes = if wad:find('E4M1') then 4 elseif wad:find('E2M1') then 3 else 1
+    for episode = 1, episodes do
+      local game = play.new(wad, { mapName = `E{episode}M1`, skill = 2, intermissionTics = 2 })
+      local played = walk(game, nil, 2000)
+      expect(played).toEqual([for map in range(1, 8) => `E{episode}M{map}`])
+      expect(game.gamestate).toBe('finale')
+      expect(game.finaleDone).toBe(true)
+    end
+
+    -- E1M3's secret exit leads to E1M9, which returns to E1M4.
+    local game = play.new(wad, { mapName = 'E1M3', skill = 2, intermissionTics = 2 })
+    local played = walk(game, { E1M3 = true }, 40)
+    expect({ played[1], played[2], played[3] }).toEqual { 'E1M3', 'E1M9', 'E1M4' }
+  end)
+
+  suite.it('takes DOOM II from MAP01 to the cast call, through its interludes and secret levels', function()
+    local wad = iwad('doom2.wad')
+    if not wad then return end
+
+    local game = play.new(wad, { mapName = 'MAP01', skill = 2, intermissionTics = 2 })
+    local played = walk(game, { MAP15 = true, MAP31 = true }, 6000)
+    local expected = {}
+    for map = 1, 15 do
+      table.insert(expected, string.format('MAP%02d', map))
+    end
+
+    table.insert(expected, 'MAP31')
+    table.insert(expected, 'MAP32')
+    for map = 16, 30 do
+      table.insert(expected, string.format('MAP%02d', map))
+    end
+
+    expect(played).toEqual(expected)
+    expect(game.gamestate).toBe('finale')
+    expect(game.finaleDone).toBe(true)
+  end)
+end)
+
+return suite
