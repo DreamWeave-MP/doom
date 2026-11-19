@@ -27,7 +27,7 @@ export type Options = {
 }
 
 export type Client = {
-  phase: 'connecting' | 'lobby' | 'game' | 'ended',
+  phase: 'connecting' | 'lobby' | 'joining' | 'game' | 'ended',
   options: Options,
   protocol: net.Protocol,
   handle: dream_udp_Client,
@@ -139,7 +139,8 @@ local function receive(client: Client, item: net.Received): ()
     local welcome = net.decodeValue(payload)
     client.slot = welcome.slot
     client.start = welcome.start
-    client.phase = if welcome.phase == 'game' then 'game' else 'lobby'
+    -- A game in progress is joined once its snapshot has arrived and loaded.
+    client.phase = if welcome.phase == 'game' then 'joining' else 'lobby'
     client.log(`welcomed as player {welcome.slot + 1}{if welcome.phase == 'game' then ', joining a game in progress' else ''}`)
   elseif event == 'REJECT' then
     client.reason = `rejected: {net.decodeValue(payload).reason}`

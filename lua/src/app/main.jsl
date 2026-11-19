@@ -379,6 +379,8 @@ local function tickClient(state: App, due: number): ()
     return
   end
 
+  if client.phase ~= 'game' then return end
+
   if state.place ~= 'game' then enterGame(state, 'client', client.presentation) end
 
   for _ = 1, due do
