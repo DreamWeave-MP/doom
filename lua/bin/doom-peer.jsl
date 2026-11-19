@@ -4,6 +4,7 @@
 --
 --   doom-peer.jsl host <address> -players N [-tokens FOLDER] [options]
 --   doom-peer.jsl join <token file> [options]
+--   doom-peer.jsl replay <recording> [-mod ...]   (a recording a host made with -record FILE)
 --
 -- Options: -iwad PATH, -file PWAD..., -mode coop|ffa|tdm, -map NAME, -skill 1-5, -tics N (stop at
 -- game tic N), -name TEXT, -team 1|2, -wait N (host: begin once N players are in), -latency MS,
@@ -21,8 +22,8 @@ local wadModule = require('@doom/wad')
 
 local arguments = { ... }
 local role, target = arguments[1], arguments[2]
-if role ~= 'host' and role ~= 'join' or not target then
-  print('usage: doom-peer.jsl host <address> -players N [options] | join <token file> [options]')
+if role ~= 'host' and role ~= 'join' and role ~= 'replay' or not target then
+  print('usage: doom-peer.jsl host <address> -players N [options] | join <token file> [options] | replay <recording> [options]')
   return
 end
 
@@ -59,7 +60,7 @@ local Numbers = {
   ['-timeout'] = 'timeout',
   ['-fraglimit'] = 'fraglimit',
 }
-local Texts = { ['-iwad'] = 'iwad', ['-mode'] = 'mode', ['-map'] = 'map', ['-name'] = 'name', ['-tokens'] = 'tokens', ['-report'] = 'report' }
+local Texts = { ['-iwad'] = 'iwad', ['-mode'] = 'mode', ['-map'] = 'map', ['-name'] = 'name', ['-tokens'] = 'tokens', ['-report'] = 'report', ['-record'] = 'record' }
 
 local index = 3
 while index <= #arguments do
@@ -177,6 +178,14 @@ local settings = rules.defaults(options.mode)
 settings.teamDamage = options.teamDamage == true
 settings.fragLimit = options.fraglimit
 
+if role == 'replay' then
+  local game = session.replay.play(wad, session.replay.read(target), mods)
+  report.matched = 0
+  log(`replayed {game.gametic} tics`)
+  finish()
+  return
+end
+
 local step = 1 / 35
 if role == 'host' then
   local host = session.host.new {
@@ -190,6 +199,7 @@ if role == 'host' then
     timeout = options.timeout,
     conditioner = conditioner,
     log = log,
+    record = options.record,
   }
 
   if options.tokens then

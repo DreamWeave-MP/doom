@@ -15,6 +15,7 @@ if #paths == 0 then
         'lua/src/session/common.jsl',
         'lua/src/session/host.jsl',
         'lua/src/session/client.jsl',
+        'lua/src/session/replay.jsl',
         'lua/bin/doom-peer.jsl',
         'lua/bin/doom-netcheck.jsl',
         'lua/src/mod/init.jsl',

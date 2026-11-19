@@ -293,6 +293,24 @@ scenario('mod-mismatch', function()
   check('mod-mismatch', string.find(logs.host or '', 'org.dreamweave.doom.coop-director', 1, true) ~= nil, 'the host did not name the missing mod')
 end)
 
+scenario('replay', function()
+  local recording = fs.join(Folder, 'session.rec')
+  fs.remove(recording)
+  local specs = session('ffa', 3, Tics + 175, { '-wait', '2', '-record', recording }, function(index: number): ({ string }, number?)
+    if index == 3 then return { '-leave-at', '500' }, 8 end
+
+    return {}, nil
+  end)
+  local reports = run('replay', specs)
+  local replayed = run('replay-again', { { name = 'replay', args = { 'replay', recording } } })
+  local host, again = reports.host, replayed.replay
+  check('replay', host ~= nil and again ~= nil, 'the session or its replay wrote no report')
+  check('replay', host and again and again.tic == host.tic, `the replay ended at tic {again and again.tic}, the host at {host and host.tic}`)
+  check('replay', host and again and again.hash == host.hash, `the replay ended on hash {again and again.hash}, the host on {host and host.hash}`)
+  check('replay', host and host.present[3] == false and again and again.present[3] == false, 'player3 left, but the host or the replay still has them')
+  check('replay', again and json.encodeTable(again.frags) == json.encodeTable(host.frags), 'the replay\'s frags differ from the host\'s')
+end)
+
 for _, line in results do
   print(line)
 end

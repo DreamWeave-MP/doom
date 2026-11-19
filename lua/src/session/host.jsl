@@ -15,6 +15,7 @@ local rules = require('@doom/rules')
 local setup = require('@doom/setup')
 local udp = require('@dream/udp')
 local common = require('./common')
+local replay = require('./replay')
 
 local module = {}
 
@@ -54,6 +55,8 @@ export type Options = {
   tokenSeconds: number?,
   conditioner: common.Conditioner?,
   log: ((line: string) -> ())?,
+  -- A file to record the session's tic stream in, written when the host stops.
+  record: string?,
 }
 
 export type Host = {
@@ -70,6 +73,7 @@ export type Host = {
   presentation: any,
   teams: { [number]: number },
   sent: number,
+  recorder: replay.Recorder?,
   log: (line: string) -> (),
 }
 
@@ -160,6 +164,7 @@ function module.new(options: Options): Host
     presentation = nil,
     teams = {},
     sent = 0,
+    recorder = nil,
     log = options.log or function(_: string) end,
   }
 
@@ -411,6 +416,8 @@ function module.begin(host: Host): any
   start.consoleplayer = 0
 
   local game, presentation = setup.start(host.options.wad, start)
+  if host.options.record then host.recorder = replay.recorder(info, present, setup.content(start)) end
+
   host.presentation = presentation
   host.phase = 'game'
 
@@ -473,6 +480,8 @@ function module.tic(host: Host, command: net.Command): ()
   host.controls = {}
   common.apply(tic)
 
+  if host.recorder then replay.add(host.recorder, tic) end
+
   local payload = net.encodeTic(tic)
   for _, peer in activePeers(host) do
     send(host, peer, 'TICS', payload)
@@ -507,6 +516,8 @@ end
 -- Says goodbye to everyone and stops.
 function module.stop(host: Host, reason: string?): ()
   if host.phase == 'ended' then return end
+
+  if host.recorder and host.options.record then replay.write(host.recorder, host.options.record) end
 
   local payload = net.encodeValue { reason = reason or 'the host left' }
   for _, remote in host.remotes do

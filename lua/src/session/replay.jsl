@@ -1,0 +1,101 @@
+--!strict
+-- Netgame recordings: the tic stream a host sent, with what the game began from, so the whole
+-- session (joins, leaves, map changes and every player's commands) plays again to the same end.
+--
+-- A recording is `DOOMJREC`, a u32 header size and the header (@doom/state's encoding of the
+-- start: mode, rules, map, skill, players, and the simulation content in order), then each tic as
+-- a u32 size and its TICS encoding.
+local fs = require('@dream/fs')
+local net = require('@doom/net')
+local setup = require('@doom/setup')
+local state = require('@doom/state')
+local common = require('./common')
+
+local module = {}
+
+local Magic = 'DOOMJREC'
+module.FormatVersion = 1
+
+export type Recorder = { header: any, tics: { string } }
+
+function module.recorder(info: any, players: { boolean }, content: { string }): Recorder
+  return {
+    header = { format = module.FormatVersion, start = info, players = players, content = content },
+    tics = {},
+  }
+end
+
+function module.add(recorder: Recorder, tic: net.Tic): ()
+  table.insert(recorder.tics, buffer.tostring(net.encodeTic(tic)))
+end
+
+function module.write(recorder: Recorder, path: string): ()
+  local header = buffer.tostring(state.encode(recorder.header))
+  local parts = { Magic, string.pack('<s4', header) }
+  for _, tic in recorder.tics do
+    table.insert(parts, string.pack('<s4', tic))
+  end
+
+  local wrote, failure = fs.writeFile(path, table.concat(parts))
+  assert(wrote, failure)
+end
+
+export type Recording = { header: any, tics: { net.Tic } }
+
+function module.read(path: string): Recording
+  local data = fs.readFile(path)
+  if not data then error(`doom: cannot read the recording {path}`, 2) end
+
+  local text = buffer.tostring(data)
+  if string.sub(text, 1, #Magic) ~= Magic then error(`doom: {path} is not a netgame recording`, 2) end
+
+  local at = #Magic + 1
+  local size = buffer.readu32(data, at - 1)
+  local header = state.decode(buffer.fromstring(string.sub(text, at + 4, at + 3 + size)))
+  if header.format ~= module.FormatVersion then
+    error(`doom: a recording of format {tostring(header.format)}; this game plays {module.FormatVersion}`, 2)
+  end
+
+  at += 4 + size
+  local tics: { net.Tic } = {}
+  while at <= #text do
+    local length = buffer.readu32(data, at - 1)
+    table.insert(tics, net.decodeTic(buffer.fromstring(string.sub(text, at + 4, at + 3 + length))))
+    at += 4 + length
+  end
+
+  return { header = header, tics = tics }
+end
+
+-- Plays `recording` from its start on `wad` with `mods` (the ruleset is the recorded mode's), and
+-- returns the game as it ends. Content other than what was recorded is refused.
+function module.play(wad: any, recording: Recording, mods: { any }?, rulesets: { [string]: any }?): any
+  local info = recording.header.start
+  local settings = info.settings
+  settings.teams = info.teams or settings.teams or {}
+  local start: setup.Start = {
+    mode = info.mode,
+    settings = settings,
+    rulesets = rulesets,
+    mods = mods,
+    map = info.map,
+    skill = info.skill,
+    nomonsters = info.nomonsters,
+    players = recording.header.players,
+    consoleplayer = 0,
+  }
+
+  local content = setup.content(start)
+  if table.concat(content, '\n') ~= table.concat(recording.header.content, '\n') then
+    error(`doom: this recording was made with [{table.concat(recording.header.content, ', ')}]`, 2)
+  end
+
+  local game = setup.start(wad, start)
+  for _, tic in recording.tics do
+    common.apply(tic)
+  end
+
+  return game
+end
+
+return module

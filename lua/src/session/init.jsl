@@ -1,8 +1,10 @@
 --!strict
 -- @doom/session: netgames over @doom/net. `host` runs the game and the tic stream, `client` joins
--- one, and `common` is what both run a tic with.
+-- one, and `common` is what both run a tic with, and `replay` records and replays
+-- a session's tic stream.
 return {
   host = require('./session/host'),
   client = require('./session/client'),
   common = require('./session/common'),
+  replay = require('./session/replay'),
 }
