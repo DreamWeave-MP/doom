@@ -27,16 +27,15 @@ DOOM source.
   press keys: each slot reads a text observation and writes short timed plans.
 - `@doom/net` and `@doom/netgame` are the tic-command protocol over dream.udp: an authoritative
   host, clients that replay the same tics, and a world hash to compare.
-- WAD, map, palette, patch, and texture readers, and a headless indexed renderer for the title,
-  the automap, and a first-person view.
+- `@doom/view` is Linux Doom 1.10's software renderer over the live game: the BSP, walls, floors
+  and ceilings as they move, sprites, masked walls, the weapon, the sky, and the screen sizes.
+- WAD, map, palette, patch, and texture readers, and indexed frames of the title and automap.
 - `@doom/sound` plays what the simulation's sounds mean: `s_sound.c`'s eight channels, priorities,
   distance attenuation, and stereo separation over Jess audio voices, the WAD's DMX sound lumps,
   and its MUS music through a small FM synthesizer built from the GENMIDI lump.
 
-What it is not: the first-person renderer draws
-the map's starting geometry, so opened doors and moved lifts are not shown. The original's
-overflow emulation (intercepts, spechits, the body queue) is not reproduced, so a demo that
-relies on one of those can drift.
+What it is not: the original's overflow emulation (intercepts, spechits, the body queue) is not
+reproduced, so a demo that relies on one of those can drift.
 
 ## Running
 
