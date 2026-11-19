@@ -1,0 +1,191 @@
+--!nonstrict
+-- f_finale.c's F_StartFinale, F_Ticker, and the cast call's F_CastTicker: the text screens and
+-- the end of a game, ticked from the players' commands. Its state is `G.finale`, plain numbers
+-- and strings a save can hold; @doom/screens draws it.
+--
+-- Where this differs from the original: a DOOM episode's text can be skipped with attack or use
+-- once it has run 50 tics, the cast call's death frames come from attack rather than any key
+-- (the original took them from local key events no peer of a netgame shared), and a press of
+-- use at the end art or the cast call sets `G.finaleDone`, which an application reads to go
+-- back to its title.
+local P: any = require('./core').shared
+local text = require('../screens/text')
+
+local G = P.G
+local band, bxor = bit32.band, bit32.bxor
+local S, MT = P.S, P.MT
+
+local TEXTSPEED = 3
+local TEXTWAIT = 250
+
+-- The tic of the bunny scroller (DOOM episode 3) at which "THE END" has finished landing.
+local BUNNYEND = 1180 + 6 * 5
+
+P.TEXTSPEED = TEXTSPEED
+
+-- `terminal` is a finale the game ends on: a DOOM episode, MAP30, or a level with no successor.
+function P.F_StartFinale(terminal)
+  G.gameaction = nil
+  G.gamestate = 'finale'
+
+  local mission = text.mission(G.wad)
+  local key, flat = text.finale(mission, G.gameepisode, G.gamemap)
+  G.finale = {
+    stage = 0,
+    count = 0,
+    text = key or '',
+    flat = flat or 'F_SKY1',
+    terminal = terminal == true or not G.commercial,
+  }
+
+  -- A commercial level with no interlude of its own ends on the cast call alone.
+  if G.commercial and not key then P.F_StartCast() end
+end
+
+function P.F_StartCast()
+  local finale = G.finale
+  finale.stage = 2
+  finale.castnum = 1
+  finale.caststate = P.mobjinfo[MT[text.CastOrder[1].type]].seestate
+  finale.casttics = P.states[finale.caststate].tics
+  finale.castdeath = false
+  finale.castframes = 0
+  finale.castonmelee = 0
+  finale.castattacking = false
+end
+
+local function castInfo(finale)
+  return P.mobjinfo[MT[text.CastOrder[finale.castnum].type]]
+end
+
+local function F_CastTicker()
+  local finale = G.finale
+  finale.casttics -= 1
+  if finale.casttics > 0 then return end
+
+  local state = P.states[finale.caststate]
+  local stopattack = false
+  if state.tics == -1 or state.nextstate == S.S_NULL then
+    -- switch from deathstate to next monster
+    finale.castnum += 1
+    finale.castdeath = false
+    if finale.castnum > #text.CastOrder then finale.castnum = 1 end
+
+    finale.caststate = castInfo(finale).seestate
+    finale.castframes = 0
+  elseif finale.caststate == S.S_PLAY_ATK1 then
+    -- Oh, gross hack!
+    stopattack = true
+  else
+    finale.caststate = state.nextstate
+    finale.castframes += 1
+  end
+
+  local info = castInfo(finale)
+  if not stopattack and finale.castframes == 12 then
+    -- go into attack frame
+    finale.castattacking = true
+    finale.caststate = if finale.castonmelee ~= 0 then info.meleestate else info.missilestate
+    finale.castonmelee = bxor(finale.castonmelee, 1)
+    if finale.caststate == S.S_NULL then
+      finale.caststate = if finale.castonmelee ~= 0 then info.meleestate else info.missilestate
+    end
+  end
+
+  if stopattack or (finale.castattacking and (finale.castframes == 24 or finale.caststate == info.seestate)) then
+    finale.castattacking = false
+    finale.castframes = 0
+    finale.caststate = info.seestate
+  end
+
+  finale.casttics = P.states[finale.caststate].tics
+  if finale.casttics == -1 then finale.casttics = 15 end
+end
+
+-- F_CastResponder: the current monster dies.
+local function F_CastDeath()
+  local finale = G.finale
+  if finale.castdeath then return end
+
+  finale.castdeath = true
+  finale.caststate = castInfo(finale).deathstate
+  finale.casttics = P.states[finale.caststate].tics
+  finale.castframes = 0
+  finale.castattacking = false
+end
+
+-- Attack and use going down this tic, for any player in the game, and whether any button is
+-- held at all. The press state is the players' attackdown and usedown, as the intermission's.
+local function presses()
+  local attack, use, held = false, false, false
+  for i = 0, 3 do
+    if not G.playeringame[i] then continue end
+
+    local player = G.players[i]
+    local buttons = player.cmd.buttons
+    if buttons ~= 0 then held = true end
+    if band(buttons, P.BT_ATTACK) ~= 0 then
+      if not player.attackdown then attack = true end
+      player.attackdown = true
+    else
+      player.attackdown = false
+    end
+
+    if band(buttons, P.BT_USE) ~= 0 then
+      if not player.usedown then use = true end
+      player.usedown = true
+    else
+      player.usedown = false
+    end
+  end
+
+  return attack, use, held
+end
+
+function P.F_Ticker()
+  local finale = G.finale
+  local attack, use, held = presses()
+
+  -- check for skipping: a commercial interlude goes on to the next level, the last one to the cast
+  if finale.stage ~= 2 and G.commercial and finale.count > 50 and held then
+    if finale.terminal then
+      P.F_StartCast()
+    else
+      G.gameaction = 'worlddone'
+    end
+  end
+
+  -- advance animation
+  finale.count += 1
+  if finale.stage == 2 then
+    if use then G.finaleDone = true end
+    if attack then F_CastDeath() end
+
+    F_CastTicker()
+    return
+  end
+
+  if G.commercial then return end
+
+  if finale.stage == 0 then
+    local length = #(text.Finale[finale.text] or '')
+    if ((attack or use) and finale.count > 50) or finale.count > length * TEXTSPEED + TEXTWAIT then
+      finale.count = 0
+      finale.stage = 1
+    end
+
+    return
+  end
+
+  if not (attack or use) or finale.count <= 50 then return end
+
+  -- The bunny scroller's first press brings on THE END; any other press ends the game.
+  if G.gameepisode == 3 and finale.count < BUNNYEND then
+    finale.count = BUNNYEND
+    return
+  end
+
+  G.finaleDone = true
+end
+
+return { shared = P }

@@ -1,0 +1,372 @@
+--!nonstrict
+-- wi_stuff.c's WI_Ticker: the intermission's stages, ticked from the players' commands so every
+-- peer of a netgame leaves it on the same tic. Its state is `G.wi`, plain numbers and tables a
+-- save can hold; what it counts is `G.lastlevel` (G_DoCompleted's wbstartstruct_t). Drawing is
+-- @doom/screens', which reads both. The original's sounds are not made here.
+local P: any = require('./core').shared
+
+local G = P.G
+local band = bit32.band
+local TICRATE = 35
+local SHOWNEXTLOCDELAY = 4
+
+-- g_game.c's par times in seconds: pars[episode][map], cpars[map].
+P.pars = {
+  { 30, 75, 120, 90, 165, 180, 180, 30, 165 },
+  { 90, 90, 90, 120, 90, 360, 240, 30, 170 },
+  { 90, 45, 90, 150, 90, 90, 165, 30, 135 },
+}
+P.cpars = {
+  30, 90, 120, 120, 90, 150, 120, 120, 270, 90,
+  210, 150, 150, 150, 210, 150, 420, 150, 210, 150,
+  240, 150, 180, 150, 150, 300, 330, 420, 300, 180,
+  120, 30,
+}
+
+local function zeros()
+  return { [0] = 0, 0, 0, 0 }
+end
+
+-- A player the tally counts: in the game, and in it when the level ended (a player who joins
+-- during the intermission has no tally; one who leaves loses theirs).
+local function tallied(i)
+  return G.playeringame[i] and G.lastlevel.players[i] ~= nil
+end
+
+-- A percentage of a total WI_initVariables raised to at least one.
+local function percent(count, total)
+  return (count * 100) // math.max(total, 1)
+end
+
+function P.WI_fragSum(playernum)
+  local plrs = G.lastlevel.players
+  local frags = 0
+  for i = 0, 3 do
+    if tallied(i) and i ~= playernum then frags += plrs[playernum].frags[i] end
+  end
+
+  -- JDC hack - negative frags.
+  return frags - plrs[playernum].frags[playernum]
+end
+
+local function WI_initAnimatedBack()
+  G.wi.animstart = G.wi.bcnt
+end
+
+local function WI_initNoState()
+  local wi = G.wi
+  wi.state = 'NoState'
+  wi.acceleratestage = 0
+  wi.cnt = 10
+end
+
+local function WI_updateNoState()
+  local wi = G.wi
+  wi.cnt -= 1
+  if wi.cnt == 0 then P.WorldDone() end
+end
+
+local function WI_initShowNextLoc()
+  local wi = G.wi
+  wi.state = 'ShowNextLoc'
+  wi.acceleratestage = 0
+  wi.cnt = SHOWNEXTLOCDELAY * TICRATE
+  WI_initAnimatedBack()
+end
+
+local function WI_updateShowNextLoc()
+  local wi = G.wi
+  wi.cnt -= 1
+  if wi.cnt == 0 or wi.acceleratestage ~= 0 then WI_initNoState() end
+end
+
+local function leaveStats()
+  if G.commercial then
+    WI_initNoState()
+  else
+    WI_initShowNextLoc()
+  end
+end
+
+local function WI_initDeathmatchStats()
+  local wi = G.wi
+  wi.state = 'StatCount'
+  wi.acceleratestage = 0
+  wi.dm_state = 1
+  wi.cnt_pause = TICRATE
+  wi.dm_frags = { [0] = zeros(), zeros(), zeros(), zeros() }
+  wi.dm_totals = zeros()
+  WI_initAnimatedBack()
+end
+
+local function WI_updateDeathmatchStats()
+  local wi = G.wi
+  local plrs = G.lastlevel.players
+  if wi.acceleratestage ~= 0 and wi.dm_state ~= 4 then
+    wi.acceleratestage = 0
+    for i = 0, 3 do
+      if not tallied(i) then continue end
+
+      for j = 0, 3 do
+        if tallied(j) then wi.dm_frags[i][j] = plrs[i].frags[j] end
+      end
+
+      wi.dm_totals[i] = P.WI_fragSum(i)
+    end
+
+    wi.dm_state = 4
+  end
+
+  if wi.dm_state == 2 then
+    local stillticking = false
+    for i = 0, 3 do
+      if not tallied(i) then continue end
+
+      for j = 0, 3 do
+        if tallied(j) and wi.dm_frags[i][j] ~= plrs[i].frags[j] then
+          if plrs[i].frags[j] < 0 then
+            wi.dm_frags[i][j] -= 1
+          else
+            wi.dm_frags[i][j] += 1
+          end
+
+          wi.dm_frags[i][j] = math.clamp(wi.dm_frags[i][j], -99, 99)
+          stillticking = true
+        end
+      end
+
+      wi.dm_totals[i] = math.clamp(P.WI_fragSum(i), -99, 99)
+    end
+
+    if not stillticking then wi.dm_state += 1 end
+  elseif wi.dm_state == 4 then
+    if wi.acceleratestage ~= 0 then leaveStats() end
+  elseif band(wi.dm_state, 1) ~= 0 then
+    wi.cnt_pause -= 1
+    if wi.cnt_pause == 0 then
+      wi.dm_state += 1
+      wi.cnt_pause = TICRATE
+    end
+  end
+end
+
+local function WI_initNetgameStats()
+  local wi = G.wi
+  wi.state = 'StatCount'
+  wi.acceleratestage = 0
+  wi.ng_state = 1
+  wi.cnt_pause = TICRATE
+  wi.cnt_kills, wi.cnt_items, wi.cnt_secret, wi.cnt_frags = zeros(), zeros(), zeros(), zeros()
+
+  local dofrags = 0
+  for i = 0, 3 do
+    if tallied(i) then dofrags += P.WI_fragSum(i) end
+  end
+
+  wi.dofrags = if dofrags ~= 0 then 1 else 0
+  WI_initAnimatedBack()
+end
+
+-- One netgame column counting up by two; true while any player's is still short.
+local function countColumn(column, field, total)
+  local wi = G.wi
+  local plrs = G.lastlevel.players
+  local stillticking = false
+  for i = 0, 3 do
+    if not tallied(i) then continue end
+
+    local target = percent(plrs[i][field], total)
+    wi[column][i] += 2
+    if wi[column][i] >= target then
+      wi[column][i] = target
+    else
+      stillticking = true
+    end
+  end
+
+  return stillticking
+end
+
+local function WI_updateNetgameStats()
+  local wi = G.wi
+  local wbs = G.lastlevel
+  local plrs = wbs.players
+  if wi.acceleratestage ~= 0 and wi.ng_state ~= 10 then
+    wi.acceleratestage = 0
+    for i = 0, 3 do
+      if not tallied(i) then continue end
+
+      wi.cnt_kills[i] = percent(plrs[i].kills, wbs.maxkills)
+      wi.cnt_items[i] = percent(plrs[i].items, wbs.maxitems)
+      wi.cnt_secret[i] = percent(plrs[i].secrets, wbs.maxsecret)
+      if wi.dofrags ~= 0 then wi.cnt_frags[i] = P.WI_fragSum(i) end
+    end
+
+    wi.ng_state = 10
+  end
+
+  if wi.ng_state == 2 then
+    if not countColumn('cnt_kills', 'kills', wbs.maxkills) then wi.ng_state += 1 end
+  elseif wi.ng_state == 4 then
+    if not countColumn('cnt_items', 'items', wbs.maxitems) then wi.ng_state += 1 end
+  elseif wi.ng_state == 6 then
+    if not countColumn('cnt_secret', 'secrets', wbs.maxsecret) then
+      wi.ng_state += 1 + if wi.dofrags ~= 0 then 0 else 2
+    end
+  elseif wi.ng_state == 8 then
+    local stillticking = false
+    for i = 0, 3 do
+      if not tallied(i) then continue end
+
+      local fsum = P.WI_fragSum(i)
+      wi.cnt_frags[i] += 1
+      if wi.cnt_frags[i] >= fsum then
+        wi.cnt_frags[i] = fsum
+      else
+        stillticking = true
+      end
+    end
+
+    if not stillticking then wi.ng_state += 1 end
+  elseif wi.ng_state == 10 then
+    if wi.acceleratestage ~= 0 then leaveStats() end
+  elseif band(wi.ng_state, 1) ~= 0 then
+    wi.cnt_pause -= 1
+    if wi.cnt_pause == 0 then
+      wi.ng_state += 1
+      wi.cnt_pause = TICRATE
+    end
+  end
+end
+
+local function WI_initStats()
+  local wi = G.wi
+  wi.state = 'StatCount'
+  wi.acceleratestage = 0
+  wi.sp_state = 1
+  wi.cnt_kills, wi.cnt_items, wi.cnt_secret = { [0] = -1 }, { [0] = -1 }, { [0] = -1 }
+  wi.cnt_time, wi.cnt_par = -1, -1
+  wi.cnt_pause = TICRATE
+  WI_initAnimatedBack()
+end
+
+-- The single-player count follows the console player, as the original's `me` does; a game of
+-- one player has no other peer to disagree with.
+local function WI_updateStats()
+  local wi = G.wi
+  local wbs = G.lastlevel
+  local me = wbs.players[wbs.pnum]
+  local stime = wbs.leveltime // TICRATE
+  local partime = wbs.partime // TICRATE
+  if wi.acceleratestage ~= 0 and wi.sp_state ~= 10 then
+    wi.acceleratestage = 0
+    wi.cnt_kills[0] = percent(me.kills, wbs.maxkills)
+    wi.cnt_items[0] = percent(me.items, wbs.maxitems)
+    wi.cnt_secret[0] = percent(me.secrets, wbs.maxsecret)
+    wi.cnt_time = stime
+    wi.cnt_par = partime
+    wi.sp_state = 10
+  end
+
+  if wi.sp_state == 2 then
+    local target = percent(me.kills, wbs.maxkills)
+    wi.cnt_kills[0] += 2
+    if wi.cnt_kills[0] >= target then
+      wi.cnt_kills[0] = target
+      wi.sp_state += 1
+    end
+  elseif wi.sp_state == 4 then
+    local target = percent(me.items, wbs.maxitems)
+    wi.cnt_items[0] += 2
+    if wi.cnt_items[0] >= target then
+      wi.cnt_items[0] = target
+      wi.sp_state += 1
+    end
+  elseif wi.sp_state == 6 then
+    local target = percent(me.secrets, wbs.maxsecret)
+    wi.cnt_secret[0] += 2
+    if wi.cnt_secret[0] >= target then
+      wi.cnt_secret[0] = target
+      wi.sp_state += 1
+    end
+  elseif wi.sp_state == 8 then
+    wi.cnt_time += 3
+    if wi.cnt_time >= stime then wi.cnt_time = stime end
+
+    wi.cnt_par += 3
+    if wi.cnt_par >= partime then
+      wi.cnt_par = partime
+      if wi.cnt_time >= stime then wi.sp_state += 1 end
+    end
+  elseif wi.sp_state == 10 then
+    if wi.acceleratestage ~= 0 then leaveStats() end
+  elseif band(wi.sp_state, 1) ~= 0 then
+    wi.cnt_pause -= 1
+    if wi.cnt_pause == 0 then
+      wi.sp_state += 1
+      wi.cnt_pause = TICRATE
+    end
+  end
+end
+
+-- A press is a button going down: the first finishes the counting, the next moves on.
+local function WI_checkForAccelerate()
+  for i = 0, 3 do
+    if not G.playeringame[i] then continue end
+
+    local player = G.players[i]
+    if band(player.cmd.buttons, P.BT_ATTACK) ~= 0 then
+      if not player.attackdown then G.wi.acceleratestage = 1 end
+      player.attackdown = true
+    else
+      player.attackdown = false
+    end
+
+    if band(player.cmd.buttons, P.BT_USE) ~= 0 then
+      if not player.usedown then G.wi.acceleratestage = 1 end
+      player.usedown = true
+    else
+      player.usedown = false
+    end
+  end
+end
+
+-- WI_Start, from G_DoCompleted once `G.lastlevel` holds the level's tally.
+function P.WI_Start()
+  G.wi = { bcnt = 0, cnt = 0, acceleratestage = 0, animstart = 0 }
+  if G.deathmatch ~= 0 then
+    WI_initDeathmatchStats()
+  elseif G.netgame then
+    WI_initNetgameStats()
+  else
+    WI_initStats()
+  end
+end
+
+-- `G.intermissionTics`, when set, ends the intermission after that many tics whatever stage it
+-- has reached: the tests' and the arena's short cut.
+function P.WI_Ticker()
+  local wi = G.wi
+  wi.bcnt += 1
+  if G.intermissionTics and wi.bcnt >= G.intermissionTics then
+    P.WorldDone()
+    return
+  end
+
+  WI_checkForAccelerate()
+  if wi.state == 'StatCount' then
+    if G.deathmatch ~= 0 then
+      WI_updateDeathmatchStats()
+    elseif G.netgame then
+      WI_updateNetgameStats()
+    else
+      WI_updateStats()
+    end
+  elseif wi.state == 'ShowNextLoc' then
+    WI_updateShowNextLoc()
+  elseif wi.state == 'NoState' then
+    WI_updateNoState()
+  end
+end
+
+return { shared = P }

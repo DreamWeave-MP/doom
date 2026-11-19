@@ -2,8 +2,10 @@
 --!native
 -- g_game.c and p_tick.c: the game loop around the play simulation. New games,
 -- level loading, player rebirth and deathmatch spawns, level exits, the
--- intermission, and map progression.
+-- intermission and finale's flow, and map progression.
 local P: any = require('./core').shared
+require('./wi')
+require('./finale')
 
 local G = P.G
 local S, MT = P.S, P.MT
@@ -166,6 +168,7 @@ end
 local function doLoadLevel(): ()
   G.levelstarttic = G.gametic
   G.gamestate = 'level'
+  G.wi, G.finale = nil, nil
   for index = 0, 3 do
     local player = G.players[index]
     if G.playeringame[index] and player.playerstate == P.PST_DEAD then player.playerstate = P.PST_REBORN end
@@ -203,32 +206,9 @@ local function doCompleted(): ()
   end
 
   local map = G.gamemap
-  local summary: any = { map = G.mapname, leveltime = G.leveltime, players = {} }
-  summary.maxkills, summary.maxitems, summary.maxsecret = G.totalkills, G.totalitems, G.totalsecret
-  for index = 0, 3 do
-    if not G.playeringame[index] then continue end
-
-    local player = G.players[index]
-    summary.players[index] = {
-      kills = player.killcount,
-      items = player.itemcount,
-      secrets = player.secretcount,
-      frags = table.clone(player.frags),
-    }
-  end
-
-  G.lastlevel = summary
-
-  if not G.commercial then
-    if map == 8 then
-      G.gamestate = 'finale'
-      return
-    end
-
-    if map == 9 then
-      for index = 0, 3 do
-        G.players[index].didsecret = true
-      end
+  if not G.commercial and map == 9 then
+    for index = 0, 3 do
+      G.players[index].didsecret = true
     end
   end
 
@@ -251,35 +231,67 @@ local function doCompleted(): ()
     nextMap = map + 1
   end
 
+  -- A DOOM episode's eighth map ends it: no intermission, straight to the finale. Any other exit
+  -- asks the rules where it leads; a map they choose has no interlude on the way.
   G.nextmap = nextMap
-  local chosen = P.hooks.nextMap and P.Ask('nextMap', G.mapname, G.secretexit)
+  local episodeEnd = not G.commercial and map == 8
+  local chosen = not episodeEnd and P.hooks.nextMap and P.Ask('nextMap', G.mapname, G.secretexit)
   if chosen then P.SetNextMap(chosen) end
 
-  G.gamestate = 'intermission'
-  G.intermissiontic = 0
-end
-
--- The intermission has no screen here: it ends when a player presses attack or
--- use, or after intermissionTics.
-local function intermissionTicker(): ()
-  G.intermissiontic += 1
-  local done = G.intermissiontic >= (G.intermissionTics or 105)
-  for index = 0, 3 do
-    if G.playeringame[index] and band(G.players[index].cmd.buttons, P.BT_ATTACK + P.BT_USE) ~= 0 then done = true end
+  -- G_DoCompleted's wbstartstruct_t, the maps one-based.
+  local summary: any = { map = G.mapname, leveltime = G.leveltime, players = {} }
+  summary.maxkills, summary.maxitems, summary.maxsecret = G.totalkills, G.totalitems, G.totalsecret
+  summary.episode, summary.last, summary.next = G.gameepisode, map, G.nextmap
+  summary.chosen = chosen and true or false
+  summary.didsecret = G.players[G.consoleplayer].didsecret
+  summary.pnum = G.consoleplayer
+  if G.commercial then
+    summary.partime = 35 * (P.cpars[map] or 0)
+  else
+    summary.partime = 35 * (P.pars[G.gameepisode] and P.pars[G.gameepisode][map] or 0)
   end
 
-  if not done then return end
+  for index = 0, 3 do
+    if not G.playeringame[index] then continue end
 
-  if G.secretexit then G.players[G.consoleplayer].didsecret = true end
+    local player = G.players[index]
+    summary.players[index] = {
+      kills = player.killcount,
+      items = player.itemcount,
+      secrets = player.secretcount,
+      frags = table.clone(player.frags),
+    }
+  end
 
-  -- MAP30 and a map with no successor in the WAD end the game.
-  local nextName = P.MapName(G.gameepisode, G.nextmap)
-  if G.mapOverride or (G.commercial and G.gamemap == 30 and not G.secretexit) or not G.wad:find(nextName) then
-    G.gamestate = 'finale'
+  G.lastlevel = summary
+  if episodeEnd then
+    P.F_StartFinale(true)
     return
   end
 
+  G.gamestate = 'intermission'
+  P.WI_Start()
+end
+
+-- G_WorldDone, at the end of the intermission: DOOM II's interludes come between some maps, and
+-- MAP30, a renamed map, or a map with no successor in the WAD ends the game in its finale.
+function P.WorldDone(): ()
   G.gameaction = 'worlddone'
+  if G.secretexit then G.players[G.consoleplayer].didsecret = true end
+
+  local map = G.gamemap
+  local nextName = P.MapName(G.gameepisode, G.nextmap)
+  local last = G.mapOverride ~= nil or (G.commercial and map == 30 and not G.lastlevel.chosen) or not G.wad:find(nextName)
+  if G.commercial then
+    local interlude = map == 6 or map == 11 or map == 20 or map == 30 or ((map == 15 or map == 31) and G.secretexit)
+    if G.lastlevel.chosen then interlude = false end
+    if interlude or last then
+      P.F_StartFinale(last)
+      return
+    end
+  end
+
+  if last then P.F_StartFinale(true) end
 end
 
 local function playTicker(): ()
@@ -333,7 +345,9 @@ function P.Ticker(cmds: any?): ()
   if G.gamestate == 'level' and not G.paused then
     playTicker()
   elseif G.gamestate == 'intermission' then
-    intermissionTicker()
+    P.WI_Ticker()
+  elseif G.gamestate == 'finale' then
+    P.F_Ticker()
   end
 
   G.gametic += 1
