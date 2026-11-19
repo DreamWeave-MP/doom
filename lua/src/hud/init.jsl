@@ -1,0 +1,255 @@
+--!strict
+-- @doom/hud: the in-game heads-up display drawn over the 3D view. The status bar (st_stuff.c),
+-- the message line and level title (hu_stuff.c), the automap (am_map.c), the palette shifts of
+-- damage and pickups, and the text writer the menus share. Everything it remembers (the face,
+-- message timers, the automap's view) lives in the Hud, never in the game: the HUD reads the
+-- simulation and changes nothing in it but the message it takes off a player.
+local automap = require('@self/automap')
+local font = require('@self/font')
+local graphics = require('@self/graphics')
+local random = require('./random')
+local statusbar = require('@self/statusbar')
+local strings = require('@self/strings')
+local types = require('@self/types')
+local wadModule = require('./wad')
+
+export type Target = graphics.Target
+export type Game = types.Game
+export type Automap = automap.Automap
+export type AutomapCommand = automap.Command
+
+-- Which game's level titles the automap shows.
+export type Mission = 'doom' | 'doom2' | 'plutonia' | 'tnt'
+
+export type Options = {
+  mission: Mission?,
+  -- The height of the view above the status bar, which the automap covers: 168 on a 320 by 200
+  -- screen.
+  viewHeight: number?,
+}
+
+type Message = {
+  text: string?,
+  counter: number,
+  level: { types.Line }?,
+}
+
+export type Hud = {
+  graphics: graphics.Graphics,
+  font: font.Font,
+  mission: Mission,
+  random: random.State,
+  faces: { [number]: statusbar.Face },
+  messages: { [number]: Message },
+  automap: Automap,
+  -- The slot last ticked, whose message line the automap's commands answer on.
+  slot: number,
+}
+
+local module = {}
+
+-- HU_MSGTIMEOUT: how many tics a message stays up.
+module.MessageTimeout = 4 * 35
+
+module.StatusBarHeight = statusbar.Height
+module.GodFace = statusbar.GodFace
+module.DeadFace = statusbar.DeadFace
+module.EvilGrinOffset = statusbar.EvilGrinOffset
+module.OuchOffset = statusbar.OuchOffset
+module.RampageOffset = statusbar.RampageOffset
+module.TurnOffset = statusbar.TurnOffset
+module.AutomapColors = automap.Colors
+
+local function baseName(path: string): string
+  return string.lower(string.match(path, '[^/\\]+$') or path)
+end
+
+-- Which game the WAD is: Doom when it has no MAP01, else The Plutonia Experiment or TNT by the
+-- IWAD's file name or a lump only that game has, else DOOM II.
+function module.detectMission(wad: wadModule.Wad): Mission
+  if not wad:find('MAP01') then return 'doom' end
+
+  local name = baseName(wad.paths[1])
+  if name == 'plutonia.wad' then return 'plutonia' end
+  if name == 'tnt.wad' then return 'tnt' end
+  if wad:find('WFALL1') then return 'plutonia' end
+  if wad:find('DOTNTDR') then return 'tnt' end
+
+  return 'doom2'
+end
+
+function module.new(wad: wadModule.Wad, options: Options?): Hud
+  local settings: Options = options or {}
+  local source = graphics.new(wad)
+  return {
+    graphics = source,
+    font = font.load(source),
+    mission = settings.mission or module.detectMission(wad),
+    random = random.new(),
+    faces = {},
+    messages = {},
+    automap = automap.new(320, settings.viewHeight or 200 - statusbar.Height),
+    slot = 0,
+  }
+end
+
+local function faceOf(hud: Hud, slot: number): statusbar.Face
+  local face = hud.faces[slot]
+  if face then return face end
+
+  face = statusbar.newFace()
+  hud.faces[slot] = face
+  return face
+end
+
+local function messageOf(hud: Hud, slot: number): Message
+  local message = hud.messages[slot]
+  if message then return message end
+
+  local created: Message = { text = nil, counter = 0, level = nil }
+  hud.messages[slot] = created
+  return created
+end
+
+-- Puts `text` on the message line of `slot` for MessageTimeout tics, as a player's message is.
+function module.showMessage(hud: Hud, slot: number, text: string): ()
+  local message = messageOf(hud, slot)
+  message.text = text
+  message.counter = module.MessageTimeout
+end
+
+-- The message on the line of `slot`, if one is up.
+function module.message(hud: Hud, slot: number): string?
+  local message = hud.messages[slot]
+  return message and message.text
+end
+
+-- The face patch index the status bar of `slot` shows: a pain level's stride of 8 (three
+-- straight faces, turned right, turned left, ouch, evil grin, rampage), then GodFace and DeadFace.
+function module.faceIndex(hud: Hud, slot: number): number
+  return faceOf(hud, slot).index
+end
+
+-- One 35 Hz tic for the player in `slot`, after the simulation's tic: ST_Ticker, AM_Ticker and
+-- HU_Ticker. Outside a level only the automap is closed, as G_DoCompleted closes it.
+function module.tick(hud: Hud, game: Game, slot: number): ()
+  hud.slot = slot
+  if game.gamestate ~= 'level' then
+    hud.automap.active = false
+    return
+  end
+
+  statusbar.tick(faceOf(hud, slot), hud.random, game, slot)
+  automap.tick(hud.automap, game, slot)
+
+  local message = messageOf(hud, slot)
+  if message.level ~= game.lines then
+    message.level = game.lines
+    message.text, message.counter = nil, 0
+  end
+
+  if message.counter > 0 then
+    message.counter -= 1
+    if message.counter == 0 then message.text = nil end
+  end
+
+  local player = game.players[slot]
+  if player.message then
+    message.text = player.message
+    message.counter = module.MessageTimeout
+    player.message = nil
+  end
+end
+
+-- The PLAYPAL palette (0 to 13) the frame of `slot` is shown through.
+function module.paletteIndex(game: Game, slot: number): number
+  return statusbar.paletteIndex(game.players[slot])
+end
+
+-- The status bar over the bottom 32 rows of the target.
+function module.drawStatusBar(hud: Hud, game: Game, slot: number, target: Target): ()
+  statusbar.draw(hud.graphics, faceOf(hud, slot), game, slot, target)
+end
+
+-- The message line of `slot` at the top left, while a message is up.
+function module.drawMessages(hud: Hud, slot: number, target: Target): ()
+  local text = module.message(hud, slot)
+  if text then font.draw(hud.font, target, 0, 0, text) end
+end
+
+-- Text in the heads-up font with its top left at (left, top): upper case only (lower case is drawn
+-- upper), anything else the font lacks advanced over as a space, a newline 12 rows down.
+function module.drawText(hud: Hud, target: Target, left: number, top: number, text: string): ()
+  font.draw(hud.font, target, left, top, text)
+end
+
+-- The width in pixels of the widest line of `text`.
+function module.textWidth(hud: Hud, text: string): number
+  return font.width(hud.font, text)
+end
+
+-- The height in pixels `drawText` covers.
+function module.textHeight(hud: Hud, text: string): number
+  return font.height(hud.font, text)
+end
+
+local function titleTable(mission: Mission): { string }
+  if mission == 'doom' then return strings.Doom end
+  if mission == 'plutonia' then return strings.Plutonia end
+  if mission == 'tnt' then return strings.Tnt end
+
+  return strings.Doom2
+end
+
+-- The level's title as the automap shows it; a map the title tables don't name is its marker.
+function module.levelTitle(hud: Hud, game: Game): string
+  local doom = hud.mission == 'doom'
+  local expected = if doom
+    then string.format('E%dM%d', game.gameepisode, game.gamemap)
+    else string.format('MAP%02d', game.gamemap)
+  if game.mapname ~= expected then return game.mapname end
+
+  local index = if doom then (game.gameepisode - 1) * 9 + game.gamemap else game.gamemap
+  return titleTable(hud.mission)[index] or game.mapname
+end
+
+-- The automap's state: `active`, `followPlayer`, `grid`, `cheating`, `marks`, and its view.
+function module.automap(hud: Hud): Automap
+  return hud.automap
+end
+
+-- Drives the automap: 'toggle' opens and closes it, and the rest act while it is open. 'zoomIn',
+-- 'zoomOut' and the four pans last one tic, so send them every tic their key is held; 'follow',
+-- 'grid', 'mark', 'clearMarks' answer on the message line, 'bigger' fits the whole level, and
+-- 'cheat' steps iddt's reveal.
+function module.automapCommand(hud: Hud, command: AutomapCommand): ()
+  local reply = automap.command(hud.automap, command)
+  if reply then module.showMessage(hud, hud.slot, reply) end
+end
+
+-- The open automap over the top `viewHeight` rows of the target (default: all but the status
+-- bar), with the level title in its bottom left as HU_Drawer adds it. Nothing while it is shut.
+function module.drawAutomap(
+  hud: Hud,
+  game: Game,
+  slot: number,
+  target: Target,
+  viewHeight: number?
+): ()
+  local map = hud.automap
+  if not map.active then return end
+
+  local height = viewHeight or target.height - statusbar.Height
+  automap.draw(map, hud.graphics, game, slot, target, height)
+  font.draw(hud.font, target, 0, height - 1 - hud.font.height, module.levelTitle(hud, game))
+end
+
+-- Everything the HUD draws over a frame whose 3D view is already in the target: the automap if
+-- it is open, the status bar, and the message line.
+function module.draw(hud: Hud, game: Game, slot: number, target: Target): ()
+  module.drawAutomap(hud, game, slot, target)
+  module.drawStatusBar(hud, game, slot, target)
+  module.drawMessages(hud, slot, target)
+end
+
+return module

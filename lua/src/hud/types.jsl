@@ -1,0 +1,81 @@
+--!strict
+-- The parts of the play simulation's game (`require('@doom/play').game`) the HUD reads. The
+-- simulation keeps the C names; these types name only the fields the HUD touches.
+local module = {}
+
+export type Mobj = {
+  x: number,
+  y: number,
+  angle: number,
+  snext: Mobj?,
+}
+
+export type Player = {
+  health: number,
+  armorpoints: number,
+  ammo: { [number]: number },
+  maxammo: { [number]: number },
+  weaponowned: { [number]: boolean },
+  readyweapon: number,
+  cards: { [number]: boolean },
+  powers: { [number]: number },
+  damagecount: number,
+  bonuscount: number,
+  frags: { [number]: number },
+  cheats: number,
+  attackdown: boolean,
+  attacker: Mobj?,
+  mo: Mobj?,
+  -- Set by the simulation (pickups, locked doors), taken and cleared by the HUD's tick.
+  message: string?,
+}
+
+export type Vertex = { x: number, y: number }
+
+export type Sector = {
+  floorheight: number,
+  ceilingheight: number,
+  thinglist: Mobj?,
+}
+
+export type Line = {
+  v1: Vertex,
+  v2: Vertex,
+  flags: number,
+  special: number,
+  frontsector: Sector?,
+  backsector: Sector?,
+}
+
+export type Game = {
+  players: { [number]: Player },
+  playeringame: { [number]: boolean },
+  gamestate: string,
+  netgame: boolean,
+  deathmatch: number,
+  commercial: boolean,
+  gameepisode: number,
+  gamemap: number,
+  mapname: string,
+  lines: { Line },
+  vertexes: { Vertex },
+  sectors: { Sector },
+  bmaporgx: number,
+  bmaporgy: number,
+}
+
+-- Linedef flags (doomdata.h): ML_SECRET, ML_DONTDRAW, and ML_MAPPED, which the renderer sets
+-- on a line once it has drawn it (r_segs.c), and which the automap reads.
+module.LineSecret = 32
+module.LineDontDraw = 128
+module.LineMapped = 256
+
+-- powertype_t and the god mode cheat flag (d_player.h).
+module.PowerInvulnerability = 0
+module.PowerStrength = 1
+module.PowerInvisibility = 2
+module.PowerIronFeet = 3
+module.PowerAllMap = 4
+module.CheatGodMode = 2
+
+return table.freeze(module)

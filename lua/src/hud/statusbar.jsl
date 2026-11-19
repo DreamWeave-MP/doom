@@ -1,0 +1,344 @@
+--!strict
+-- The status bar (st_stuff.c, st_lib.c): its widgets drawn whole every frame, the face's
+-- priority machine ticked at 35 Hz, and the palette the screen's damage and pickups tint it with.
+local graphics = require('./graphics')
+local play = require('../play/api')
+local random = require('../random')
+local types = require('./types')
+
+type Patch = graphics.Patch
+type Target = graphics.Target
+
+-- One player's face as ST_updateFaceWidget keeps it. `level` is the level the face was started
+-- on (its line table), so a new level, or a loaded game, starts it again as ST_Start does.
+export type Face = {
+  index: number,
+  count: number,
+  priority: number,
+  lastAttackDown: number,
+  oldHealth: number,
+  oldWeaponsOwned: { [number]: boolean },
+  randomNumber: number,
+  level: { types.Line }?,
+}
+
+local module = {}
+
+-- The bar's height; it sits at the bottom of a 320 by 200 screen (ST_HEIGHT, ST_Y).
+module.Height = 32
+module.Top = 168
+
+local TicRate = 35
+
+local NumPainFaces = 5
+local FaceStride = 8
+local TurnOffset = 3
+local OuchOffset = 5
+local EvilGrinOffset = 6
+local RampageOffset = 7
+
+module.GodFace = NumPainFaces * FaceStride
+module.DeadFace = module.GodFace + 1
+module.EvilGrinOffset = EvilGrinOffset
+module.OuchOffset = OuchOffset
+module.RampageOffset = RampageOffset
+module.TurnOffset = TurnOffset
+
+local EvilGrinCount = 2 * TicRate
+local StraightFaceCount = TicRate // 2
+local TurnCount = TicRate
+local RampageDelay = 2 * TicRate
+local MuchPain = 20
+
+local Ang45, Ang180 = 0x20000000, 0x80000000
+
+-- weaponinfo[].ammo by weapon; 5 is am_noammo.
+local WeaponAmmo = { [0] = 5, 0, 1, 0, 3, 2, 2, 5, 1 }
+local NoAmmo = 5
+
+-- The face patches in st_faceindex order: five pain levels of three straight faces, two turned,
+-- the ouch, the evil grin and the rampage, then god mode and dead.
+local FaceNames: { [number]: string } = {}
+for pain = 0, NumPainFaces - 1 do
+  local base = pain * FaceStride
+  FaceNames[base] = `STFST{pain}0`
+  FaceNames[base + 1] = `STFST{pain}1`
+  FaceNames[base + 2] = `STFST{pain}2`
+  FaceNames[base + 3] = `STFTR{pain}0`
+  FaceNames[base + 4] = `STFTL{pain}0`
+  FaceNames[base + 5] = `STFOUCH{pain}`
+  FaceNames[base + 6] = `STFEVL{pain}`
+  FaceNames[base + 7] = `STFKILL{pain}`
+end
+
+FaceNames[module.GodFace] = 'STFGOD0'
+FaceNames[module.DeadFace] = 'STFDEAD0'
+module.FaceNames = table.freeze(FaceNames)
+
+-- Ammo and maximum rows, by ammo type: bullets, shells, cells, rockets (ST_AMMOnY).
+local AmmoRows = { [0] = 173, 179, 191, 185 }
+
+function module.newFace(): Face
+  return {
+    index = 0,
+    count = 0,
+    priority = 0,
+    lastAttackDown = -1,
+    oldHealth = -1,
+    oldWeaponsOwned = {},
+    randomNumber = 0,
+    level = nil,
+  }
+end
+
+-- ST_calcPainOffset.
+local function painOffset(player: types.Player): number
+  local health = math.min(player.health, 100)
+  return FaceStride * ((100 - health) * NumPainFaces // 101)
+end
+
+-- ST_updateFaceWidget, its quirks included: the ouch face tests health gained, not lost, so
+-- only a big heal shows it.
+local function updateFace(face: Face, player: types.Player): ()
+  if face.priority < 10 and player.health == 0 then
+    face.priority = 9
+    face.index = module.DeadFace
+    face.count = 1
+  end
+
+  if face.priority < 9 and player.bonuscount ~= 0 then
+    local grin = false
+    for weapon = 0, 8 do
+      local owned = player.weaponowned[weapon] == true
+      if face.oldWeaponsOwned[weapon] ~= owned then
+        grin = true
+        face.oldWeaponsOwned[weapon] = owned
+      end
+    end
+
+    if grin then
+      face.priority = 8
+      face.count = EvilGrinCount
+      face.index = painOffset(player) + EvilGrinOffset
+    end
+  end
+
+  local attacker, mo = player.attacker, player.mo
+  if face.priority < 8 and player.damagecount ~= 0 and attacker and mo and attacker ~= mo then
+    face.priority = 7
+    face.count = TurnCount
+    if player.health - face.oldHealth > MuchPain then
+      face.index = painOffset(player) + OuchOffset
+    else
+      local badGuyAngle = play.engine.PointToAngle2(mo.x, mo.y, attacker.x, attacker.y)
+      local difference, right
+      if badGuyAngle > mo.angle then
+        difference = badGuyAngle - mo.angle
+        right = difference > Ang180
+      else
+        difference = mo.angle - badGuyAngle
+        right = difference <= Ang180
+      end
+
+      face.index = painOffset(player)
+      if difference < Ang45 then
+        face.index += RampageOffset
+      elseif right then
+        face.index += TurnOffset
+      else
+        face.index += TurnOffset + 1
+      end
+    end
+  end
+
+  if face.priority < 7 and player.damagecount ~= 0 then
+    face.count = TurnCount
+    if player.health - face.oldHealth > MuchPain then
+      face.priority = 7
+      face.index = painOffset(player) + OuchOffset
+    else
+      face.priority = 6
+      face.index = painOffset(player) + RampageOffset
+    end
+  end
+
+  if face.priority < 6 then
+    if not player.attackdown then
+      face.lastAttackDown = -1
+    elseif face.lastAttackDown == -1 then
+      face.lastAttackDown = RampageDelay
+    else
+      face.lastAttackDown -= 1
+      if face.lastAttackDown == 0 then
+        face.priority = 5
+        face.index = painOffset(player) + RampageOffset
+        face.count = 1
+        face.lastAttackDown = 1
+      end
+    end
+  end
+
+  local god = bit32.band(player.cheats, types.CheatGodMode) ~= 0
+  if face.priority < 5 and (god or player.powers[types.PowerInvulnerability] ~= 0) then
+    face.priority = 4
+    face.index = module.GodFace
+    face.count = 1
+  end
+
+  if face.count == 0 then
+    face.index = painOffset(player) + face.randomNumber % 3
+    face.count = StraightFaceCount
+    face.priority = 0
+  end
+
+  face.count -= 1
+end
+
+-- ST_Ticker for the player in `slot`, with `randomState` standing in for M_Random: the face is
+-- presentation, so its randomness never touches the game's.
+function module.tick(face: Face, randomState: random.State, game: types.Game, slot: number): ()
+  local player = game.players[slot]
+  if face.level ~= game.lines then
+    face.level = game.lines
+    face.index = 0
+    face.oldHealth = -1
+    for weapon = 0, 8 do
+      face.oldWeaponsOwned[weapon] = player.weaponowned[weapon] == true
+    end
+  end
+
+  face.randomNumber = random.mRandom(randomState)
+  updateFace(face, player)
+  face.oldHealth = player.health
+end
+
+-- ST_doPaletteStuff: which PLAYPAL palette the frame shows. 0 is normal, 1 to 8 the red of
+-- damage (or of berserk, fading), 9 to 12 the gold of a pickup, 13 the radiation suit's green.
+function module.paletteIndex(player: types.Player): number
+  local count = player.damagecount
+  local strength = player.powers[types.PowerStrength]
+  if strength ~= 0 then count = math.max(count, 12 - strength // 64) end
+
+  if count ~= 0 then return math.min((count + 7) // 8, 7) + 1 end
+  if player.bonuscount ~= 0 then return math.min((player.bonuscount + 7) // 8, 3) + 9 end
+
+  local suit = player.powers[types.PowerIronFeet]
+  if suit > 4 * 32 or bit32.band(suit, 8) ~= 0 then return 13 end
+
+  return 0
+end
+
+-- STlib_drawNum: `value` right-aligned to end at `right` in at most `width` digits, nothing for
+-- no value (the n/a of a weapon without ammo), and a minus sign before a negative one.
+local function drawNumber(
+  source: graphics.Graphics,
+  target: Target,
+  prefix: string,
+  right: number,
+  row: number,
+  value: number?,
+  width: number
+): ()
+  if not value then return end
+
+  local zero = graphics.patch(source, `{prefix}0`)
+  local digitWidth = zero.width
+  local number = value
+  local negative = number < 0
+  if negative then
+    if width == 2 and number < -9 then
+      number = -9
+    elseif width == 3 and number < -99 then
+      number = -99
+    end
+
+    number = -number
+  end
+
+  local column = right
+  if number == 0 then graphics.draw(target, zero, column - digitWidth, row) end
+
+  local remaining = width
+  while number ~= 0 and remaining > 0 do
+    remaining -= 1
+    column -= digitWidth
+    graphics.draw(target, graphics.patch(source, `{prefix}{number % 10}`), column, row)
+    number //= 10
+  end
+
+  if negative then graphics.draw(target, graphics.patch(source, 'STTMINUS'), column - 8, row) end
+end
+
+-- The ready weapon's ammo, or nil for a weapon that uses none.
+function module.readyAmmo(player: types.Player): number?
+  local ammo = WeaponAmmo[player.readyweapon]
+  if not ammo or ammo == NoAmmo then return nil end
+
+  return player.ammo[ammo]
+end
+
+-- The deathmatch frag total shown for `slot`: everyone it fragged, less its suicides.
+function module.fragCount(player: types.Player, slot: number): number
+  local total = 0
+  for other = 0, 3 do
+    total += if other == slot then -player.frags[other] else player.frags[other]
+  end
+
+  return total
+end
+
+-- ST_Drawer with a full refresh: the bar's 320 by 32 pixels at the bottom of the target,
+-- centred across a target wider than 320.
+function module.draw(
+  source: graphics.Graphics,
+  face: Face,
+  game: types.Game,
+  slot: number,
+  target: Target
+): ()
+  local player = game.players[slot]
+  local originX, originY = (target.width - 320) // 2, target.height - 200
+  local function place(name: string, column: number, row: number)
+    graphics.draw(target, graphics.patch(source, name), originX + column, originY + row)
+  end
+
+  local function number(prefix: string, column: number, row: number, value: number?, width: number)
+    drawNumber(source, target, prefix, originX + column, originY + row, value, width)
+  end
+
+  -- The 2024 re-release's STBAR is 576 wide, its 320 vanilla columns in the middle: centred, it
+  -- fills a widescreen target and clips to a vanilla one.
+  place('STBAR', (320 - graphics.patch(source, 'STBAR').width) // 2, module.Top)
+  if game.netgame then place(`STFB{slot}`, 143, module.Top) end
+
+  number('STTNUM', 44, 171, module.readyAmmo(player), 3)
+  for ammo = 0, 3 do
+    number('STYSNUM', 288, AmmoRows[ammo], player.ammo[ammo], 3)
+    number('STYSNUM', 314, AmmoRows[ammo], player.maxammo[ammo], 3)
+  end
+
+  place('STTPRCNT', 90, 171)
+  number('STTNUM', 90, 171, player.health, 3)
+  place('STTPRCNT', 221, 171)
+  number('STTNUM', 221, 171, player.armorpoints, 3)
+
+  local deathmatch = game.deathmatch ~= 0
+  if not deathmatch then
+    place('STARMS', 104, module.Top)
+    for arm = 0, 5 do
+      local name = if player.weaponowned[arm + 1] then `STYSNUM{arm + 2}` else `STGNUM{arm + 2}`
+      place(name, 111 + arm % 3 * 12, 172 + arm // 3 * 10)
+    end
+  end
+
+  place(FaceNames[face.index], 143, module.Top)
+
+  for box = 0, 2 do
+    local key = if player.cards[box + 3] then box + 3 elseif player.cards[box] then box else nil
+    if key then place(`STKEYS{key}`, 239, 171 + box * 10) end
+  end
+
+  if deathmatch then number('STTNUM', 138, 171, module.fragCount(player, slot), 2) end
+end
+
+return module

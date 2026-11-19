@@ -621,6 +621,18 @@ end
 local LockedDoors = { [99] = 0, [133] = 0, [134] = 2, [135] = 2, [136] = 1, [137] = 1 }
 local ManualLocks = { [26] = 0, [32] = 0, [27] = 1, [34] = 1, [28] = 2, [33] = 2 }
 
+-- PD_* of d_englsh.h by card: what a locked switch or remote door says, and a locked door.
+local LockedObjectMessages = {
+  [0] = 'You need a blue key to activate this object',
+  'You need a yellow key to activate this object',
+  'You need a red key to activate this object',
+}
+local LockedDoorMessages = {
+  [0] = 'You need a blue key to open this door',
+  'You need a yellow key to open this door',
+  'You need a red key to open this door',
+}
+
 local function hasKey(player: any, card: number): boolean
   return player.cards[card] or player.cards[card + 3]
 end
@@ -630,7 +642,11 @@ local function doLockedDoor(line: any, type: string, thing: any): boolean
   if not player then return false end
 
   local card = LockedDoors[line.special]
-  if card and not hasKey(player, card) then return false end
+  if card and not hasKey(player, card) then
+    player.message = LockedObjectMessages[card]
+    return false
+  end
+
   return P.DoDoor(line, type)
 end
 
@@ -640,7 +656,10 @@ local function verticalDoor(line: any, thing: any): ()
   local card = ManualLocks[special]
   if card then
     if not player then return end
-    if not hasKey(player, card) then return end
+    if not hasKey(player, card) then
+      player.message = LockedDoorMessages[card]
+      return
+    end
   end
 
   -- A one-sided door line has no back side to open.

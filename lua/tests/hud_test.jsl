@@ -1,0 +1,469 @@
+--!strict
+-- The heads-up display against the IWADs' own graphics. Every test needs doom.wad (some
+-- doom2.wad, plutonia.wad or tnt.wad) in the working folder and passes without them: the
+-- IWADs are never part of the package.
+local demoModule = require('@doom/demo')
+local fs = require('@dream/fs')
+local hudModule = require('@doom/hud')
+local patchModule = require('@doom/patch')
+local play = require('@doom/play')
+local test = require('@jess/test')
+local wadModule = require('@doom/wad')
+local expect = test.expect
+local suite = test.new()
+
+type Target = hudModule.Target
+
+local FracUnit = 65536
+local engine = play.engine
+
+local opened: { [string]: wadModule.Wad } = {}
+
+-- The IWAD named `name` from the working folder, or nil when it isn't there.
+local function iwad(name: string): wadModule.Wad?
+  if opened[name] then return opened[name] end
+
+  local path = fs.join(fs.cwd() :: string, name)
+  if not fs.exists(path) then return nil end
+
+  local wad = wadModule.open(path)
+  opened[name] = wad
+  return wad
+end
+
+local function frame(fill: number?): Target
+  local pixels = buffer.create(320 * 200)
+  buffer.fill(pixels, 0, fill or 0, 320 * 200)
+  return { pixels = pixels, width = 320, height = 200 }
+end
+
+local function idle(): any
+  return play.command({})
+end
+
+-- One tic of the game, then of the HUD, as a frontend runs them.
+local function step(hud: hudModule.Hud, tics: number?): ()
+  for _ = 1, tics or 1 do
+    play.tick({ [0] = idle() })
+    hudModule.tick(hud, play.game, 0)
+  end
+end
+
+-- Asserts the target shows `name`'s patch drawn at (x, y): every pixel the patch covers holds
+-- the patch's colour. Coverage is found by drawing the patch over two different fills.
+local function expectPatch(
+  wad: wadModule.Wad,
+  target: Target,
+  name: string,
+  column: number,
+  row: number
+): ()
+  local patch = patchModule.open(wad:read(name))
+  local zero, one = frame(0), frame(1)
+  patchModule.draw(zero.pixels, 320, 200, patch, column, row)
+  patchModule.draw(one.pixels, 320, 200, patch, column, row)
+
+  local covered, mismatched = 0, 0
+  for at = 0, 320 * 200 - 1 do
+    local color = buffer.readu8(zero.pixels, at)
+    if color ~= buffer.readu8(one.pixels, at) then continue end
+
+    covered += 1
+    if buffer.readu8(target.pixels, at) ~= color then mismatched += 1 end
+  end
+
+  expect(covered > 0).toBe(true)
+  expect(mismatched).toBe(0)
+end
+
+local function countColors(target: Target, colors: { [number]: boolean }, rows: number): number
+  local count = 0
+  for at = 0, rows * target.width - 1 do
+    if colors[buffer.readu8(target.pixels, at)] then count += 1 end
+  end
+
+  return count
+end
+
+suite.describe('status bar', function()
+  suite.it('draws the ready ammo, health and armor in STTNUM digits', function()
+    local wad = iwad('doom.wad')
+    if not wad then return end
+
+    local game = play.new(wad, { mapName = 'E1M1' })
+    local hud = hudModule.new(wad)
+    step(hud)
+
+    local target = frame()
+    hudModule.drawStatusBar(hud, game, 0, target)
+
+    -- 50 bullets ending at x 44, 100% ending at 90, 0% at 221; each digit is 14 wide.
+    expectPatch(wad, target, 'STTNUM5', 16, 171)
+    expectPatch(wad, target, 'STTNUM0', 30, 171)
+    expectPatch(wad, target, 'STTNUM1', 48, 171)
+    expectPatch(wad, target, 'STTNUM0', 62, 171)
+    expectPatch(wad, target, 'STTNUM0', 76, 171)
+    expectPatch(wad, target, 'STTPRCNT', 90, 171)
+    expectPatch(wad, target, 'STTNUM0', 207, 171)
+    expectPatch(wad, target, 'STTPRCNT', 221, 171)
+
+    -- The bullets and their maximum in the ammo table, and the pistol lit among the arms.
+    expectPatch(wad, target, 'STYSNUM5', 280, 173)
+    expectPatch(wad, target, 'STYSNUM0', 284, 173)
+    expectPatch(wad, target, 'STYSNUM2', 302, 173)
+    expectPatch(wad, target, 'STYSNUM2', 111, 172)
+    expectPatch(wad, target, 'STGNUM3', 123, 172)
+  end)
+
+  suite.it('shows keys, and frags instead of arms in deathmatch', function()
+    local wad = iwad('doom2.wad')
+    if not wad then return end
+
+    local game = play.new(wad, { mapName = 'MAP01', deathmatch = 1, players = { true, true } })
+    local hud = hudModule.new(wad)
+    game.players[1].frags[0] = 3
+    game.players[1].frags[1] = 1
+    hudModule.tick(hud, game, 1)
+
+    local target = frame()
+    hudModule.drawStatusBar(hud, game, 1, target)
+
+    -- Two frags, less one suicide, ending at x 138; every skull key, as deathmatch hands out.
+    expectPatch(wad, target, 'STTNUM2', 124, 171)
+    expectPatch(wad, target, 'STKEYS3', 239, 171)
+    expectPatch(wad, target, 'STKEYS4', 239, 181)
+    expectPatch(wad, target, 'STKEYS5', 239, 191)
+
+    -- Slot 1's face background, where the face doesn't cover it.
+    local background = frame()
+    patchModule.draw(background.pixels, 320, 200, patchModule.open(wad:read('STFB1')), 143, 168)
+    for _, at in { 168 * 320 + 143, 198 * 320 + 177 } do
+      expect(buffer.readu8(target.pixels, at)).toBe(buffer.readu8(background.pixels, at))
+    end
+  end)
+end)
+
+suite.describe('palette', function()
+  suite.it('turns red with damage and berserk, gold with pickups, green in the suit', function()
+    local wad = iwad('doom.wad')
+    if not wad then return end
+
+    local game = play.new(wad, { mapName = 'E1M1' })
+    local player = game.players[0]
+    expect(hudModule.paletteIndex(game, 0)).toBe(0)
+
+    player.damagecount = 10
+    expect(hudModule.paletteIndex(game, 0)).toBe(3)
+    player.damagecount = 100
+    expect(hudModule.paletteIndex(game, 0)).toBe(8)
+
+    player.damagecount = 0
+    player.bonuscount = 6
+    expect(hudModule.paletteIndex(game, 0)).toBe(10)
+    player.bonuscount = 40
+    expect(hudModule.paletteIndex(game, 0)).toBe(12)
+
+    player.bonuscount = 0
+    player.powers[3] = 200
+    expect(hudModule.paletteIndex(game, 0)).toBe(13)
+
+    -- The suit's last 128 tics flicker on bit 3.
+    player.powers[3] = 100
+    expect(hudModule.paletteIndex(game, 0)).toBe(0)
+    player.powers[3] = 104
+    expect(hudModule.paletteIndex(game, 0)).toBe(13)
+
+    -- Berserk starts at 12 counts of red and fades one every 64 tics.
+    player.powers[3] = 0
+    player.powers[1] = 1
+    expect(hudModule.paletteIndex(game, 0)).toBe(3)
+    player.powers[1] = 64 * 12
+    expect(hudModule.paletteIndex(game, 0)).toBe(0)
+  end)
+end)
+
+suite.describe('face', function()
+  suite.it('looks ahead, winces, grins at a new weapon, and settles again', function()
+    local wad = iwad('doom.wad')
+    if not wad then return end
+
+    local game = play.new(wad, { mapName = 'E1M1' })
+    local hud = hudModule.new(wad)
+    local player = game.players[0]
+    step(hud, 3)
+    expect(hudModule.faceIndex(hud, 0) < 3).toBe(true)
+
+    -- Hurt by nobody: the rampage face, for a second.
+    play.tick({ [0] = idle() })
+    player.damagecount = 20
+    hudModule.tick(hud, game, 0)
+    expect(hudModule.faceIndex(hud, 0)).toBe(hudModule.RampageOffset)
+
+    -- A new weapon outranks it.
+    play.tick({ [0] = idle() })
+    player.bonuscount = 6
+    player.weaponowned[2] = true
+    hudModule.tick(hud, game, 0)
+    expect(hudModule.faceIndex(hud, 0)).toBe(hudModule.EvilGrinOffset)
+
+    -- The grin lasts two seconds, then a straight face at half health's pain level.
+    player.health = 50
+    step(hud, 70)
+    expect(hudModule.faceIndex(hud, 0) // 8).toBe(2)
+    expect(hudModule.faceIndex(hud, 0) % 8 < 3).toBe(true)
+  end)
+
+  suite.it('turns toward the attacker, and shows god mode and death', function()
+    local wad = iwad('doom.wad')
+    if not wad then return end
+
+    local game = play.new(wad, { mapName = 'E1M1' })
+    local hud = hudModule.new(wad)
+    local player = game.players[0]
+    local mo = player.mo
+    step(hud)
+
+    -- E1M1's start faces north; an attacker due east is on the right.
+    local attacker = engine.SpawnMobj(mo.x + 128 * FracUnit, mo.y, mo.z, engine.MT.MT_POSSESSED)
+    play.tick({ [0] = idle() })
+    player.attacker = attacker
+    player.damagecount = 10
+    hudModule.tick(hud, game, 0)
+    expect(hudModule.faceIndex(hud, 0)).toBe(hudModule.TurnOffset)
+
+    player.damagecount = 0
+    player.attacker = nil
+    player.cheats = 2
+    step(hud, 40)
+    expect(hudModule.faceIndex(hud, 0)).toBe(hudModule.GodFace)
+
+    player.cheats = 0
+    play.tick({ [0] = idle() })
+    player.health = 0
+    hudModule.tick(hud, game, 0)
+    expect(hudModule.faceIndex(hud, 0)).toBe(hudModule.DeadFace)
+  end)
+end)
+
+suite.describe('messages', function()
+  suite.it("shows a pickup's message for HU_MSGTIMEOUT tics", function()
+    local wad = iwad('doom.wad')
+    if not wad then return end
+
+    local game = play.new(wad, { mapName = 'E1M1' })
+    local hud = hudModule.new(wad)
+    local player = game.players[0]
+    local mo = player.mo
+    step(hud)
+    expect(hudModule.message(hud, 0)).toBe(nil)
+
+    play.tick({ [0] = idle() })
+    engine.TouchSpecialThing(engine.SpawnMobj(mo.x, mo.y, mo.z, engine.MT.MT_CLIP), mo)
+    expect(player.message).toBe('Picked up a clip.')
+    hudModule.tick(hud, game, 0)
+    expect(player.message).toBe(nil)
+    expect(hudModule.message(hud, 0)).toBe('Picked up a clip.')
+
+    local target = frame()
+    hudModule.drawMessages(hud, 0, target)
+    local inked = 0
+    for at = 0, 8 * 320 - 1 do
+      if buffer.readu8(target.pixels, at) ~= 0 then inked += 1 end
+    end
+
+    expect(inked > 0).toBe(true)
+
+    step(hud, hudModule.MessageTimeout - 1)
+    expect(hudModule.message(hud, 0)).toBe('Picked up a clip.')
+    step(hud)
+    expect(hudModule.message(hud, 0)).toBe(nil)
+  end)
+
+  suite.it('names a key only the first time it is picked up', function()
+    local wad = iwad('doom.wad')
+    if not wad then return end
+
+    local game = play.new(wad, { mapName = 'E1M1' })
+    local player = game.players[0]
+    local mo = player.mo
+    engine.TouchSpecialThing(engine.SpawnMobj(mo.x, mo.y, mo.z, engine.MT.MT_MISC4), mo)
+    expect(player.message).toBe('Picked up a blue keycard.')
+
+    player.message = nil
+    engine.TouchSpecialThing(engine.SpawnMobj(mo.x, mo.y, mo.z, engine.MT.MT_MISC4), mo)
+    expect(player.message).toBe(nil)
+  end)
+end)
+
+suite.describe('automap', function()
+  local lineColors = {
+    [hudModule.AutomapColors.wall] = true,
+    [hudModule.AutomapColors.teleporter] = true,
+    [hudModule.AutomapColors.floorChange] = true,
+    [hudModule.AutomapColors.ceilingChange] = true,
+    [hudModule.AutomapColors.unseen] = true,
+  }
+
+  local function setMapped(game: hudModule.Game, mapped: boolean)
+    for _, line in game.lines do
+      local flags = line.flags
+      line.flags = if mapped then bit32.bor(flags, 256) else bit32.band(flags, bit32.bnot(256))
+    end
+  end
+
+  suite.it('draws the lines the renderer has mapped and none it has not', function()
+    local wad = iwad('doom.wad')
+    if not wad then return end
+
+    local game = play.new(wad, { mapName = 'E1M1' })
+    local hud = hudModule.new(wad)
+    setMapped(game, false)
+    hudModule.automapCommand(hud, 'toggle')
+    step(hud)
+    expect(hudModule.automap(hud).active).toBe(true)
+
+    -- Above the level title, which sits on the map's bottom rows.
+    local target = frame(4)
+    hudModule.drawAutomap(hud, game, 0, target)
+    expect(countColors(target, lineColors, 150)).toBe(0)
+    expect(countColors(target, { [hudModule.AutomapColors.player] = true }, 168) > 0).toBe(true)
+    expect(countColors(target, { [4] = true }, 168)).toBe(0)
+
+    setMapped(game, true)
+    target = frame()
+    hudModule.drawAutomap(hud, game, 0, target)
+    expect(countColors(target, { [hudModule.AutomapColors.wall] = true }, 150) > 0).toBe(true)
+
+    -- The computer map shows what is unseen in gray.
+    setMapped(game, false)
+    game.players[0].powers[4] = 1
+    target = frame()
+    hudModule.drawAutomap(hud, game, 0, target)
+    expect(countColors(target, { [hudModule.AutomapColors.unseen] = true }, 150) > 0).toBe(true)
+    expect(countColors(target, { [hudModule.AutomapColors.wall] = true }, 150)).toBe(0)
+
+    hudModule.automapCommand(hud, 'toggle')
+    target = frame(4)
+    hudModule.drawAutomap(hud, game, 0, target)
+    expect(countColors(target, { [4] = true }, 200)).toBe(320 * 200)
+  end)
+
+  suite.it('follows, pans, zooms and answers on the message line', function()
+    local wad = iwad('doom.wad')
+    if not wad then return end
+
+    local game = play.new(wad, { mapName = 'E1M1' })
+    local hud = hudModule.new(wad)
+    local map = hudModule.automap(hud)
+    hudModule.automapCommand(hud, 'toggle')
+    step(hud)
+
+    local scale = map.scaleMtof
+    hudModule.automapCommand(hud, 'zoomIn')
+    step(hud)
+    expect(map.scaleMtof > scale).toBe(true)
+
+    -- Panning does nothing while the map follows the player.
+    local left = map.left
+    hudModule.automapCommand(hud, 'panRight')
+    step(hud)
+    expect(map.left).toBe(left)
+
+    hudModule.automapCommand(hud, 'follow')
+    expect(map.followPlayer).toBe(false)
+    expect(hudModule.message(hud, 0)).toBe('Follow Mode OFF')
+    hudModule.automapCommand(hud, 'panRight')
+    step(hud)
+    expect(map.left > left).toBe(true)
+
+    hudModule.automapCommand(hud, 'grid')
+    expect(hudModule.message(hud, 0)).toBe('Grid ON')
+    hudModule.automapCommand(hud, 'mark')
+    expect(hudModule.message(hud, 0)).toBe('Marked Spot 0')
+    expect(map.marks[1].x ~= -1).toBe(true)
+
+    -- Leaving the level closes the map.
+    game.gamestate = 'intermission'
+    hudModule.tick(hud, game, 0)
+    expect(map.active).toBe(false)
+  end)
+end)
+
+suite.describe('text', function()
+  suite.it('draws and measures the heads-up font', function()
+    local wad = iwad('doom.wad')
+    if not wad then return end
+
+    local hud = hudModule.new(wad)
+    local width = patchModule.open(wad:read('STCFN065')).width
+    expect(hudModule.textWidth(hud, 'A')).toBe(width)
+    expect(hudModule.textWidth(hud, 'a a')).toBe(2 * width + 4)
+    expect(hudModule.textWidth(hud, 'AA\nA')).toBe(2 * width)
+    expect(hudModule.textHeight(hud, 'A\nA')).toBe(7 + 12)
+
+    local target = frame()
+    hudModule.drawText(hud, target, 10, 20, 'a A')
+    expectPatch(wad, target, 'STCFN065', 10, 20)
+    expectPatch(wad, target, 'STCFN065', 10 + width + 4, 20)
+  end)
+
+  suite.it('names the level for each game', function()
+    local cases = {
+      { 'doom.wad', 'E1M1', 'doom', 'E1M1: Hangar' },
+      { 'doom.wad', 'E4M9', 'doom', 'E4M9: Fear' },
+      { 'doom2.wad', 'MAP01', 'doom2', 'level 1: entryway' },
+      { 'plutonia.wad', 'MAP01', 'plutonia', 'level 1: congo' },
+      { 'tnt.wad', 'MAP01', 'tnt', 'level 1: system control' },
+    }
+
+    for _, case in cases do
+      local wad = iwad(case[1])
+      if not wad then continue end
+
+      local game = play.new(wad, { mapName = case[2] })
+      local hud = hudModule.new(wad)
+      expect(hud.mission).toBe(case[3])
+      expect(hudModule.levelTitle(hud, game)).toBe(case[4])
+    end
+  end)
+end)
+
+suite.describe('demo sync', function()
+  suite.it('a HUD ticking alongside leaves the demo hash as it was', function()
+    local wad = iwad('doom.wad')
+    if not wad then return end
+
+    local header, frames = demoModule.parseFull(wad:read('DEMO1'))
+    local game = play.new(wad, {
+      skill = header.skill,
+      episode = header.episode,
+      map = header.map,
+      deathmatch = header.deathmatch,
+      respawn = header.respawn ~= 0,
+      fast = header.fast ~= 0,
+      nomonsters = header.nomonsters ~= 0,
+      consoleplayer = header.consolePlayer,
+      players = header.players,
+      netgame = header.players[2],
+    })
+
+    local hud = hudModule.new(wad)
+    hudModule.automapCommand(hud, 'toggle')
+    local target = frame()
+    local tics = 0
+    for _, tic in frames do
+      play.tick({ [0] = tic[1], tic[2], tic[3], tic[4] })
+      hudModule.tick(hud, game, 0)
+      hudModule.draw(hud, game, 0, target)
+      tics += 1
+      if game.gamestate ~= 'level' then break end
+    end
+
+    expect(tics).toBe(1710)
+    -- The hash play_test records for the 2024 re-release's DEMO1.
+    local stat = fs.stat(fs.join(fs.cwd() :: string, 'doom.wad'))
+    if stat and stat.size == 12996515 then expect(play.hash()).toBe('6c20fbaa') end
+  end)
+end)
+
+return suite
