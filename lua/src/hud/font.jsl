@@ -1,0 +1,101 @@
+--!strict
+-- The heads-up font, STCFN033 to STCFN095 ('!' to '_'), and the text writer the HUD and the
+-- menus share (hu_lib.c's text lines, m_menu.c's M_WriteText and M_StringWidth).
+local graphics = require('./graphics')
+
+export type Font = {
+  glyphs: { [number]: graphics.Patch },
+  height: number,
+}
+
+local module = {}
+
+-- HU_FONTSTART and HU_FONTEND.
+module.FontStart = 33
+module.FontEnd = 95
+
+-- What a space, or any character the font lacks, advances.
+module.SpaceWidth = 4
+
+-- M_WriteText's line spacing.
+module.LineHeight = 12
+
+function module.load(source: graphics.Graphics): Font
+  local glyphs: { [number]: graphics.Patch } = {}
+  for code = module.FontStart, module.FontEnd do
+    glyphs[code] = graphics.patch(source, string.format('STCFN%03d', code))
+  end
+
+  return { glyphs = glyphs, height = glyphs[module.FontStart].height }
+end
+
+-- The patch drawn for one byte of text, or nil for a space: the font is upper case only.
+local function glyph(font: Font, code: number): graphics.Patch?
+  if code >= 97 and code <= 122 then code -= 32 end
+
+  return font.glyphs[code]
+end
+
+-- Draws `text` with its top left at (left, top). A newline returns to `left` one line lower; a
+-- line stops at the first glyph that would cross the target's right edge, as M_WriteText does.
+function module.draw(
+  font: Font,
+  target: graphics.Target,
+  left: number,
+  top: number,
+  text: string
+): ()
+  local column, row = left, top
+  local stopped = false
+  for index = 1, #text do
+    local code = string.byte(text, index)
+    if code == 10 then
+      column, row = left, row + module.LineHeight
+      stopped = false
+      continue
+    end
+
+    if stopped then continue end
+
+    local patch = glyph(font, code)
+    if not patch then
+      column += module.SpaceWidth
+      continue
+    end
+
+    if column + patch.width > target.width then
+      stopped = true
+      continue
+    end
+
+    graphics.draw(target, patch, column, row)
+    column += patch.width
+  end
+end
+
+-- The width of the widest line of `text`, in pixels.
+function module.width(font: Font, text: string): number
+  local widest, width = 0, 0
+  for index = 1, #text do
+    local code = string.byte(text, index)
+    if code == 10 then
+      widest = math.max(widest, width)
+      width = 0
+      continue
+    end
+
+    local patch = glyph(font, code)
+    width += if patch then patch.width else module.SpaceWidth
+  end
+
+  return math.max(widest, width)
+end
+
+-- The height `draw` covers: one font height, and a line's spacing for each newline. (Vanilla's
+-- M_StringHeight adds a font height per newline though M_WriteText moves down 12.)
+function module.height(font: Font, text: string): number
+  local _, newlines = string.gsub(text, '\n', '')
+  return font.height + newlines * module.LineHeight
+end
+
+return module

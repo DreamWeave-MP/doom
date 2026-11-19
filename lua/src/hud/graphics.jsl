@@ -1,0 +1,40 @@
+--!strict
+-- The HUD's patches, read from the WAD on first use and kept, and the target they are drawn
+-- into: a DOOM-style 8-bit indexed frame (V_DrawPatch's screen).
+local patchModule = require('../patch')
+local wadModule = require('../wad')
+
+export type Target = { pixels: buffer, width: number, height: number }
+export type Patch = patchModule.Patch
+
+export type Graphics = {
+  wad: wadModule.Wad,
+  patches: { [string]: Patch },
+}
+
+local module = {}
+
+function module.new(wad: wadModule.Wad): Graphics
+  return { wad = wad, patches = {} }
+end
+
+function module.has(graphics: Graphics, name: string): boolean
+  return graphics.patches[name] ~= nil or graphics.wad:find(name) ~= nil
+end
+
+-- The patch named `name`; a lump the WAD lacks is an error.
+function module.patch(graphics: Graphics, name: string): Patch
+  local cached = graphics.patches[name]
+  if cached then return cached end
+
+  local patch = patchModule.open(graphics.wad:read(name))
+  graphics.patches[name] = patch
+  return patch
+end
+
+-- V_DrawPatch: the patch's offsets place it relative to (column, row); the target clips it.
+function module.draw(target: Target, patch: Patch, column: number, row: number): ()
+  patchModule.draw(target.pixels, target.width, target.height, patch, column, row)
+end
+
+return module

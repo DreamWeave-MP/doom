@@ -1,0 +1,740 @@
+--!strict
+-- The automap (am_map.c). Input reaches it as commands rather than key events: the application
+-- owns the keyboard. Map coordinates are 16.16 fixed point, as the C keeps them, so the view
+-- pans, zooms, and clips exactly as vanilla's does.
+local fixed = require('../fixed')
+local graphics = require('./graphics')
+local strings = require('./strings')
+local tables = require('../tables')
+local types = require('./types')
+
+type Target = graphics.Target
+
+export type Point = { x: number, y: number }
+
+export type Automap = {
+  active: boolean,
+  -- Set by the toggle that opens the map; the next tick or draw with a game runs AM_Start.
+  starting: boolean,
+  followPlayer: boolean,
+  grid: boolean,
+  -- The iddt cheat: 1 shows every line, 2 every thing as well.
+  cheating: number,
+  bigState: boolean,
+  level: { types.Line }?,
+  frameWidth: number,
+  frameHeight: number,
+  left: number,
+  bottom: number,
+  width: number,
+  height: number,
+  right: number,
+  top: number,
+  minX: number,
+  minY: number,
+  maxX: number,
+  maxY: number,
+  minScale: number,
+  maxScale: number,
+  scaleMtof: number,
+  scaleFtom: number,
+  old: { left: number, bottom: number, width: number, height: number },
+  oldLocation: Point,
+  pan: Point,
+  zoomMtof: number,
+  zoomFtom: number,
+  marks: { Point },
+  markNumber: number,
+  clock: number,
+}
+
+-- Every command takes effect as its key press does in AM_Responder. The pan and zoom commands
+-- last one tic, so an application sends them every tic its key is held.
+export type Command =
+  'toggle'
+  | 'zoomIn'
+  | 'zoomOut'
+  | 'panLeft'
+  | 'panRight'
+  | 'panUp'
+  | 'panDown'
+  | 'follow'
+  | 'grid'
+  | 'bigger'
+  | 'mark'
+  | 'clearMarks'
+  | 'cheat'
+
+local module = {}
+
+local FracUnit = 65536
+local MaxInt = 2147483647
+local PlayerRadius = 16 * FracUnit
+local MapBlockUnits = 128 * FracUnit
+local MarkCount = 10
+
+-- INITSCALEMTOF, M_ZOOMIN and M_ZOOMOUT, as the C's casts truncate them.
+local InitialScale = 13107
+local ZoomIn = 66846
+local ZoomOut = 64250
+local PanStep = 4
+
+-- The palette ranges of am_map.c. lightlev never changes in vanilla, so each is one index.
+local Reds, Grays, Browns, Greens = 176, 96, 64, 112
+local Yellows = 231
+local Black = 0
+local White = 209
+local WallColor = Reds
+local TeleporterColor = Reds + 8
+local FloorChangeColor = Browns
+local CeilingChangeColor = Yellows
+local TwoSidedColor = Grays
+local UnseenColor = Grays + 3
+local GridColor = Grays + 8
+local CrosshairColor = Grays
+local ThingColor = Greens
+local ThingScale = 16 * FracUnit
+local InvisibleColor = 246
+local PlayerColors = { [0] = Greens, Grays, Browns, Reds }
+
+module.Colors = table.freeze({
+  wall = WallColor,
+  teleporter = TeleporterColor,
+  floorChange = FloorChangeColor,
+  ceilingChange = CeilingChangeColor,
+  twoSided = TwoSidedColor,
+  unseen = UnseenColor,
+  grid = GridColor,
+  player = White,
+})
+
+type MapLine = { ax: number, ay: number, bx: number, by: number }
+
+local function line(ax: number, ay: number, bx: number, by: number): MapLine
+  return { ax = ax, ay = ay, bx = bx, by = by }
+end
+
+-- The arrows and the thing triangle, in map units around the origin; C's integer division
+-- truncates, and every divisor here is positive.
+local Radius = 8 * PlayerRadius // 7
+
+local function part(numerator: number, divisor: number): number
+  return Radius * numerator // divisor
+end
+
+local PlayerArrow = {
+  line(-Radius + part(1, 8), 0, Radius, 0),
+  line(Radius, 0, Radius - part(1, 2), part(1, 4)),
+  line(Radius, 0, Radius - part(1, 2), -part(1, 4)),
+  line(-Radius + part(1, 8), 0, -Radius - part(1, 8), part(1, 4)),
+  line(-Radius + part(1, 8), 0, -Radius - part(1, 8), -part(1, 4)),
+  line(-Radius + part(3, 8), 0, -Radius + part(1, 8), part(1, 4)),
+  line(-Radius + part(3, 8), 0, -Radius + part(1, 8), -part(1, 4)),
+}
+
+local CheatPlayerArrow = {
+  line(-Radius + part(1, 8), 0, Radius, 0),
+  line(Radius, 0, Radius - part(1, 2), part(1, 6)),
+  line(Radius, 0, Radius - part(1, 2), -part(1, 6)),
+  line(-Radius + part(1, 8), 0, -Radius - part(1, 8), part(1, 6)),
+  line(-Radius + part(1, 8), 0, -Radius - part(1, 8), -part(1, 6)),
+  line(-Radius + part(3, 8), 0, -Radius + part(1, 8), part(1, 6)),
+  line(-Radius + part(3, 8), 0, -Radius + part(1, 8), -part(1, 6)),
+  line(-part(1, 2), 0, -part(1, 2), -part(1, 6)),
+  line(-part(1, 2), -part(1, 6), -part(1, 2) + part(1, 6), -part(1, 6)),
+  line(-part(1, 2) + part(1, 6), -part(1, 6), -part(1, 2) + part(1, 6), part(1, 4)),
+  line(-part(1, 6), 0, -part(1, 6), -part(1, 6)),
+  line(-part(1, 6), -part(1, 6), 0, -part(1, 6)),
+  line(0, -part(1, 6), 0, part(1, 4)),
+  line(part(1, 6), part(1, 4), part(1, 6), -part(1, 7)),
+  line(part(1, 6), -part(1, 7), part(1, 6) + part(1, 32), -part(1, 7) - part(1, 32)),
+  line(part(1, 6) + part(1, 32), -part(1, 7) - part(1, 32), part(1, 6) + part(1, 10), -part(1, 7)),
+}
+
+local ThinTriangle = {
+  line(-32768, -45875, FracUnit, 0),
+  line(FracUnit, 0, -32768, 45875),
+  line(-32768, 45875, -32768, -45875),
+}
+
+function module.new(frameWidth: number?, frameHeight: number?): Automap
+  local marks: { Point } = [for _ in range(1, MarkCount) => { x = -1, y = 0 }]
+
+  return {
+    active = false,
+    starting = false,
+    followPlayer = true,
+    grid = false,
+    cheating = 0,
+    bigState = false,
+    level = nil,
+    frameWidth = frameWidth or 320,
+    frameHeight = frameHeight or 168,
+    left = 0,
+    bottom = 0,
+    width = 0,
+    height = 0,
+    right = 0,
+    top = 0,
+    minX = 0,
+    minY = 0,
+    maxX = 0,
+    maxY = 0,
+    minScale = 0,
+    maxScale = 0,
+    scaleMtof = InitialScale,
+    scaleFtom = fixed.div(FracUnit, InitialScale),
+    old = { left = 0, bottom = 0, width = 0, height = 0 },
+    oldLocation = { x = MaxInt, y = 0 },
+    pan = { x = 0, y = 0 },
+    zoomMtof = FracUnit,
+    zoomFtom = FracUnit,
+    marks = marks,
+    markNumber = 0,
+    clock = 0,
+  }
+end
+
+-- FTOM and MTOF: frame pixels to map units and back.
+local function toMap(map: Automap, pixels: number): number
+  return fixed.mul(fixed.wrap(pixels * FracUnit), map.scaleFtom)
+end
+
+local function toFrame(map: Automap, units: number): number
+  return fixed.mul(units, map.scaleMtof) // FracUnit
+end
+
+local function activateNewScale(map: Automap): ()
+  map.left += map.width // 2
+  map.bottom += map.height // 2
+  map.width = toMap(map, map.frameWidth)
+  map.height = toMap(map, map.frameHeight)
+  map.left -= map.width // 2
+  map.bottom -= map.height // 2
+  map.right = map.left + map.width
+  map.top = map.bottom + map.height
+end
+
+-- AM_saveScaleAndLoc.
+local function saveScaleAndLocation(map: Automap): ()
+  map.old = { left = map.left, bottom = map.bottom, width = map.width, height = map.height }
+end
+
+local function setScale(map: Automap, scale: number): ()
+  map.scaleMtof = scale
+  map.scaleFtom = fixed.div(FracUnit, scale)
+end
+
+local function clearMarks(map: Automap): ()
+  for _, mark in map.marks do
+    mark.x = -1
+  end
+
+  map.markNumber = 0
+end
+
+-- AM_findMinMaxBoundaries, its else-if included: a vertex that lowers the minimum is never
+-- tested against the maximum.
+local function findBoundaries(map: Automap, game: types.Game): ()
+  local minX, minY, maxX, maxY = MaxInt, MaxInt, -MaxInt, -MaxInt
+  for _, vertex in game.vertexes do
+    if vertex.x < minX then
+      minX = vertex.x
+    elseif vertex.x > maxX then
+      maxX = vertex.x
+    end
+
+    if vertex.y < minY then
+      minY = vertex.y
+    elseif vertex.y > maxY then
+      maxY = vertex.y
+    end
+  end
+
+  map.minX, map.minY, map.maxX, map.maxY = minX, minY, maxX, maxY
+
+  local across = fixed.div(map.frameWidth * FracUnit, maxX - minX)
+  local down = fixed.div(map.frameHeight * FracUnit, maxY - minY)
+  map.minScale = math.min(across, down)
+  map.maxScale = fixed.div(map.frameHeight * FracUnit, 2 * PlayerRadius)
+end
+
+-- AM_LevelInit.
+local function levelInit(map: Automap, game: types.Game): ()
+  map.level = game.lines
+  clearMarks(map)
+  findBoundaries(map, game)
+
+  local scale = fixed.div(map.minScale, 45875)
+  if scale > map.maxScale then scale = map.minScale end
+  setScale(map, scale)
+end
+
+-- AM_changeWindowLoc.
+local function changeWindowLocation(map: Automap): ()
+  if map.pan.x ~= 0 or map.pan.y ~= 0 then
+    map.followPlayer = false
+    map.oldLocation.x = MaxInt
+  end
+
+  map.left += map.pan.x
+  map.bottom += map.pan.y
+  if map.left + map.width // 2 > map.maxX then
+    map.left = map.maxX - map.width // 2
+  elseif map.left + map.width // 2 < map.minX then
+    map.left = map.minX - map.width // 2
+  end
+
+  if map.bottom + map.height // 2 > map.maxY then
+    map.bottom = map.maxY - map.height // 2
+  elseif map.bottom + map.height // 2 < map.minY then
+    map.bottom = map.minY - map.height // 2
+  end
+
+  map.right = map.left + map.width
+  map.top = map.bottom + map.height
+end
+
+-- The player the map centres on: `slot`, or the first in the game when `slot` isn't.
+local function viewer(game: types.Game, slot: number): types.Player
+  if game.playeringame[slot] then return game.players[slot] end
+
+  for index = 0, 3 do
+    if game.playeringame[index] then return game.players[index] end
+  end
+
+  return game.players[slot]
+end
+
+-- AM_Start: a new level (or a new frame size) is measured again, and the view centres on the
+-- player (AM_initVariables).
+local function start(map: Automap, game: types.Game, slot: number): ()
+  map.starting = false
+  if map.level ~= game.lines then levelInit(map, game) end
+
+  map.oldLocation.x = MaxInt
+  map.clock = 0
+  map.pan.x, map.pan.y = 0, 0
+  map.zoomMtof, map.zoomFtom = FracUnit, FracUnit
+  map.width = toMap(map, map.frameWidth)
+  map.height = toMap(map, map.frameHeight)
+
+  local mo = viewer(game, slot).mo
+  if mo then
+    map.left = mo.x - map.width // 2
+    map.bottom = mo.y - map.height // 2
+  end
+
+  changeWindowLocation(map)
+  saveScaleAndLocation(map)
+end
+
+-- Applies one command. Returns the message vanilla shows for it, if any.
+function module.command(map: Automap, command: Command): string?
+  if command == 'toggle' then
+    map.active = not map.active
+    map.starting = map.active
+    map.bigState = false
+    return nil
+  end
+
+  if not map.active then return nil end
+
+  if command == 'zoomIn' then
+    map.zoomMtof, map.zoomFtom = ZoomIn, ZoomOut
+  elseif command == 'zoomOut' then
+    map.zoomMtof, map.zoomFtom = ZoomOut, ZoomIn
+  elseif string.sub(command, 1, 3) == 'pan' then
+    if map.followPlayer then return nil end
+
+    local step = toMap(map, PanStep)
+    if command == 'panLeft' then
+      map.pan.x = -step
+    elseif command == 'panRight' then
+      map.pan.x = step
+    elseif command == 'panUp' then
+      map.pan.y = step
+    else
+      map.pan.y = -step
+    end
+  elseif command == 'follow' then
+    map.followPlayer = not map.followPlayer
+    map.oldLocation.x = MaxInt
+    return if map.followPlayer then strings.AutomapFollowOn else strings.AutomapFollowOff
+  elseif command == 'grid' then
+    map.grid = not map.grid
+    return if map.grid then strings.AutomapGridOn else strings.AutomapGridOff
+  elseif command == 'bigger' then
+    map.bigState = not map.bigState
+    if map.bigState then
+      saveScaleAndLocation(map)
+      setScale(map, map.minScale)
+      activateNewScale(map)
+    else
+      map.width, map.height = map.old.width, map.old.height
+      if not map.followPlayer then map.left, map.bottom = map.old.left, map.old.bottom end
+
+      -- AM_restoreScaleAndLoc recentres on the player; the next tick's follow does that here.
+      map.oldLocation.x = MaxInt
+      map.right, map.top = map.left + map.width, map.bottom + map.height
+      setScale(map, fixed.div(map.frameWidth * FracUnit, map.width))
+    end
+  elseif command == 'mark' then
+    local message = `{strings.AutomapMarkedSpot} {map.markNumber}`
+    local mark = map.marks[map.markNumber + 1]
+    mark.x, mark.y = map.left + map.width // 2, map.bottom + map.height // 2
+    map.markNumber = (map.markNumber + 1) % MarkCount
+    return message
+  elseif command == 'clearMarks' then
+    clearMarks(map)
+    return strings.AutomapMarksCleared
+  elseif command == 'cheat' then
+    map.cheating = (map.cheating + 1) % 3
+  end
+
+  return nil
+end
+
+-- AM_Ticker, once per tic while the map is open: follow the player, then zoom and pan by
+-- whatever this tic's commands asked for.
+function module.tick(map: Automap, game: types.Game, slot: number): ()
+  if not map.active then return end
+  if map.starting or map.level ~= game.lines then start(map, game, slot) end
+
+  map.clock += 1
+
+  local mo = viewer(game, slot).mo
+  if map.followPlayer and mo and (map.oldLocation.x ~= mo.x or map.oldLocation.y ~= mo.y) then
+    map.left = toMap(map, toFrame(map, mo.x)) - map.width // 2
+    map.bottom = toMap(map, toFrame(map, mo.y)) - map.height // 2
+    map.right, map.top = map.left + map.width, map.bottom + map.height
+    map.oldLocation.x, map.oldLocation.y = mo.x, mo.y
+  end
+
+  if map.zoomFtom ~= FracUnit then
+    setScale(map, fixed.mul(map.scaleMtof, map.zoomMtof))
+    if map.scaleMtof < map.minScale then
+      setScale(map, map.minScale)
+    elseif map.scaleMtof > map.maxScale then
+      setScale(map, map.maxScale)
+    end
+
+    activateNewScale(map)
+  end
+
+  if map.pan.x ~= 0 or map.pan.y ~= 0 then changeWindowLocation(map) end
+
+  map.zoomMtof, map.zoomFtom = FracUnit, FracUnit
+  map.pan.x, map.pan.y = 0, 0
+end
+
+-- C's integer division, truncating toward zero.
+local function quotient(numerator: number, divisor: number): number
+  local value = numerator / divisor
+  return if value < 0 then math.ceil(value) else math.floor(value)
+end
+
+local Left, Right, Bottom, Top = 1, 2, 4, 8
+
+local function frameOutcode(map: Automap, column: number, row: number): number
+  local code = 0
+  if row < 0 then
+    code = Top
+  elseif row >= map.frameHeight then
+    code = Bottom
+  end
+
+  if column < 0 then
+    code += Left
+  elseif column >= map.frameWidth then
+    code += Right
+  end
+
+  return code
+end
+
+-- AM_clipMline and AM_drawFline: a Cohen-Sutherland clip to the frame, then vanilla's
+-- Bresenham line.
+local function drawLine(map: Automap, target: Target, mapLine: MapLine, color: number): ()
+  local outcode1, outcode2 = 0, 0
+  if mapLine.ay > map.top then
+    outcode1 = Top
+  elseif mapLine.ay < map.bottom then
+    outcode1 = Bottom
+  end
+
+  if mapLine.by > map.top then
+    outcode2 = Top
+  elseif mapLine.by < map.bottom then
+    outcode2 = Bottom
+  end
+
+  if bit32.band(outcode1, outcode2) ~= 0 then return end
+
+  if mapLine.ax < map.left then
+    outcode1 += Left
+  elseif mapLine.ax > map.right then
+    outcode1 += Right
+  end
+
+  if mapLine.bx < map.left then
+    outcode2 += Left
+  elseif mapLine.bx > map.right then
+    outcode2 += Right
+  end
+
+  if bit32.band(outcode1, outcode2) ~= 0 then return end
+
+  local frameWidth, frameHeight = map.frameWidth, map.frameHeight
+  local ax = toFrame(map, mapLine.ax - map.left)
+  local ay = frameHeight - toFrame(map, mapLine.ay - map.bottom)
+  local bx = toFrame(map, mapLine.bx - map.left)
+  local by = frameHeight - toFrame(map, mapLine.by - map.bottom)
+  outcode1 = frameOutcode(map, ax, ay)
+  outcode2 = frameOutcode(map, bx, by)
+  if bit32.band(outcode1, outcode2) ~= 0 then return end
+
+  while outcode1 ~= 0 or outcode2 ~= 0 do
+    local outside = if outcode1 ~= 0 then outcode1 else outcode2
+    local column, row = 0, 0
+    if bit32.band(outside, Top) ~= 0 then
+      column = ax + quotient((bx - ax) * ay, ay - by)
+      row = 0
+    elseif bit32.band(outside, Bottom) ~= 0 then
+      column = ax + quotient((bx - ax) * (ay - frameHeight), ay - by)
+      row = frameHeight - 1
+    elseif bit32.band(outside, Right) ~= 0 then
+      row = ay + quotient((by - ay) * (frameWidth - 1 - ax), bx - ax)
+      column = frameWidth - 1
+    elseif bit32.band(outside, Left) ~= 0 then
+      row = ay + quotient((by - ay) * -ax, bx - ax)
+      column = 0
+    end
+
+    if outside == outcode1 then
+      ax, ay = column, row
+      outcode1 = frameOutcode(map, ax, ay)
+    else
+      bx, by = column, row
+      outcode2 = frameOutcode(map, bx, by)
+    end
+
+    if bit32.band(outcode1, outcode2) ~= 0 then return end
+  end
+
+  -- Vanilla refuses (and complains about) a line the clip left outside the frame.
+  if ax < 0 or ax >= frameWidth or ay < 0 or ay >= frameHeight then return end
+  if bx < 0 or bx >= frameWidth or by < 0 or by >= frameHeight then return end
+
+  local pixels, stride = target.pixels, target.width
+  local dx, dy = bx - ax, by - ay
+  local stepX, stepY = if dx < 0 then -1 else 1, if dy < 0 then -1 else 1
+  local twiceX, twiceY = 2 * math.abs(dx), 2 * math.abs(dy)
+  local column, row = ax, ay
+  if twiceX > twiceY then
+    local decision = twiceY - twiceX // 2
+    while true do
+      buffer.writeu8(pixels, row * stride + column, color)
+      if column == bx then return end
+
+      if decision >= 0 then
+        row += stepY
+        decision -= twiceX
+      end
+
+      column += stepX
+      decision += twiceY
+    end
+  end
+
+  local decision = twiceX - twiceY // 2
+  while true do
+    buffer.writeu8(pixels, row * stride + column, color)
+    if row == by then return end
+
+    if decision >= 0 then
+      column += stepX
+      decision -= twiceY
+    end
+
+    row += stepY
+    decision += twiceX
+  end
+end
+
+-- AM_drawGrid: the blockmap's 128-unit cells.
+local function drawGrid(map: Automap, game: types.Game, target: Target): ()
+  local function aligned(start: number, origin: number): number
+    local offset = math.fmod(start - origin, MapBlockUnits)
+    if offset ~= 0 then return start + MapBlockUnits - offset end
+
+    return start
+  end
+
+  local finish = map.left + map.width
+  local gridX = aligned(map.left, game.bmaporgx)
+  while gridX < finish do
+    drawLine(map, target, line(gridX, map.bottom, gridX, map.bottom + map.height), GridColor)
+    gridX += MapBlockUnits
+  end
+
+  finish = map.bottom + map.height
+  local gridY = aligned(map.bottom, game.bmaporgy)
+  while gridY < finish do
+    drawLine(map, target, line(map.left, gridY, map.left + map.width, gridY), GridColor)
+    gridY += MapBlockUnits
+  end
+end
+
+-- AM_drawWalls. A line shows once the renderer has marked it ML_MAPPED; with the computer map
+-- an unmapped line shows gray; ML_DONTDRAW hides a line from both.
+local function drawWalls(map: Automap, game: types.Game, player: types.Player, target: Target): ()
+  local cheating = map.cheating ~= 0
+  local allMap = player.powers[types.PowerAllMap] ~= 0
+  for _, mapLine in game.lines do
+    local flags = mapLine.flags
+    local hidden = bit32.band(flags, types.LineDontDraw) ~= 0
+    local segment = line(mapLine.v1.x, mapLine.v1.y, mapLine.v2.x, mapLine.v2.y)
+    if not cheating and bit32.band(flags, types.LineMapped) == 0 then
+      if allMap and not hidden then drawLine(map, target, segment, UnseenColor) end
+      continue
+    end
+
+    if hidden and not cheating then continue end
+
+    local front, back = mapLine.frontsector, mapLine.backsector
+    if not back or not front then
+      drawLine(map, target, segment, WallColor)
+    elseif mapLine.special == 39 then
+      drawLine(map, target, segment, TeleporterColor)
+    elseif bit32.band(flags, types.LineSecret) ~= 0 then
+      drawLine(map, target, segment, WallColor)
+    elseif back.floorheight ~= front.floorheight then
+      drawLine(map, target, segment, FloorChangeColor)
+    elseif back.ceilingheight ~= front.ceilingheight then
+      drawLine(map, target, segment, CeilingChangeColor)
+    elseif cheating then
+      drawLine(map, target, segment, TwoSidedColor)
+    end
+  end
+end
+
+-- AM_rotate.
+local function rotate(east: number, north: number, angle: number): (number, number)
+  local fine = angle // 524288
+  local cosine, sine = tables.finesine[fine + 2049], tables.finesine[fine + 1]
+  local turnedEast = fixed.mul(east, cosine) - fixed.mul(north, sine)
+  return turnedEast, fixed.mul(east, sine) + fixed.mul(north, cosine)
+end
+
+-- AM_drawLineCharacter.
+local function drawCharacter(
+  map: Automap,
+  target: Target,
+  shape: { MapLine },
+  scale: number,
+  angle: number,
+  color: number,
+  originX: number,
+  originY: number
+): ()
+  for _, stroke in shape do
+    local ax, ay, bx, by = stroke.ax, stroke.ay, stroke.bx, stroke.by
+    if scale ~= 0 then
+      ax, ay = fixed.mul(scale, ax), fixed.mul(scale, ay)
+      bx, by = fixed.mul(scale, bx), fixed.mul(scale, by)
+    end
+
+    if angle ~= 0 then
+      ax, ay = rotate(ax, ay, angle)
+      bx, by = rotate(bx, by, angle)
+    end
+
+    drawLine(map, target, line(ax + originX, ay + originY, bx + originX, by + originY), color)
+  end
+end
+
+-- AM_drawPlayers: one white arrow alone, or every player's in their colour in a netgame (only
+-- your own in deathmatch).
+local function drawPlayers(map: Automap, game: types.Game, slot: number, target: Target): ()
+  local player = viewer(game, slot)
+  if not game.netgame then
+    local mo = player.mo
+    if not mo then return end
+
+    local arrow = if map.cheating ~= 0 then CheatPlayerArrow else PlayerArrow
+    drawCharacter(map, target, arrow, 0, mo.angle, White, mo.x, mo.y)
+    return
+  end
+
+  for index = 0, 3 do
+    local other = game.players[index]
+    if game.deathmatch ~= 0 and other ~= player then continue end
+    if not game.playeringame[index] then continue end
+
+    local mo = other.mo
+    if not mo then continue end
+
+    local invisible = other.powers[types.PowerInvisibility] ~= 0
+    local color = if invisible then InvisibleColor else PlayerColors[index]
+    drawCharacter(map, target, PlayerArrow, 0, mo.angle, color, mo.x, mo.y)
+  end
+end
+
+-- AM_drawThings, for the second step of the cheat.
+local function drawThings(map: Automap, game: types.Game, target: Target): ()
+  for _, sector in game.sectors do
+    local thing = sector.thinglist
+    while thing do
+      drawCharacter(map, target, ThinTriangle, ThingScale, thing.angle, ThingColor, thing.x, thing.y)
+      thing = thing.snext
+    end
+  end
+end
+
+-- AM_drawMarks.
+local function drawMarks(map: Automap, source: graphics.Graphics, target: Target): ()
+  for index, mark in map.marks do
+    if mark.x == -1 then continue end
+
+    local column = toFrame(map, mark.x - map.left)
+    local row = map.frameHeight - toFrame(map, mark.y - map.bottom)
+    if column >= 0 and column <= map.frameWidth - 5 and row >= 0 and row <= map.frameHeight - 6 then
+      graphics.draw(target, graphics.patch(source, `AMMNUM{index - 1}`), column, row)
+    end
+  end
+end
+
+-- AM_Drawer: the map over the top `frameHeight` rows of the target, black beneath it.
+function module.draw(
+  map: Automap,
+  source: graphics.Graphics,
+  game: types.Game,
+  slot: number,
+  target: Target,
+  frameHeight: number
+): ()
+  if not map.active then return end
+
+  local frameWidth = target.width
+  frameHeight = math.min(frameHeight, target.height)
+  if map.frameWidth ~= frameWidth or map.frameHeight ~= frameHeight then
+    map.frameWidth, map.frameHeight = frameWidth, frameHeight
+    map.level = nil
+    map.starting = true
+  end
+
+  if map.starting or map.level ~= game.lines then start(map, game, slot) end
+
+  buffer.fill(target.pixels, 0, Black, frameWidth * frameHeight)
+  if map.grid then drawGrid(map, game, target) end
+
+  drawWalls(map, game, viewer(game, slot), target)
+  drawPlayers(map, game, slot, target)
+  if map.cheating == 2 then drawThings(map, game, target) end
+
+  buffer.writeu8(target.pixels, frameWidth * (frameHeight + 1) // 2, CrosshairColor)
+  drawMarks(map, source, target)
+end
+
+return module
