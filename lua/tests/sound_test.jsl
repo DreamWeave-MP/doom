@@ -1,0 +1,447 @@
+--!strict
+-- @doom/sound against synthetic lumps, where every number can be worked out by hand: DMX and
+-- MUS decoding, s_sound.c's attenuation and separation, channel stealing, and offline renders
+-- that must be loud where a sound plays and silent where none can. With the IWADs in the
+-- working folder, a whole demo's sound events go through the mixer, and the demo must still
+-- end in sync.
+local audio = require '@jess/audio'
+local fs = require '@dream/fs'
+local play = require '@doom/play'
+local sound = require '@doom/sound'
+local test = require '@jess/test'
+local wadModule = require '@doom/wad'
+local expect = test.expect
+local suite = test.new()
+
+local current, unknown = fs.cwd()
+local WorkingFolder = assert(current, unknown)
+local TestFolder = fs.join(WorkingFolder, 'target', 'doom-tests')
+local TestPath = fs.join(TestFolder, 'sound.wad')
+local made, unmade = fs.mkdir(TestFolder, { recursive = true })
+assert(made, unmade)
+
+local FracUnit = 65536
+local Rate = 48000
+local TicFrames = Rate // 35
+
+local function name8(name: string): string
+  return string.sub(name .. string.rep('\0', 8), 1, 8)
+end
+
+-- Writes { name, bytes } lumps as the test WAD and opens it.
+local function openWad(lumps: { { string } }): wadModule.Wad
+  local parts, directory = {}, {}
+  local offset = 12
+  for _, lump in lumps do
+    table.insert(directory, string.pack('<i4i4', offset, #lump[2]) .. name8(lump[1]))
+    table.insert(parts, lump[2])
+    offset += #lump[2]
+  end
+
+  local written, problem = fs.writeFile(TestPath, 'PWAD' .. string.pack('<i4i4', #lumps, offset) .. table.concat(parts) .. table.concat(directory))
+  assert(written, problem)
+  return wadModule.open(TestPath)
+end
+
+-- A DMX lump of a square wave, `count` samples at `rate`, padded the way Doom 1.666 on pads.
+local function dmxLump(count: number, rate: number?): string
+  local samples = table.create(count)
+  for index = 1, count do
+    table.insert(samples, if (index // 20) % 2 == 0 then '\x20' else '\xe0')
+  end
+
+  local body = table.concat(samples)
+  local first, last = string.sub(body, 1, 1), string.sub(body, -1)
+  return string.pack('<I2I2I4', 3, rate or 11025, count + 32) .. string.rep(first, 16) .. body .. string.rep(last, 16)
+end
+
+local function rms(samples: buffer, channels: number, channel: number): number
+  local frames = buffer.len(samples) // (4 * channels)
+  local sum = 0
+  for frame = 0, frames - 1 do
+    local value = buffer.readf32(samples, (frame * channels + channel) * 4)
+    sum += value * value
+  end
+
+  return math.sqrt(sum / frames)
+end
+
+type Thing = { x: number, y: number, angle: number }
+
+-- A thing `east` and `north` map units from the origin, facing east.
+local function thing(east: number, north: number): Thing
+  return { x = east * FracUnit, y = north * FracUnit, angle = 0 }
+end
+
+-- The parts of a game the mixer reads, the listener in slot 0 at the origin facing east.
+local function game(listener: Thing): sound.Game
+  return {
+    players = { [0] = { mo = listener } },
+    gamemap = 1,
+    gameepisode = 1,
+    commercial = false,
+    mapname = 'E1M1',
+    leveltime = 1,
+  }
+end
+
+local function start(name: string, origin: Thing?, player: number?): sound.SoundEvent
+  return {
+    name = name,
+    origin = origin,
+    x = origin and origin.x,
+    y = origin and origin.y,
+    player = player,
+  }
+end
+
+local function effectsWad(): wadModule.Wad
+  return openWad {
+    { 'DSPISTOL', dmxLump(11025) },
+    { 'DSPOSACT', dmxLump(11025) },
+    { 'DSSAWIDL', dmxLump(11025) },
+    { 'DSITEMUP', dmxLump(11025) },
+  }
+end
+
+local function channelNames(mixer: sound.Mixer): { string }
+  local names = {}
+  for _, channel in mixer.channels do
+    table.insert(names, if channel.sfx then channel.sfx.name else '-')
+  end
+
+  return names
+end
+
+suite.describe('DMX sounds', function()
+  suite.it('decodes the padded format to just its samples', function()
+    local lump = dmxLump(100, 22050)
+    local data = buffer.fromstring(lump)
+    local decoded = assert(sound.dmx.decode(data))
+    expect(decoded.rate).toBe(22050)
+    expect(buffer.len(decoded.samples)).toBe(100)
+    expect(buffer.readu8(decoded.samples, 0)).toBe(0x20)
+    expect(buffer.readu8(decoded.samples, 20)).toBe(0xe0)
+  end)
+
+  suite.it('keeps every sample of the unpadded format, and rejects what is not DMX', function()
+    local body = string.rep('\x10\xf0', 40)
+    local decoded = assert(sound.dmx.decode(buffer.fromstring(string.pack('<I2I2I4', 3, 11025, 80) .. body)))
+    expect(buffer.len(decoded.samples)).toBe(80)
+    expect(buffer.readu8(decoded.samples, 0)).toBe(0x10)
+
+    -- A count past the lump's end is cut to the lump.
+    decoded = assert(sound.dmx.decode(buffer.fromstring(string.pack('<I2I2I4', 3, 11025, 500) .. body)))
+    expect(buffer.len(decoded.samples)).toBe(80)
+
+    expect(sound.dmx.decode(buffer.fromstring('\0\0\0\0\0\0\0\0'))).toBeNil()
+    expect(sound.dmx.decode(buffer.fromstring(string.pack('<I2I2I4', 3, 11025, 0)))).toBeNil()
+  end)
+end)
+
+suite.describe('S_AdjustSoundParams', function()
+  local listener = thing(0, 0)
+
+  suite.it('attenuates over distance, and clips past 1200 units', function()
+    -- 500 away: 15 * (1200 - 500) // 1040 = 10.
+    local audible, volume, separation = sound.adjustSoundParams(listener, 500 * FracUnit, 0, 15, 1)
+    expect(audible).toBe(true)
+    expect(volume).toBe(10)
+    -- Dead ahead lands one fine angle short of a full turn, whose sine is -25: 128 + 1.
+    expect(separation).toBe(129)
+
+    audible, volume = sound.adjustSoundParams(listener, 1300 * FracUnit, 0, 15, 1)
+    expect(audible).toBe(false)
+    expect(volume).toBe(0)
+
+    -- Inside 160 units, full volume.
+    audible, volume = sound.adjustSoundParams(listener, 100 * FracUnit, 0, 8, 1)
+    expect(volume).toBe(8)
+  end)
+
+  suite.it('separates by the angle from where the listener faces', function()
+    -- 400 to the left: 15 * 800 // 1040 = 11, and 128 - 96 * 65535 // 65536 = 33.
+    local _, volume, separation = sound.adjustSoundParams(listener, 0, 400 * FracUnit, 15, 1)
+    expect(volume).toBe(11)
+    expect(separation).toBe(33)
+
+    -- To the right: 128 + 96.
+    _, _, separation = sound.adjustSoundParams(listener, 0, -400 * FracUnit, 15, 1)
+    expect(separation).toBe(224)
+
+    -- Turned to face north, the same sound is ahead.
+    _, _, separation = sound.adjustSoundParams({ x = 0, y = 0, angle = 0x40000000 }, 0, 400 * FracUnit, 15, 1)
+    expect(separation).toBe(129)
+  end)
+
+  suite.it('never clips on map 8, and fades toward 15 there', function()
+    local audible, volume = sound.adjustSoundParams(listener, 1300 * FracUnit, 0, 15, 8)
+    expect(audible).toBe(true)
+    expect(volume).toBe(15)
+
+    -- 15 + trunc((8 - 15) * 700 / 1040) = 15 - 4.
+    audible, volume = sound.adjustSoundParams(listener, 500 * FracUnit, 0, 8, 8)
+    expect(volume).toBe(11)
+  end)
+
+  suite.it('splits a level between the speakers as linuxdoom mixes it', function()
+    -- Centred: 15 - 15 * 129^2 // 65536 and 15 - 15 * 128^2 // 65536.
+    local left, right = sound.separationLevels(15, 128)
+    expect(left).toBe(12)
+    expect(right).toBe(12)
+
+    left, right = sound.separationLevels(15, 33)
+    expect(left).toBe(15)
+    expect(right).toBe(4)
+  end)
+end)
+
+suite.describe('channels', function()
+  suite.it('plays a started sound and stays silent for one past the clipping distance', function()
+    local wad = effectsWad()
+    local listener = thing(0, 0)
+
+    local context = audio.offline { channels = 2, rate = Rate }
+    local mixer = sound.new(wad, context, { sfxVolume = 15 })
+    sound.update(mixer, game(listener), 0, { start('pistol', thing(300, 0)) })
+    local loud = context:render(TicFrames * 4)
+    expect(rms(loud, 2, 0) > 0.05).toBe(true)
+    expect(rms(loud, 2, 1) > 0.05).toBe(true)
+
+    context = audio.offline { channels = 2, rate = Rate }
+    mixer = sound.new(wad, context, { sfxVolume = 15 })
+    sound.update(mixer, game(listener), 0, { start('pistol', thing(2000, 0)) })
+    expect(channelNames(mixer)[1]).toBe('-')
+    expect(rms(context:render(TicFrames * 4), 2, 0)).toBe(0)
+  end)
+
+  suite.it('pans a sound to the side it comes from, and follows it as it moves', function()
+    local wad = effectsWad()
+    local listener = thing(0, 0)
+    local context = audio.offline { channels = 2, rate = Rate }
+    local mixer = sound.new(wad, context, { sfxVolume = 15 })
+    local source = thing(0, 300)
+    sound.update(mixer, game(listener), 0, { start('pistol', source) })
+    local left = context:render(TicFrames * 2)
+    expect(rms(left, 2, 0) > rms(left, 2, 1) * 2).toBe(true)
+
+    -- Moved round to the right; a tic's ramp later it is louder there.
+    source.y = -300 * FracUnit
+    sound.update(mixer, game(listener), 0, {})
+    context:render(TicFrames * 2)
+    local right = context:render(TicFrames * 2)
+    expect(rms(right, 2, 1) > rms(right, 2, 0) * 2).toBe(true)
+
+    -- Out of range, the channel stops.
+    source.x = 3000 * FracUnit
+    sound.update(mixer, game(listener), 0, {})
+    expect(channelNames(mixer)[1]).toBe('-')
+  end)
+
+  suite.it('steals the first channel that matters no more, and gives way to what matters more', function()
+    local wad = effectsWad()
+    local listener = thing(0, 0)
+    local function filled(name: string): sound.Mixer
+      local mixer = sound.new(wad, audio.offline { channels = 2, rate = Rate })
+      local events = {}
+      for index = 1, 8 do
+        table.insert(events, start(name, thing(index * 10, 0)))
+      end
+
+      sound.update(mixer, game(listener), 0, events)
+      expect(channelNames(mixer)).toEqual({ name, name, name, name, name, name, name, name })
+      return mixer
+    end
+
+    -- The chainsaw's idle (118) matters less than a pistol (64), and finds no channel.
+    local mixer = filled('pistol')
+    sound.update(mixer, game(listener), 0, { start('sawidl', thing(300, 0)) })
+    expect(table.find(channelNames(mixer), 'sawidl')).toBeNil()
+
+    -- The pistol matters more than an active sound (120), and takes the first channel; so does
+    -- the next pistol, since the first channel's pistol matters no more than it.
+    mixer = filled('posact')
+    sound.update(mixer, game(listener), 0, { start('pistol', thing(100, 0)) })
+    sound.update(mixer, game(listener), 0, { start('pistol', thing(110, 0)) })
+    expect(channelNames(mixer)).toEqual({ 'pistol', 'posact', 'posact', 'posact', 'posact', 'posact', 'posact', 'posact' })
+
+    -- The idle saw only gets past the first channel's pistol to the next active sound.
+    sound.update(mixer, game(listener), 0, { start('sawidl', thing(300, 0)) })
+    expect(channelNames(mixer)[2]).toBe('sawidl')
+  end)
+
+  suite.it('gives an origin one sound at a time, drops other players\' sounds, and stops on request', function()
+    local wad = effectsWad()
+    local listener = thing(0, 0)
+    local context = audio.offline { channels = 2, rate = Rate }
+    local mixer = sound.new(wad, context)
+    local monster = thing(50, 0)
+    sound.update(mixer, game(listener), 0, { start('posact', monster), start('pistol', monster) })
+    expect(channelNames(mixer)).toEqual({ 'pistol', '-', '-', '-', '-', '-', '-', '-' })
+
+    sound.update(mixer, game(listener), 0, { start('itemup', nil, 1) })
+    expect(channelNames(mixer)[2]).toBe('-')
+    sound.update(mixer, game(listener), 0, { start('itemup', nil, 0) })
+    expect(channelNames(mixer)[2]).toBe('itemup')
+
+    sound.update(mixer, game(listener), 0, { { stop = true, origin = monster } })
+    expect(channelNames(mixer)[1]).toBe('-')
+
+    -- A sound that has played out frees its channel.
+    context:render(Rate * 2)
+    sound.update(mixer, game(listener), 0, {})
+    expect(channelNames(mixer)[2]).toBe('-')
+  end)
+
+  suite.it('stops every effect when a new level starts', function()
+    local wad = effectsWad()
+    local listener = thing(0, 0)
+    local context = audio.offline { channels = 2, rate = Rate }
+    local mixer = sound.new(wad, context)
+    local state = game(listener)
+    sound.update(mixer, state, 0, { start('pistol', thing(50, 0)) })
+    expect(channelNames(mixer)[1]).toBe('pistol')
+
+    state.mapname = 'E1M2'
+    sound.update(mixer, state, 0, {})
+    expect(channelNames(mixer)[1]).toBe('-')
+  end)
+
+  suite.it('knows every sound the monsters name', function()
+    local info = play.engine.mobjinfo
+    for index = 0, #info do
+      local entry = info[index]
+      for _, field in { 'seesound', 'attacksound', 'painsound', 'deathsound', 'activesound' } do
+        local name = entry[field]
+        if name == 0 or name == 'None' then continue end
+
+        expect(sound.sfx[name] ~= nil).toBe(true)
+      end
+    end
+  end)
+end)
+
+-- A MUS lump: instrument 0 on channel 0, then notes 60 and 64 at volume 100, a beat each.
+local function musLump(): string
+  local score = table.concat {
+    string.char(0x40, 0, 0), -- controller 0 (instrument) = 0
+    string.char(0x40, 3, 127), -- controller 3 (volume) = 127
+    string.char(0x90, 0x80 + 60, 100, 70), -- play 60 at 100, then 70 ticks
+    string.char(0x00, 60), -- release 60
+    string.char(0x90, 64, 70), -- play 64 at the last volume, then 70 ticks
+    string.char(0x80, 64, 0x81, 0x00), -- release 64, then 128 ticks
+    string.char(0x60), -- finish
+  }
+  local header = 'MUS\x1a' .. string.pack('<I2I2I2I2I2I2', #score, 18, 1, 0, 1, 0) .. string.pack('<I2', 0)
+  return header .. score
+end
+
+suite.describe('music', function()
+  suite.it('parses a MUS score', function()
+    local song = sound.mus.parse(buffer.fromstring(musLump()))
+    expect(song.primaryChannels).toBe(1)
+    expect(song.instruments).toEqual({ 0 })
+    expect(#song.events).toBe(7)
+
+    local first, play60, second = song.events[1], song.events[3], song.events[5]
+    expect(first.kind).toBe('controller')
+    expect(first.controller).toBe(0)
+    expect(play60.kind).toBe('play')
+    expect(play60.note).toBe(60)
+    expect(play60.volume).toBe(100)
+    expect(play60.delay).toBe(70)
+    expect(second.volume).toBeNil()
+    expect(song.events[6].delay).toBe(128)
+    expect(song.events[7].kind).toBe('finish')
+
+    expect(function()
+      sound.mus.parse(buffer.fromstring('MUS\x1a' .. string.pack('<I2I2I2I2I2I2', 4, 16, 1, 0, 0, 0) .. '\x90'))
+    end).toThrow('truncated')
+  end)
+
+  suite.it('synthesizes the notes, and finishes when the score does', function()
+    local song = sound.mus.parse(buffer.fromstring(musLump()))
+    local player = sound.synth.new(song, nil, false, { rate = 22050 })
+    -- 268 ticks of score: under two seconds, then the release.
+    local first = sound.synth.render(player, 11025)
+    expect(rms(first, 2, 0) > 0.01).toBe(true)
+    sound.synth.render(player, 22050 * 4)
+    expect(player.done).toBe(true)
+    expect(rms(sound.synth.render(player, 1000), 2, 0)).toBe(0)
+  end)
+
+  suite.it('plays a MUS lump through the mixer, and loops it', function()
+    local wad = openWad { { 'D_TEST', musLump() } }
+    local context = audio.offline { channels = 2, rate = Rate }
+    local mixer = sound.new(wad, context, { musicVolume = 15 })
+    expect(sound.playMusic(mixer, 'D_NONE', true)).toBe(false)
+    expect(sound.playMusic(mixer, 'D_TEST', true)).toBe(true)
+
+    local sum = 0
+    for _ = 1, 35 * 4 do
+      sound.update(mixer, game(thing(0, 0)), 0, {})
+      sum += rms(context:render(TicFrames), 2, 0)
+    end
+
+    -- Past the score's two seconds, still playing: it looped.
+    expect(sum / (35 * 4) > 0.01).toBe(true)
+    local music = assert(mixer.music)
+    expect(music.stream:stats().missed).toBe(0)
+
+    sound.stopMusic(mixer)
+    expect(mixer.music).toBeNil()
+  end)
+
+  suite.it('names the music vanilla plays', function()
+    local doom: sound.Game = { players = {}, gamemap = 3, gameepisode = 2, commercial = false, mapname = 'E2M3', leveltime = 0 }
+    expect(sound.musicFor(doom)).toBe('D_E2M3')
+    expect(sound.musicFor(doom, 'title')).toBe('D_INTRO')
+    expect(sound.musicFor(doom, 'intermission')).toBe('D_INTER')
+    expect(sound.musicFor(doom, 'finale')).toBe('D_VICTOR')
+
+    doom.gameepisode = 4
+    expect(sound.musicFor(doom)).toBe('D_E3M3')
+
+    local doom2: sound.Game = { players = {}, gamemap = 32, gameepisode = 1, commercial = true, mapname = 'MAP32', leveltime = 0 }
+    expect(sound.musicFor(doom2)).toBe('D_ULTIMA')
+    doom2.gamemap = 1
+    expect(sound.musicFor(doom2)).toBe('D_RUNNIN')
+    expect(sound.musicFor(doom2, 'title')).toBe('D_DM2TTL')
+    expect(sound.musicFor(doom2, 'intermission')).toBe('D_DM2INT')
+  end)
+end)
+
+suite.describe('IWAD demo', function()
+  suite.it('sounds a demo without changing how it plays', function()
+    local path = fs.join(WorkingFolder, 'doom.wad')
+    if not fs.exists(path) then return end
+
+    local wad = wadModule.open(path)
+    local context = audio.offline { channels = 2, rate = 11025 }
+    local mixer = sound.new(wad, context, { sfxVolume = 15 })
+    local counts: { [string]: number } = {}
+    local loudest = 0
+    local result = play.playDemo(wad, 'DEMO1', nil, function(_tic: number): ()
+      local events = play.drainSounds()
+      for _, event in events do
+        if event.name then counts[event.name] = (counts[event.name] or 0) + 1 end
+      end
+
+      sound.update(mixer, play.game, play.game.consoleplayer, events)
+      loudest = math.max(loudest, rms(context:render(315), 2, 0))
+    end)
+
+    expect(result.summary.map).toBe('E1M5')
+    expect(result.tics).toBe(1710)
+    local status = fs.stat(path)
+    if status and status.size == 12996515 then expect(result.summary.hash).toBe('6c20fbaa') end
+
+    expect((counts.pistol or 0) > 0).toBe(true)
+    expect((counts.posit1 or 0) + (counts.posit2 or 0) + (counts.posit3 or 0) > 0).toBe(true)
+    expect((counts.podth1 or 0) + (counts.podth2 or 0) + (counts.podth3 or 0) > 0).toBe(true)
+    expect((counts.pldeth or 0) + (counts.pdiehi or 0) > 0).toBe(true)
+    expect(loudest > 0.05).toBe(true)
+  end)
+end)
+
+return suite

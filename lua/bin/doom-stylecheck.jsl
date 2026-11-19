@@ -20,6 +20,12 @@ if #paths == 0 then
         'lua/bin/doom-arena.jsl',
         'lua/bin/doom-agent.jsl',
         'lua/src/spectator.jsl',
+        'lua/src/sound/init.jsl',
+        'lua/src/sound/dmx.jsl',
+        'lua/src/sound/mus.jsl',
+        'lua/src/sound/sfx.jsl',
+        'lua/src/sound/synth.jsl',
+        'lua/tests/sound_test.jsl',
     }
 end
 
