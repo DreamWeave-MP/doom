@@ -1,0 +1,497 @@
+--!nonstrict
+-- The front end: the menu's keys and commands on a stand-in WAD, the intermission's and the
+-- finale's stages on a synthetic one-room level, and the screens drawn from the IWADs when they
+-- sit in the working folder (they are never part of the package).
+local play = require '@doom/play'
+local screens = require '@doom/screens'
+local test = require '@jess/test'
+local wadModule = require '@doom/wad'
+local expect = test.expect
+local suite = test.new()
+local fs = require '@dream/fs'
+
+-- Named for this run: the package's source and packed tests may run side by side.
+local TestPath = fs.join(fs.cwd(), 'target', 'doom-tests', `screens-{string.match(tostring({}), '%x+$')}.wad`)
+
+local function name8(name: string): string
+  return string.sub(name .. string.rep('\0', 8), 1, 8)
+end
+
+-- A WAD of named empty lumps, enough for the menu: it asks only which lumps exist.
+local function markerWad(names: { string }): any
+  local present = {}
+  for _, name in names do
+    present[name] = { index = 1, name = name, offset = 0, size = 0 }
+  end
+
+  return {
+    path = 'markers.wad',
+    lumps = {},
+    find = function(_, name: string)
+      return present[string.upper(name)]
+    end,
+    read = function()
+      return buffer.create(0)
+    end,
+  }
+end
+
+-- One 512 by 512 room, E1M1, with the player at its center and nothing else.
+local function roomWad(): string
+  local corners = { { 0, 0 }, { 0, 512 }, { 512, 512 }, { 512, 0 } }
+  local vertexes, lines, sides, segs = {}, {}, {}, {}
+  for index, corner in corners do
+    table.insert(vertexes, string.pack('<i2i2', corner[1], corner[2]))
+    table.insert(lines, string.pack('<I2I2I2I2I2i2i2', index - 1, index % 4, 1, 0, 0, index - 1, -1))
+    table.insert(sides, string.pack('<i2i2', 0, 0) .. name8 '-' .. name8 '-' .. name8 'WALL' .. string.pack('<I2', 0))
+    table.insert(segs, string.pack('<I2I2i2I2I2i2', index - 1, index % 4, 0, index - 1, 0, 0))
+  end
+
+  local blockmap = { string.pack('<i2i2i2i2', 0, 0, 5, 5) }
+  for _ = 1, 25 do
+    table.insert(blockmap, string.pack('<I2', 29))
+  end
+
+  table.insert(blockmap, string.pack('<i2i2i2i2i2i2', 0, 0, 1, 2, 3, -1))
+
+  local lumps = {
+    { 'E1M1', '' },
+    { 'THINGS', string.pack('<i2i2i2I2I2', 256, 256, 90, 1, 7) },
+    { 'LINEDEFS', table.concat(lines) },
+    { 'SIDEDEFS', table.concat(sides) },
+    { 'VERTEXES', table.concat(vertexes) },
+    { 'SEGS', table.concat(segs) },
+    { 'SSECTORS', string.pack('<I2I2', 4, 0) },
+    { 'NODES', '' },
+    { 'SECTORS', string.pack('<i2i2', 0, 128) .. name8 'FLOOR' .. name8 'CEIL' .. string.pack('<i2i2i2', 160, 0, 0) },
+    { 'REJECT', '\0' },
+    { 'BLOCKMAP', table.concat(blockmap) },
+  }
+
+  local parts, directory = {}, {}
+  local offset = 12
+  for _, lump in lumps do
+    table.insert(directory, string.pack('<i4i4', offset, #lump[2]) .. name8(lump[1]))
+    table.insert(parts, lump[2])
+    offset += #lump[2]
+  end
+
+  fs.mkdir(fs.join(fs.cwd(), 'target', 'doom-tests'), { recursive = true })
+  fs.writeFile(TestPath, 'PWAD' .. string.pack('<i4i4', #lumps, offset) .. table.concat(parts) .. table.concat(directory))
+  return TestPath
+end
+
+local Idle = { [0] = { forwardmove = 0, sidemove = 0, angleturn = 0, buttons = 0 } }
+local Attack = { [0] = { forwardmove = 0, sidemove = 0, angleturn = 0, buttons = 1 } }
+local Use = { [0] = { forwardmove = 0, sidemove = 0, angleturn = 0, buttons = 2 } }
+
+local function run(tics: number, cmds: any?)
+  for _ = 1, tics do
+    play.tick(cmds or Idle)
+  end
+end
+
+-- A press is a tic with the button down, then one with it up.
+local function press(cmds: any)
+  run(1, cmds)
+  run(1)
+end
+
+local function keys(menu: any, list: { string }): (any, any)
+  local command, sound
+  for _, key in list do
+    command, sound = screens.menuInput(menu, key)
+  end
+
+  return command, sound
+end
+
+local function frame(): any
+  return { pixels = buffer.create(320 * 200), width = 320, height = 200 }
+end
+
+local function painted(target: any): number
+  local count = 0
+  for index = 0, buffer.len(target.pixels) - 1 do
+    if buffer.readu8(target.pixels, index) ~= 0 then count += 1 end
+  end
+
+  return count
+end
+
+-- The intermission's stage after each of `tics` tics, as one string.
+local function stages(tics: number, pressAt: { [number]: boolean }): string
+  local game = play.new(roomWad())
+  game.totalkills, game.players[0].killcount = 4, 3
+  play.engine.ExitLevel()
+
+  local trace = {}
+  for tic = 1, tics do
+    play.tick(if pressAt[tic] then Attack else Idle)
+    local wi = game.wi
+    table.insert(trace, if wi then `{wi.state}:{wi.sp_state}:{wi.cnt_kills[0]}` else game.gamestate)
+  end
+
+  return table.concat(trace, ' ')
+end
+
+suite.afterEach(function()
+  if fs.exists(TestPath) then fs.remove(TestPath) end
+end)
+
+suite.describe('the menu', function()
+  local doomMaps = { 'E1M1', 'E1M2', 'E2M1' }
+
+  suite.it('starts a new game on episode 1 at ultra-violence', function()
+    local menu = screens.newMenu(markerWad(doomMaps))
+    local command, sound = keys(menu, { 'escape' })
+    expect(command.kind).toBe('open')
+    expect(sound).toBe('swtchn')
+
+    command, sound = keys(menu, { 'enter', 'enter', 'down', 'enter' })
+    expect(command.kind).toBe('newGame')
+    expect(command.episode).toBe(1)
+    expect(command.skill).toBe(3)
+    expect(sound).toBe('pistol')
+    expect(menu.active).toBe(false)
+  end)
+
+  suite.it('asks before nightmare and starts it only on yes', function()
+    local menu = screens.newMenu(markerWad(doomMaps))
+    local command = keys(menu, { 'escape', 'enter', 'down', 'enter', 'down', 'down', 'enter' })
+    expect(command).toBe(nil)
+    expect(menu.message ~= nil).toBe(true)
+
+    command = keys(menu, { 'up' })
+    expect(command).toBe(nil)
+    expect(menu.message ~= nil).toBe(true)
+
+    command = keys(menu, { 'no' })
+    expect(command.kind).toBe('close')
+    expect(menu.active).toBe(false)
+
+    -- Each menu remembers its cursor: the second episode, then Nightmare.
+    command = keys(menu, { 'escape', 'enter', 'enter', 'enter', 'y' })
+    expect(command.kind).toBe('newGame')
+    expect(command.episode).toBe(2)
+    expect(command.skill).toBe(4)
+  end)
+
+  suite.it('quits only when the question is answered yes', function()
+    local menu = screens.newMenu(markerWad(doomMaps))
+    local command = keys(menu, { 'escape', 'q', 'enter' })
+    expect(command).toBe(nil)
+    expect(string.find(menu.message.text, '(press y to quit)', 1, true) ~= nil).toBe(true)
+
+    command = keys(menu, { 'no' })
+    expect(command.kind).toBe('close')
+
+    local sound
+    command, sound = keys(menu, { 'escape', 'q', 'enter', 'yes' })
+    expect(command.kind).toBe('quit')
+    expect(type(sound)).toBe('string')
+  end)
+
+  suite.it('types a save description into the chosen slot', function()
+    local menu = screens.newMenu(markerWad(doomMaps), { inGame = true })
+    screens.setSaveSlots(menu, { [1] = 'FIRST', [2] = 'OLD' })
+    local command = keys(menu, { 'escape', 's', 'enter', 'down', 'enter' })
+    expect(command).toBe(nil)
+    expect(menu.saveText).toBe('OLD')
+
+    command = keys(menu, { 'back', 'back', 'back', 'h', 'i', ' ', '1', 'back', '2', 'enter' })
+    expect(command.kind).toBe('save')
+    expect(command.slot).toBe(2)
+    expect(command.description).toBe('HI 2')
+    expect(menu.active).toBe(false)
+
+    -- Escape gives the slot its old description back.
+    keys(menu, { 'escape', 's', 'enter', 'enter', 'x', 'escape' })
+    expect(menu.saveText).toBe('HI 2')
+  end)
+
+  suite.it('refuses to save outside a game and to load an empty slot', function()
+    local menu = screens.newMenu(markerWad(doomMaps), { saveSlots = { [2] = 'SECOND' } })
+    keys(menu, { 'escape', 's', 'enter' })
+    expect(menu.message ~= nil).toBe(true)
+
+    local command = keys(menu, { 'escape', 'escape', 'l', 'enter', 'enter' })
+    expect(command).toBe(nil)
+
+    command = keys(menu, { 'down', 'enter' })
+    expect(command.kind).toBe('load')
+    expect(command.slot).toBe(2)
+  end)
+
+  suite.it('changes settings on the sliders and toggles', function()
+    local menu = screens.newMenu(markerWad(doomMaps), { screenSize = 8, sfxVolume = 3 })
+    local command, sound = keys(menu, { 'escape', 'o', 'enter', 'down', 'down', 'down', 'left' })
+    expect(command.name).toBe('screenSize')
+    expect(command.value).toBe(7)
+    expect(sound).toBe('stnmov')
+
+    command = keys(menu, { 'up', 'up', 'enter' })
+    expect(command.name).toBe('messages')
+    expect(command.value).toBe(false)
+
+    command = keys(menu, { 'up', 'up', 'enter', 'right' })
+    expect(command.name).toBe('sfxVolume')
+    expect(command.value).toBe(4)
+  end)
+
+  suite.it('hosts and joins a multiplayer game', function()
+    local menu = screens.newMenu(markerWad(doomMaps))
+    local command = keys(menu, {
+      'escape', 'm', 'enter', 'enter',
+      'right', 'down', 'right', 'right', 'down', 'left', 'down', 'right', 'down', 'enter',
+    })
+    expect(command.kind).toBe('host')
+    expect(command.mode).toBe('deathmatch')
+    expect(command.players).toBe(4)
+    expect(command.skill).toBe(1)
+    expect(command.map).toBe('E1M2')
+
+    command = keys(menu, { 'escape', 'm', 'enter', 'down', 'enter', 'enter' })
+    expect(command).toBe(nil)
+
+    keys(menu, { '1', '0', '.', '0', '.', '0', '.', '1', ':', '5', 'enter', 'down', 'enter', 'a', 'B', 'c', 'enter' })
+    command = keys(menu, { 'down', 'enter' })
+    expect(command.kind).toBe('join')
+    expect(command.address).toBe('10.0.0.1:5')
+    expect(command.token).toBe('aBc')
+  end)
+
+  suite.it('blinks the skull every eight tics after the first ten', function()
+    local menu = screens.newMenu(markerWad(doomMaps))
+    for _ = 1, 9 do
+      screens.menuTick(menu)
+    end
+
+    expect(menu.skull).toBe(0)
+    screens.menuTick(menu)
+    expect(menu.skull).toBe(1)
+    for _ = 1, 8 do
+      screens.menuTick(menu)
+    end
+
+    expect(menu.skull).toBe(0)
+  end)
+end)
+
+suite.describe('the intermission and the finale on a synthetic level', function()
+  suite.it('counts the same stages on every run and waits for a press at the end', function()
+    local first = stages(400, {})
+    expect(stages(400, {})).toBe(first)
+
+    local game = play.game
+    expect(game.gamestate).toBe('intermission')
+    expect(game.wi.sp_state).toBe(10)
+    expect(game.wi.cnt_kills[0]).toBe(75)
+    expect(game.wi.cnt_items[0]).toBe(0)
+  end)
+
+  suite.it('finishes the counting on the first press and moves on with the next', function()
+    stages(2, { [2] = true })
+    local game = play.game
+    expect(game.wi.state).toBe('StatCount')
+    expect(game.wi.sp_state).toBe(10)
+    expect(game.wi.cnt_kills[0]).toBe(75)
+
+    -- Holding the button is one press.
+    run(20, Attack)
+    expect(game.wi.state).toBe('StatCount')
+
+    run(1)
+    run(1, Attack)
+    expect(game.wi.state).toBe('ShowNextLoc')
+
+    run(1)
+    run(1, Use)
+    expect(game.wi.state).toBe('NoState')
+
+    run(10)
+    expect(game.gamestate).toBe('finale')
+  end)
+
+  suite.it('types the finale out over time and ends the game after two presses', function()
+    local game = play.new(roomWad(), { intermissionTics = 1 })
+    play.engine.ExitLevel()
+    run(3)
+    expect(game.gamestate).toBe('finale')
+    expect(game.finale.text).toBe('E1TEXT')
+
+    run(30)
+    local early, full = screens.finaleText(game)
+    run(60)
+    local later = screens.finaleText(game)
+    expect(#early > 0).toBe(true)
+    expect(#later > #early).toBe(true)
+    expect(string.sub(full, 1, #later)).toBe(later)
+
+    press(Attack)
+    expect(game.finale.stage).toBe(1)
+    expect(game.finaleDone).toBe(nil)
+
+    run(30)
+    press(Use)
+    expect(game.finaleDone).toBe(nil)
+
+    run(30)
+    press(Use)
+    expect(game.finaleDone).toBe(true)
+  end)
+
+  suite.it('keeps the intermission and finale state in a save', function()
+    play.new(roomWad())
+    play.engine.ExitLevel()
+    run(50)
+
+    local data = play.save()
+    local restored = play.load(TestPath, data)
+    expect(restored.wi.sp_state).toBe(play.game.wi.sp_state)
+    expect(restored.lastlevel.next).toBe(2)
+  end)
+end)
+
+local function iwad(name: string): any
+  local path = fs.join(fs.cwd(), name)
+  if not fs.exists(path) then return nil end
+
+  return wadModule.open(path)
+end
+
+suite.describe('IWAD screens', function()
+  suite.it('draws the tally after E1M1 with the kills it counted', function()
+    local wad = iwad('doom.wad')
+    if not wad then return end
+
+    local view = screens.new(wad)
+    local function tally(killed: boolean): any
+      local game = play.new(wad, { mapName = 'E1M1' })
+      if killed then game.players[0].killcount = game.totalkills end
+
+      play.engine.ExitLevel()
+      run(2)
+      press(Attack)
+      expect(game.wi.sp_state).toBe(10)
+
+      local target = frame()
+      screens.drawIntermission(view, game, 0, target)
+      return target
+    end
+
+    local none, all = tally(false), tally(true)
+    expect(painted(none) > 320 * 150).toBe(true)
+
+    -- The kills percentage is drawn right-aligned at x 270, y 50.
+    local differs = 0
+    for row = 50, 62 do
+      for column = 200, 270 do
+        local at = row * 320 + column
+        if buffer.readu8(none.pixels, at) ~= buffer.readu8(all.pixels, at) then differs += 1 end
+      end
+    end
+
+    expect(differs > 20).toBe(true)
+  end)
+
+  suite.it('ends DOOM\'s first episode in its finale after E1M8', function()
+    local wad = iwad('doom.wad')
+    if not wad then return end
+
+    local game = play.new(wad, { mapName = 'E1M8' })
+    play.engine.ExitLevel()
+    run(1)
+    expect(game.gamestate).toBe('finale')
+    expect(game.finale.text).toBe('E1TEXT')
+
+    run(60)
+    local target = frame()
+    screens.drawFinale(screens.new(wad), game, target)
+    expect(painted(target) > 0).toBe(true)
+
+    press(Use)
+    expect(game.finale.stage).toBe(1)
+    run(60)
+    press(Attack)
+    expect(game.finaleDone).toBe(true)
+  end)
+
+  suite.it('goes from MAP06 through the text interlude to MAP07 on use', function()
+    local wad = iwad('doom2.wad')
+    if not wad then return end
+
+    local game = play.new(wad, { mapName = 'MAP06' })
+    play.engine.ExitLevel()
+    run(2)
+    press(Use)
+    press(Use)
+    run(12)
+    expect(game.gamestate).toBe('finale')
+    expect(game.finale.text).toBe('C1TEXT')
+
+    run(60)
+    expect(game.gamestate).toBe('finale')
+    press(Use)
+    run(1)
+    expect(game.gamestate).toBe('level')
+    expect(game.mapname).toBe('MAP07')
+  end)
+
+  suite.it('reads Final DOOM\'s own interlude texts and calls the cast after MAP30', function()
+    local plutonia = iwad('plutonia.wad')
+    if plutonia then
+      local game = play.new(plutonia, { mapName = 'MAP11', intermissionTics = 1 })
+      play.engine.ExitLevel()
+      run(3)
+      expect(game.finale.text).toBe('P2TEXT')
+    end
+
+    local tnt = iwad('tnt.wad')
+    if tnt then
+      local game = play.new(tnt, { mapName = 'MAP20', intermissionTics = 1 })
+      play.engine.ExitLevel()
+      run(3)
+      expect(game.finale.text).toBe('T3TEXT')
+    end
+
+    local wad = iwad('doom2.wad')
+    if not wad then return end
+
+    local game = play.new(wad, { mapName = 'MAP30', intermissionTics = 1 })
+    play.engine.ExitLevel()
+    run(3)
+    expect(game.finale.text).toBe('C4TEXT')
+    run(60)
+    press(Use)
+    expect(game.finale.stage).toBe(2)
+
+    run(30)
+    press(Attack)
+    expect(game.finale.castdeath).toBe(true)
+
+    local target = frame()
+    screens.drawFinale(screens.new(wad), game, target)
+    expect(painted(target) > 320 * 150).toBe(true)
+
+    press(Use)
+    expect(game.finaleDone).toBe(true)
+  end)
+
+  suite.it('draws the main menu over the title page', function()
+    local wad = iwad('doom.wad')
+    if not wad then return end
+
+    local view = screens.new(wad)
+    local target = frame()
+    expect(screens.drawPage(view, 'TITLEPIC', target)).toBe(true)
+
+    local before = buffer.tostring(target.pixels)
+    local menu = screens.newMenu(wad)
+    screens.openMenu(menu)
+    screens.drawMenu(menu, target)
+    expect(buffer.tostring(target.pixels) ~= before).toBe(true)
+  end)
+end)
+
+return suite

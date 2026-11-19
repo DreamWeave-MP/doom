@@ -20,6 +20,13 @@ if #paths == 0 then
         'lua/bin/doom-arena.jsl',
         'lua/bin/doom-agent.jsl',
         'lua/src/spectator.jsl',
+        'lua/src/screens.jsl',
+        'lua/src/screens/draw.jsl',
+        'lua/src/screens/finale.jsl',
+        'lua/src/screens/intermission.jsl',
+        'lua/src/screens/menu.jsl',
+        'lua/src/screens/text.jsl',
+        'lua/tests/screens_test.jsl',
     }
 end
 
