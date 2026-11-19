@@ -1,0 +1,427 @@
+--!strict
+-- The renderer, tested two ways: pixels of a synthetic two-room level whose every surface has a
+-- color of its own, and frames of the IWADs when they sit in the working folder.
+local fs = require('@dream/fs')
+local play = require('@doom/play')
+local render = require('@doom/render')
+local state = require('@doom/state')
+local test = require('@jess/test')
+local view = require('@doom/view')
+local wadModule = require('@doom/wad')
+local expect = test.expect
+local suite = test.new()
+
+local FracUnit = 65536
+local TestFolder = fs.join(fs.cwd() :: string, 'target', 'doom-tests')
+local made, unmade = fs.mkdir(TestFolder, { recursive = true })
+assert(made, unmade)
+
+-- Every light table adds its number to a color, so a pixel is its surface's color plus the light
+-- table that drew it. The surfaces are spaced wider than the 34 tables.
+local Wall, Door, Far, Floor, Ceiling, Sky = 40, 80, 120, 160, 200, 250
+local Lamp, GrayLamp, Weapon = 0x73, 0x63, 0
+
+local function name8(name: string): string
+  return string.sub(name .. string.rep('\0', 8), 1, 8)
+end
+
+local function wadBytes(lumps: { { string } }): string
+  local parts, directory = {}, {}
+  local offset = 12
+  for _, lump in lumps do
+    table.insert(directory, string.pack('<i4i4', offset, #lump[2]) .. name8(lump[1]))
+    table.insert(parts, lump[2])
+    offset += #lump[2]
+  end
+
+  return 'PWAD' .. string.pack('<i4i4', #lumps, offset) .. table.concat(parts) .. table.concat(directory)
+end
+
+-- A patch of one color, a post a column.
+local function solidPatch(width: number, height: number, left: number, top: number, color: number): string
+  local offsets, columns = {}, {}
+  local column = string.char(0, height, 0) .. string.rep(string.char(color), height) .. '\0\255'
+  for index = 0, width - 1 do
+    table.insert(offsets, string.pack('<I4', 8 + width * 4 + index * #column))
+    table.insert(columns, column)
+  end
+
+  return string.pack('<i2i2i2i2', width, height, left, top) .. table.concat(offsets) .. table.concat(columns)
+end
+
+-- TEXTURE1: each texture { name, width, height, PNAMES number }, one patch at its corner.
+local function textureLump(textures: { { any } }): string
+  local records = {}
+  local offset = 4 + 4 * #textures
+  local offsets = {}
+  for _, texture in textures do
+    local record = name8(texture[1])
+      .. string.pack('<i4i2i2i4i2', 0, texture[2], texture[3], 0, 1)
+      .. string.pack('<i2i2i2i2i2', 0, 0, texture[4], 1, 0)
+    table.insert(offsets, string.pack('<i4', offset))
+    table.insert(records, record)
+    offset += #record
+  end
+
+  return string.pack('<i4', #textures) .. table.concat(offsets) .. table.concat(records)
+end
+
+local function side(upper: string, lower: string, middle: string, sector: number): string
+  return string.pack('<i2i2', 0, 0) .. name8(upper) .. name8(lower) .. name8(middle) .. string.pack('<I2', sector)
+end
+
+-- Two rooms side by side, west (sector 0, 0 to 256) and east (sector 1, 256 to 512), 256 deep,
+-- split by a two-sided line at x 256 that is a door: the east room's ceiling starts on its floor.
+-- The west room is open to the sky. The player stands in the west room facing east, a lamp to
+-- their left, and another lamp waits in the middle of the east room.
+local function levelWad(): string
+  local colormap = buffer.create(34 * 256)
+  for light = 0, 33 do
+    for index = 0, 255 do
+      buffer.writeu8(colormap, light * 256 + index, (index + light) % 256)
+    end
+  end
+
+  local vertexes = string.pack('<i2i2i2i2i2i2i2i2i2i2i2i2', 0, -128, 0, 128, 256, 128, 512, 128, 512, -128, 256, -128)
+  local lines = {}
+  for index, ends in { { 0, 1 }, { 1, 2 }, { 2, 3 }, { 3, 4 }, { 4, 5 }, { 5, 0 } } do
+    table.insert(lines, string.pack('<I2I2I2I2I2i2i2', ends[1], ends[2], 1, 0, 0, index - 1, -1))
+  end
+
+  table.insert(lines, string.pack('<I2I2I2I2I2i2i2', 5, 2, 4, 0, 0, 6, 7))
+
+  -- Each seg: first vertex, last vertex, angle, line, side.
+  local segs = {}
+  for _, seg in
+    {
+      { 0, 1, 16384, 0, 0 },
+      { 1, 2, 0, 1, 0 },
+      { 2, 5, -16384, 6, 1 },
+      { 5, 0, -32768, 5, 0 },
+      { 2, 3, 0, 2, 0 },
+      { 3, 4, -16384, 3, 0 },
+      { 4, 5, -32768, 4, 0 },
+      { 5, 2, 16384, 6, 0 },
+    }
+  do
+    table.insert(segs, string.pack('<I2I2i2I2i2i2', seg[1], seg[2], seg[3], seg[4], seg[5], 0))
+  end
+
+  local blockmap = { string.pack('<i2i2i2i2', 0, -128, 4, 2) }
+  for _ = 1, 8 do
+    table.insert(blockmap, string.pack('<I2', 12))
+  end
+
+  table.insert(blockmap, string.pack('<i2i2i2i2i2i2i2i2i2', 0, 0, 1, 2, 3, 4, 5, 6, -1))
+
+  local flat = function(color: number): string
+    return string.rep(string.char(color), 4096)
+  end
+
+  return wadBytes {
+    { 'COLORMAP', buffer.tostring(colormap) },
+    { 'PNAMES', string.pack('<i4', 4) .. name8 'WALLP' .. name8 'DOORP' .. name8 'FARP' .. name8 'SKYP' },
+    {
+      'TEXTURE1',
+      textureLump {
+        { 'DUMMY', 8, 8, 0 },
+        { 'WALL', 64, 128, 0 },
+        { 'DOOR', 64, 128, 1 },
+        { 'FAR', 64, 128, 2 },
+        { 'SKY1', 256, 128, 3 },
+      },
+    },
+    { 'WALLP', solidPatch(64, 128, 0, 0, Wall) },
+    { 'DOORP', solidPatch(64, 128, 0, 0, Door) },
+    { 'FARP', solidPatch(64, 128, 0, 0, Far) },
+    { 'SKYP', solidPatch(256, 128, 0, 0, Sky) },
+    { 'F_START', '' },
+    { 'FLOOR0', flat(Floor) },
+    { 'CEIL0', flat(Ceiling) },
+    { 'F_SKY1', flat(Ceiling) },
+    { 'F_END', '' },
+    { 'S_START', '' },
+    { 'COLUA0', solidPatch(8, 32, 4, 32, Lamp) },
+    { 'PISGA0', solidPatch(16, 16, -152, -120, Weapon) },
+    { 'S_END', '' },
+    { 'E1M1', '' },
+    { 'THINGS', string.pack('<i2i2i2I2I2i2i2i2I2I2i2i2i2I2I2', 64, 0, 0, 1, 7, 160, 80, 0, 2028, 7, 384, 0, 0, 2028, 7) },
+    { 'LINEDEFS', table.concat(lines) },
+    {
+      'SIDEDEFS',
+      side('-', '-', 'WALL', 0)
+        .. side('-', '-', 'WALL', 0)
+        .. side('-', '-', 'WALL', 1)
+        .. side('-', '-', 'FAR', 1)
+        .. side('-', '-', 'WALL', 1)
+        .. side('-', '-', 'WALL', 0)
+        .. side('-', '-', '-', 1)
+        .. side('DOOR', '-', '-', 0),
+    },
+    { 'VERTEXES', vertexes },
+    { 'SEGS', table.concat(segs) },
+    { 'SSECTORS', string.pack('<I2I2I2I2', 4, 0, 4, 4) },
+    {
+      'NODES',
+      string.pack('<i2i2i2i2', 256, -128, 0, 256)
+        .. string.pack('<i2i2i2i2i2i2i2i2', 128, -128, 256, 512, 128, -128, 0, 256)
+        .. string.pack('<I2I2', 0x8001, 0x8000),
+    },
+    {
+      'SECTORS',
+      string.pack('<i2i2', 0, 128)
+        .. name8 'FLOOR0'
+        .. name8 'F_SKY1'
+        .. string.pack('<i2i2i2', 160, 0, 0)
+        .. string.pack('<i2i2', 0, 0)
+        .. name8 'FLOOR0'
+        .. name8 'CEIL0'
+        .. string.pack('<i2i2i2', 160, 0, 0),
+    },
+    { 'REJECT', '\0' },
+    { 'BLOCKMAP', table.concat(blockmap) },
+  }
+end
+
+-- The level, started and run long enough for the pistol to come up. Each call writes a WAD of
+-- its own, so suites running side by side never read each other's.
+local function startLevel(): (any, any)
+  local path = fs.join(TestFolder, `view-{math.random(1, 1e9)}.wad`)
+  local written, problem = fs.writeFile(path, levelWad())
+  assert(written, problem)
+  local wad = wadModule.open(path)
+  fs.remove(path)
+
+  local game = play.new(wad)
+  for _ = 1, 20 do
+    play.tick()
+  end
+
+  return game, view.new(wad)
+end
+
+local function pixel(frame: render.Frame, column: number, row: number): number
+  return buffer.readu8(frame.pixels, row * frame.width + column)
+end
+
+-- How many pixels in columns first to last are exactly `color`.
+local function count(frame: render.Frame, color: number, first: number, last: number): number
+  local total = 0
+  for row = 0, frame.height - 1 do
+    for column = first, last do
+      if pixel(frame, column, row) == color then total += 1 end
+    end
+  end
+
+  return total
+end
+
+local function within(value: number, base: number): boolean
+  return value >= base and value < base + 34
+end
+
+-- A lamp in the east room, the second thing spawned after the player.
+local function eastLamp(game: any): any
+  local thinker = game.thinkercap.next
+  while thinker ~= game.thinkercap do
+    if thinker.think == 'mobj' and thinker.x == 384 * FracUnit then return thinker end
+    thinker = thinker.next
+  end
+
+  error('no east lamp')
+end
+
+suite.describe('views of a synthetic level', function()
+  suite.it('draws the door, the floor, the sky, a lit lamp and the weapon, and hides what is behind the door', function()
+    local game, renderer = startLevel()
+    local frame = render.frame()
+    local hash = play.hash()
+    view.render(renderer, game, 0, frame)
+
+    expect(within(pixel(frame, 160, 84), Door)).toBe(true)
+    expect(within(pixel(frame, 160, 30), Door)).toBe(true)
+    expect(within(pixel(frame, 100, 167), Floor)).toBe(true)
+    expect(pixel(frame, 100, 0)).toBe(Sky)
+    expect(within(pixel(frame, 5, 84), Wall)).toBe(true)
+
+    -- The lamp is full bright, light table 0; the weapon takes the brightest table of its sector.
+    expect(count(frame, Lamp, 0, 60) > 20).toBe(true)
+    expect(count(frame, Lamp, 120, 200)).toBe(0)
+    expect(pixel(frame, 160, 145)).toBe(Weapon)
+
+    -- The floor darkens toward the horizon.
+    expect(within(pixel(frame, 100, 125), Floor)).toBe(true)
+    expect(pixel(frame, 100, 167) - Floor < pixel(frame, 100, 125) - Floor).toBe(true)
+
+    -- Drawing marks the lines it drew for the automap, and nothing the simulation hashes.
+    expect(bit32.band(game.lines[7].flags, 256)).toBe(256)
+    expect(bit32.band(game.lines[4].flags, 256)).toBe(0)
+    expect(play.hash()).toBe(hash)
+  end)
+
+  suite.it('shows the far room and its lamp once the door is up', function()
+    local game, renderer = startLevel()
+    local frame = render.frame()
+    game.sectors[2].ceilingheight = 128 * FracUnit
+    view.render(renderer, game, 0, frame)
+
+    expect(within(pixel(frame, 160, 84), Far)).toBe(true)
+    expect(count(frame, Lamp, 140, 180) > 10).toBe(true)
+    expect(bit32.band(game.lines[4].flags, 256)).toBe(256)
+  end)
+
+  suite.it('draws through invulnerability, a spectre and a player translation', function()
+    local game, renderer = startLevel()
+    local frame = render.frame()
+    game.sectors[2].ceilingheight = 128 * FracUnit
+    local lamp = eastLamp(game)
+
+    -- The inverse light table, 32, for everything but the sky.
+    game.players[0].powers[0] = 1000
+    view.render(renderer, game, 0, frame)
+    expect(pixel(frame, 160, 84)).toBe(Far + 32)
+    expect(count(frame, Lamp + 32, 140, 180) > 10).toBe(true)
+    expect(pixel(frame, 100, 0)).toBe(Sky)
+    game.players[0].powers[0] = 0
+
+    lamp.flags = bit32.bor(lamp.flags, 0x40000)
+    view.render(renderer, game, 0, frame)
+    expect(count(frame, Lamp, 140, 180)).toBe(0)
+
+    lamp.flags = bit32.bor(bit32.band(lamp.flags, bit32.bnot(0x40000)), 0x4000000)
+    view.render(renderer, game, 0, frame)
+    expect(count(frame, Lamp, 140, 180)).toBe(0)
+    expect(count(frame, GrayLamp, 140, 180) > 10).toBe(true)
+  end)
+
+  suite.it('sizes the view window, and looks from a free camera', function()
+    local game, renderer = startLevel()
+    local frame = render.frame(320, 200, 7)
+    view.render(renderer, game, 0, frame)
+    expect(count(frame, 7, 0, 319)).toBe(320 * 32)
+
+    -- Size 6 is a window 192 by 96 at (64, 36); this WAD has no border flat to draw around it.
+    frame = render.frame(320, 200, 7)
+    view.render(renderer, game, 0, frame, { size = 6 })
+    expect(pixel(frame, 63, 84)).toBe(7)
+    expect(pixel(frame, 160, 35)).toBe(7)
+    expect(within(pixel(frame, 160, 84), Door)).toBe(true)
+    expect(count(frame, 7, 0, 319)).toBe(320 * 200 - 192 * 96)
+
+    frame = render.frame(320, 200, 7)
+    view.render(renderer, game, 0, frame, { size = 11 })
+    expect(count(frame, 7, 0, 319)).toBe(0)
+
+    view.renderAt(renderer, game, 64 * FracUnit, 0, 41 * FracUnit, 0x80000000, frame)
+    expect(within(pixel(frame, 160, 84), Wall)).toBe(true)
+    expect(pixel(frame, 160, 145) ~= Weapon).toBe(true)
+  end)
+end)
+
+-- E1M1's first frame, taken from the 2024 re-release's doom.wad.
+local E1M1Size, E1M1Digest = 12996515, '5e5a0649'
+
+local function iwad(name: string): (any?, number)
+  local path = fs.join(fs.cwd() :: string, name)
+  if not fs.exists(path) then return nil, 0 end
+
+  local stat, problem = fs.stat(path)
+  return wadModule.open(path), assert(stat, problem).size
+end
+
+suite.describe('IWAD views', function()
+  suite.it('draws every pixel of E1M1 from the start, the same way each time', function()
+    local wad, size = iwad('doom.wad')
+    if not wad then return end
+
+    local game = play.new(wad, { mapName = 'E1M1' })
+    play.tick()
+    local renderer = view.new(wad)
+    local dark, light = render.frame(320, 200, 0), render.frame(320, 200, 255)
+    -- The whole screen, drawn over black and over white, comes out the same: no pixel is left.
+    view.render(renderer, game, 0, dark, { size = 11 })
+    view.render(renderer, game, 0, light, { size = 11 })
+    expect(buffer.tostring(dark.pixels) == buffer.tostring(light.pixels)).toBe(true)
+
+    local colors = {}
+    for index = 0, 320 * 200 - 1 do
+      colors[buffer.readu8(dark.pixels, index)] = true
+    end
+
+    local distinct = 0
+    for _ in colors do
+      distinct += 1
+    end
+
+    expect(distinct > 64).toBe(true)
+    if size == E1M1Size then expect(state.fnv1a32(dark.pixels)).toBe(E1M1Digest) end
+  end)
+
+  suite.it('sees through E1M1 doors once they open', function()
+    local wad = iwad('doom.wad')
+    if not wad then return end
+
+    local game = play.new(wad, { mapName = 'E1M1' })
+    play.tick()
+    local renderer = view.new(wad)
+    local engine = play.engine
+    local opened = 0
+    for _, line in game.lines do
+      if line.special ~= 1 or not line.backsector then continue end
+
+      -- A camera 96 units in front of the door's middle, looking at it.
+      local length = math.sqrt(line.dx * line.dx + line.dy * line.dy)
+      local middleX, middleY = (line.v1.x + line.v2.x) // 2, (line.v1.y + line.v2.y) // 2
+      local cameraX = middleX + math.floor(line.dy / length * 96 * FracUnit)
+      local cameraY = middleY - math.floor(line.dx / length * 96 * FracUnit)
+      local angle = engine.PointToAngle2(cameraX, cameraY, middleX, middleY)
+      local eye = line.frontsector.floorheight + 41 * FracUnit
+      local door = line.backsector
+      local closed, open = render.frame(), render.frame()
+      view.renderAt(renderer, game, cameraX, cameraY, eye, angle, closed)
+
+      local shut = door.ceilingheight
+      door.ceilingheight = line.frontsector.ceilingheight
+      view.renderAt(renderer, game, cameraX, cameraY, eye, angle, open)
+      door.ceilingheight = shut
+
+      local changed = 0
+      for row = 0, 167 do
+        for column = 150, 170 do
+          if pixel(closed, column, row) ~= pixel(open, column, row) then changed += 1 end
+        end
+      end
+
+      expect(changed > 200).toBe(true)
+      opened += 1
+    end
+
+    expect(opened > 3).toBe(true)
+  end)
+
+  suite.it('keeps a demo in sync while drawing every tic of it', function()
+    local wad, size = iwad('doom.wad')
+    if not wad then return end
+
+    local renderer = view.new(wad)
+    local frame = render.frame()
+    local result = play.playDemo(wad, 'DEMO1', 1)
+    local game = play.game
+    local demo = require('@doom/demo')
+    local _, frames = demo.parseFull(wad:read('DEMO1'))
+    local cmds = {}
+    for tic = 2, #frames do
+      view.render(renderer, game, game.consoleplayer, frame)
+      for slot = 0, 3 do
+        cmds[slot] = frames[tic][slot + 1]
+      end
+
+      play.tick(cmds)
+    end
+
+    expect(result.tics).toBe(1)
+    if size == 12996515 then expect(play.hash()).toBe('6c20fbaa') end
+  end)
+end)
+
+return suite
