@@ -1,0 +1,157 @@
+--!strict
+-- The `doom` application: one window, the game ticking at 35 Hz inside Jess's 60 Hz frames, and
+-- the player's hands through Jess's input runtime.
+local application = require('@jess/application')
+local fs = require('@dream/fs')
+local play = require('@doom/play')
+local wadModule = require('@doom/wad')
+local mapModule = require('@doom/map')
+local render = require('@doom/render')
+
+local clockModule = require('./clock')
+local controlsModule = require('./controls')
+local display = require('./display')
+local options = require('./options')
+
+local FracUnit = 65536
+
+type App = {
+  display: display.Display,
+  controls: controlsModule.Controls,
+  clock: clockModule.Clock,
+  wad: any,
+  game: any,
+  map: any,
+  mapName: string?,
+  frame: buffer,
+  paused: boolean,
+  dirty: boolean,
+  frames: number,
+}
+
+local app: App? = nil
+
+local function findIwad(): string
+  local named = options.current.iwad
+  if named then
+    if not fs.exists(named) then error(`doom: no IWAD at '{named}'`, 0) end
+
+    return named
+  end
+
+  for _, name in options.IwadNames do
+    if fs.exists(name) then return name end
+  end
+
+  error('doom: no IWAD found; name one with -iwad (DOOM, DOOM II, Final DOOM, or Freedoom)', 0)
+end
+
+local function firstMap(wad: any): string
+  if options.current.warp then return options.current.warp end
+
+  return if wad:find('MAP01') then 'MAP01' else 'E1M1'
+end
+
+-- The temporary first-person view: where the console player stands, drawn with every other mobj.
+local function drawView(state: App): ()
+  local game = state.game
+  local player = game.players[0]
+  local own = player.mo
+  if not own then return end
+
+  if state.mapName ~= game.mapname then
+    state.map, state.mapName = mapModule.load(game.wad, game.mapname), game.mapname
+  end
+
+  local things = {}
+  local cap = game.thinkercap
+  local thinker = cap.next
+  while thinker ~= cap do
+    if thinker.think == 'mobj' and thinker ~= own then table.insert(things, thinker) end
+    thinker = thinker.next
+  end
+
+  local frame, palette = render.view(state.map, game.wad, own.x / FracUnit, own.y / FracUnit, own.angle * 360 / 4294967296, things)
+  buffer.copy(state.frame, 0, frame.pixels, 0, 320 * 200)
+  display.present(state.display, state.frame, palette.rgb)
+end
+
+local function startup(): ()
+  local settings = options.current
+  local wad = wadModule.open(findIwad(), settings.files)
+  local game = play.new(wad, { mapName = firstMap(wad), skill = settings.skill - 1 })
+  local view = display.open('DOOM', settings.scale)
+  local runtime = jess.input.runtime()
+
+  app = {
+    display = view,
+    controls = controlsModule.new(runtime),
+    clock = clockModule.new(),
+    wad = wad,
+    game = game,
+    map = nil,
+    mapName = nil,
+    frame = buffer.create(320 * 200),
+    paused = false,
+    dirty = true,
+    frames = 0,
+  }
+end
+
+local function update(seconds: number): ()
+  local state = app
+  if not state then return end
+
+  local pressed = controlsModule.frame(state.controls)
+  if pressed.pause then
+    state.paused = not state.paused
+    clockModule.setPaused(state.clock, state.paused)
+    controlsModule.clear(state.controls)
+  end
+
+  if pressed.menu then application.exit(0) end
+
+  local player = state.game.players[0]
+  if pressed.weaponNext then controlsModule.cycleWeapon(state.controls, player, 1, state.game.commercial) end
+  if pressed.weaponPrevious then controlsModule.cycleWeapon(state.controls, player, -1, state.game.commercial) end
+
+  local due = clockModule.advance(state.clock, seconds)
+  for _ = 1, due do
+    play.tick { [0] = controlsModule.build(state.controls) }
+    state.dirty = true
+  end
+
+  if state.dirty then
+    drawView(state)
+    state.dirty = false
+  end
+
+  state.frames += 1
+  local limit = options.current.frames
+  if limit and state.frames >= limit then application.exit(0) end
+end
+
+local function windowEvents(): ()
+  local state = app
+  if not state then return end
+
+  local window = state.display.window
+  for _, event in window:events() do
+    if event.kind == 'resized' then
+      display.resized(state.display, event.width, event.height)
+    elseif event.kind == 'closed' then
+      application.exit(0)
+    elseif event.kind == 'pointerButton' and event.pressed then
+      window:cursor('captured')
+    elseif event.kind == 'focused' and not event.focused then
+      window:cursor('normal')
+    end
+  end
+end
+
+return {
+  on = {
+    host = { startup = startup, update = update },
+    event = { ['jess.window'] = windowEvents },
+  },
+}

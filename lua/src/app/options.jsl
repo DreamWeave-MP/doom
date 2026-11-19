@@ -1,0 +1,182 @@
+--!strict
+-- The application's command line, vanilla-shaped (`-iwad`, `-file`, `-warp`, `-skill`) with the
+-- network and mod switches beside it. The entry parses the target's arguments into the table
+-- this module returns; the managed modules read it at startup. A module loads once per domain,
+-- so the entry and the managed modules share this one table.
+local module = {}
+
+export type Options = {
+  iwad: string?,
+  files: { string },
+  mods: { string },
+  warp: string?,
+  skill: number,
+  host: string?,
+  join: string?,
+  token: string?,
+  name: string,
+  players: number,
+  mode: string,
+  teamDamage: boolean,
+  fragLimit: number,
+  timeLimit: number,
+  scale: number,
+  noSound: boolean,
+  noMusic: boolean,
+  fullscreen: boolean,
+  frames: number?,
+  record: string?,
+  config: string?,
+}
+
+module.Defaults = table.freeze {
+  skill = 3,
+  name = 'player',
+  players = 2,
+  mode = 'coop',
+  teamDamage = false,
+  fragLimit = 0,
+  timeLimit = 0,
+  scale = 3,
+}
+
+local current: Options = {
+  files = {},
+  mods = {},
+  skill = module.Defaults.skill,
+  name = module.Defaults.name,
+  players = module.Defaults.players,
+  mode = module.Defaults.mode,
+  teamDamage = module.Defaults.teamDamage,
+  fragLimit = module.Defaults.fragLimit,
+  timeLimit = module.Defaults.timeLimit,
+  scale = module.Defaults.scale,
+  noSound = false,
+  noMusic = false,
+  fullscreen = false,
+}
+
+module.current = current
+
+local Modes = { coop = true, ffa = true, tdm = true }
+
+local function number(arguments: { string }, index: number, name: string): number
+  local value = tonumber(arguments[index])
+  if not value then error(`doom: {name} takes a number, not '{arguments[index] or ''}'`, 0) end
+
+  return value
+end
+
+-- Parses `arguments` into a fresh options table. Unknown switches are errors: a misspelled
+-- `-iwad` that silently started the wrong game would be worse.
+function module.parse(arguments: { string }): Options
+  local parsed: Options = table.clone(current)
+  parsed.files, parsed.mods = {}, {}
+  local index = 1
+  while index <= #arguments do
+    local switch = string.lower(arguments[index])
+    local value = arguments[index + 1]
+    index += 1
+
+    if switch == '-iwad' then
+      parsed.iwad = value
+      index += 1
+    elseif switch == '-file' then
+      while arguments[index] and string.sub(arguments[index], 1, 1) ~= '-' do
+        table.insert(parsed.files, arguments[index])
+        index += 1
+      end
+    elseif switch == '-mod' then
+      while arguments[index] and string.sub(arguments[index], 1, 1) ~= '-' do
+        table.insert(parsed.mods, arguments[index])
+        index += 1
+      end
+    elseif switch == '-warp' then
+      local second = arguments[index + 1]
+      if value and second and tonumber(value) and tonumber(second) then
+        parsed.warp = `E{value}M{second}`
+        index += 2
+      elseif value and tonumber(value) then
+        parsed.warp = string.format('MAP%02d', tonumber(value) :: number)
+        index += 1
+      else
+        parsed.warp = value and string.upper(value)
+        index += 1
+      end
+    elseif switch == '-skill' then
+      parsed.skill = math.clamp(number(arguments, index, '-skill'), 1, 5)
+      index += 1
+    elseif switch == '-host' then
+      parsed.host = value or '0.0.0.0:5029'
+      index += 1
+    elseif switch == '-join' then
+      parsed.join = value
+      index += 1
+    elseif switch == '-token' then
+      parsed.token = value
+      index += 1
+    elseif switch == '-name' then
+      parsed.name = value or parsed.name
+      index += 1
+    elseif switch == '-players' then
+      parsed.players = math.clamp(number(arguments, index, '-players'), 1, 4)
+      index += 1
+    elseif switch == '-mode' then
+      if not value or not Modes[value] then error(`doom: -mode is coop, ffa or tdm, not '{value or ''}'`, 0) end
+
+      parsed.mode = value
+      index += 1
+    elseif switch == '-teamdamage' then
+      parsed.teamDamage = true
+    elseif switch == '-fraglimit' then
+      parsed.fragLimit = number(arguments, index, '-fraglimit')
+      index += 1
+    elseif switch == '-timelimit' then
+      parsed.timeLimit = number(arguments, index, '-timelimit')
+      index += 1
+    elseif switch == '-scale' then
+      parsed.scale = math.clamp(number(arguments, index, '-scale'), 1, 8)
+      index += 1
+    elseif switch == '-nosound' then
+      parsed.noSound = true
+    elseif switch == '-nomusic' then
+      parsed.noMusic = true
+    elseif switch == '-fullscreen' then
+      parsed.fullscreen = true
+    elseif switch == '-frames' then
+      parsed.frames = number(arguments, index, '-frames')
+      index += 1
+    elseif switch == '-record' then
+      parsed.record = value
+      index += 1
+    elseif switch == '-config' then
+      parsed.config = value
+      index += 1
+    else
+      error(`doom: unknown switch '{arguments[index - 1]}'`, 0)
+    end
+  end
+
+  return parsed
+end
+
+-- Replaces the shared options with `parsed`, in place, so every holder of the table sees them.
+function module.apply(parsed: Options): ()
+  table.clear(current :: any)
+  for key, value in parsed :: any do
+    (current :: any)[key] = value
+  end
+end
+
+-- The IWADs looked for, in vanilla's order of preference, when `-iwad` names none.
+module.IwadNames = {
+  'doom2.wad',
+  'plutonia.wad',
+  'tnt.wad',
+  'doom.wad',
+  'doom1.wad',
+  'freedoom2.wad',
+  'freedoom1.wad',
+}
+
+return module

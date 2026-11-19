@@ -1,0 +1,6 @@
+--!strict
+-- The `doom` application target's entry: parses the command line into the options the managed
+-- modules start from. It runs after they loaded and before their startup.
+local options = require('./options')
+
+options.apply(options.parse({ ... }))

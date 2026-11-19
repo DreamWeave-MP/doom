@@ -63,3 +63,20 @@ exports = [
 [[layer.entrypoint]]
 module = "@doom/net"
 capabilities = ["network.transport"]
+
+[managed.game]
+module = "src/app/main.jsl"
+
+[targets.doom]
+kind = "application"
+entry = "src/app/entry.jsl"
+capabilities = [
+  "gpu.device",
+  "gpu.window",
+  "input.actions",
+  "input.configure",
+  "audio.output",
+  "network.transport",
+  "filesystem.read",
+  "filesystem.write",
+]

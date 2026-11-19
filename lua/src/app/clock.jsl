@@ -1,0 +1,47 @@
+--!strict
+-- The game clock: DOOM's simulation advances in 35 Hz tics, and the host calls back 60 times a
+-- second with whatever real time passed. The clock counts tics from the time it has been given
+-- since it started, exactly as I_GetTime counts them from the process clock, so no rounding
+-- drifts across frames: after one second of frames, of any lengths, 35 tics are due.
+local module = {}
+
+module.TicRate = 35
+
+export type Clock = {
+  elapsed: number,
+  given: number,
+  maxCatchUp: number,
+  paused: boolean,
+}
+
+-- A clock that never asks for more than `maxCatchUp` tics in one frame: a frame that stalls for
+-- longer drops the time it lost instead of running the game in a burst afterwards.
+function module.new(maxCatchUp: number?): Clock
+  return { elapsed = 0, given = 0, maxCatchUp = maxCatchUp or 10, paused = false }
+end
+
+-- Adds a frame's seconds and returns how many tics are due now. A paused clock lets the time go.
+function module.advance(clock: Clock, seconds: number): number
+  if clock.paused or seconds <= 0 then return 0 end
+
+  clock.elapsed += seconds
+  local due = math.floor(clock.elapsed * module.TicRate) - clock.given
+  if due > clock.maxCatchUp then
+    clock.given += due - clock.maxCatchUp
+    due = clock.maxCatchUp
+  end
+
+  clock.given += due
+  return due
+end
+
+-- How far the clock is into the next tic, from 0 to 1.
+function module.fraction(clock: Clock): number
+  return math.clamp(clock.elapsed * module.TicRate - clock.given, 0, 1)
+end
+
+function module.setPaused(clock: Clock, paused: boolean): ()
+  clock.paused = paused
+end
+
+return module

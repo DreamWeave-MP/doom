@@ -1,0 +1,335 @@
+--!strict
+-- What the player's hands mean: the binding document the application installs in Jess's input
+-- runtime, and G_BuildTiccmd, which turns the actions held during one tic into a ticcmd.
+--
+-- Keyboard and mouse follow vanilla's defaults with WASD beside the arrows; a gamepad moves on
+-- the left stick and turns on the right. The runtime is ticked once per host frame (60 a second)
+-- and the game wants one command per tic (35 a second), so the mouse's motion and the edges of
+-- the weapon keys are gathered across frames until the next tic takes them.
+local input = require('@jess/input')
+
+local module = {}
+
+-- g_game.c's speeds: walking and running.
+local ForwardMove = { 0x19, 0x32 }
+local SideMove = { 0x18, 0x28 }
+local AngleTurn = { 640, 1280, 320 }
+local SlowTurnTics = 6
+local MaxMove = ForwardMove[2]
+
+local BtAttack, BtUse, BtChange, BtWeaponShift = 1, 2, 4, 3
+
+export type Ticcmd = { forwardmove: number, sidemove: number, angleturn: number, buttons: number }
+
+export type Settings = {
+  mouseSensitivity: number,
+  mouseLook: boolean,
+  alwaysRun: boolean,
+  invertGamepad: boolean,
+}
+
+export type Controls = {
+  runtime: InputRuntime,
+  settings: Settings,
+  mouseX: number,
+  mouseY: number,
+  weapon: number?,
+  turnHeld: number,
+  pressed: { [string]: boolean },
+}
+
+local Owner = 'org.dreamweave.doom'
+
+local function keys(names: { string }): input.Node
+  return input.any([for name in names => input.key(name)])
+end
+
+local function either(members: { input.Node }): input.Node
+  return input.any(members)
+end
+
+-- Actions read once a tic (held) and actions read for their press (edges); the menu and the
+-- automap read the edges every frame.
+local Held = {
+  'forward',
+  'backward',
+  'turnLeft',
+  'turnRight',
+  'strafeLeft',
+  'strafeRight',
+  'strafe',
+  'run',
+  'fire',
+  'use',
+}
+
+local Edges = {
+  'weapon1',
+  'weapon2',
+  'weapon3',
+  'weapon4',
+  'weapon5',
+  'weapon6',
+  'weapon7',
+  'weaponNext',
+  'weaponPrevious',
+  'menu',
+  'menuUp',
+  'menuDown',
+  'menuLeft',
+  'menuRight',
+  'menuEnter',
+  'menuBack',
+  'menuYes',
+  'menuNo',
+  'automap',
+  'automapZoomIn',
+  'automapZoomOut',
+  'automapFollow',
+  'automapGrid',
+  'pause',
+  'quickSave',
+  'quickLoad',
+  'screenshot',
+  'scoreboard',
+  'sizeUp',
+  'sizeDown',
+}
+
+module.Held, module.Edges = Held, Edges
+
+local function bindings(): { input.Binding }
+  local list: { input.Binding } = {
+    { action = 'forward', input = either { keys { 'ArrowUp', 'KeyW' }, input.gamepadButton('DPadUp') } },
+    { action = 'backward', input = either { keys { 'ArrowDown', 'KeyS' }, input.gamepadButton('DPadDown') } },
+    { action = 'turnLeft', input = either { keys { 'ArrowLeft' }, input.gamepadButton('DPadLeft') } },
+    { action = 'turnRight', input = either { keys { 'ArrowRight' }, input.gamepadButton('DPadRight') } },
+    { action = 'strafeLeft', input = either { keys { 'KeyA', 'Comma' }, input.gamepadButton('LeftBumper') } },
+    { action = 'strafeRight', input = either { keys { 'KeyD', 'Period' }, input.gamepadButton('RightBumper') } },
+    { action = 'strafe', input = keys { 'AltLeft', 'AltRight' } },
+    { action = 'run', input = either { keys { 'ShiftLeft', 'ShiftRight' }, input.gamepadButton('LeftStick') } },
+    {
+      action = 'fire',
+      input = either {
+        keys { 'ControlLeft', 'ControlRight' },
+        input.pointerButton('Primary'),
+        input.threshold(input.gamepadAxis('RightTrigger'), 0.4),
+      },
+    },
+    {
+      action = 'use',
+      input = either {
+        keys { 'Space', 'KeyE' },
+        input.pointerButton('Middle'),
+        input.gamepadButton('South'),
+      },
+    },
+    { action = 'moveStick', input = input.deadzone(input.vector2(input.gamepadAxis('LeftStickX'), input.gamepadAxis('LeftStickY')), 0.2, 0.95) },
+    { action = 'lookStick', input = input.deadzone(input.vector2(input.gamepadAxis('RightStickX'), input.gamepadAxis('RightStickY')), 0.2, 0.95) },
+    { action = 'mouseX', input = input.pointerAxis('DeltaX') },
+    { action = 'mouseY', input = input.pointerAxis('DeltaY') },
+    { action = 'weaponNext', input = either { input.gamepadButton('North'), input.threshold(input.pointerAxis('WheelY'), 1) } },
+    { action = 'weaponPrevious', input = either { input.gamepadButton('West'), input.threshold(input.invert(input.pointerAxis('WheelY')), 1) } },
+    { action = 'menu', input = either { keys { 'Escape' }, input.gamepadButton('Start') } },
+    { action = 'menuUp', input = either { keys { 'ArrowUp' }, input.gamepadButton('DPadUp') } },
+    { action = 'menuDown', input = either { keys { 'ArrowDown' }, input.gamepadButton('DPadDown') } },
+    { action = 'menuLeft', input = either { keys { 'ArrowLeft' }, input.gamepadButton('DPadLeft') } },
+    { action = 'menuRight', input = either { keys { 'ArrowRight' }, input.gamepadButton('DPadRight') } },
+    { action = 'menuEnter', input = either { keys { 'Enter', 'NumpadEnter' }, input.gamepadButton('South') } },
+    { action = 'menuBack', input = either { keys { 'Backspace' }, input.gamepadButton('East') } },
+    { action = 'menuYes', input = keys { 'KeyY' } },
+    { action = 'menuNo', input = keys { 'KeyN' } },
+    { action = 'automap', input = either { keys { 'Tab' }, input.gamepadButton('Select') } },
+    { action = 'automapZoomIn', input = keys { 'Equal', 'NumpadAdd' } },
+    { action = 'automapZoomOut', input = keys { 'Minus', 'NumpadSubtract' } },
+    { action = 'automapFollow', input = keys { 'KeyF' } },
+    { action = 'automapGrid', input = keys { 'KeyG' } },
+    { action = 'pause', input = keys { 'Pause', 'KeyP' } },
+    { action = 'quickSave', input = keys { 'F6' } },
+    { action = 'quickLoad', input = keys { 'F9' } },
+    { action = 'screenshot', input = keys { 'F12' } },
+    { action = 'scoreboard', input = keys { 'F1', 'Backquote' } },
+    { action = 'sizeUp', input = keys { 'Equal' } },
+    { action = 'sizeDown', input = keys { 'Minus' } },
+  }
+
+  for slot = 1, 7 do
+    table.insert(list, { action = `weapon{slot}`, input = keys { `Digit{slot}` } })
+  end
+
+  return list
+end
+
+-- The binding document: one set, `play`, owned by this package.
+function module.document(): input.Document
+  local actions: { input.Action } = {}
+  for _, name in Held do
+    local action: input.Action = { name = name, valueType = 'digital' }
+    table.insert(actions, action)
+  end
+
+  for _, name in Edges do
+    local action: input.Action = { name = name, valueType = 'digital' }
+    table.insert(actions, action)
+  end
+
+  local sticks: { input.Action } = {
+    { name = 'moveStick', valueType = 'vector2' },
+    { name = 'lookStick', valueType = 'vector2' },
+    { name = 'mouseX', valueType = 'scalar' },
+    { name = 'mouseY', valueType = 'scalar' },
+  }
+
+  for _, action in sticks do
+    table.insert(actions, action)
+  end
+
+  return { actions = actions, sets = { { name = 'play', owner = Owner, bindings = bindings() } } }
+end
+
+function module.defaultSettings(): Settings
+  return { mouseSensitivity = 5, mouseLook = false, alwaysRun = false, invertGamepad = false }
+end
+
+-- Installs the bindings in `runtime` (the host's live input, or a headless one in tests).
+function module.new(runtime: InputRuntime, settings: Settings?): Controls
+  runtime:install(input.graph(module.document()))
+  runtime:setActive('play', true)
+
+  return {
+    runtime = runtime,
+    settings = settings or module.defaultSettings(),
+    mouseX = 0,
+    mouseY = 0,
+    weapon = nil,
+    turnHeld = 0,
+    pressed = {},
+  }
+end
+
+local function active(controls: Controls, name: string): boolean
+  local state = controls.runtime:action(name)
+  return state ~= nil and state.active
+end
+
+local function scalar(controls: Controls, name: string): number
+  local state = controls.runtime:action(name)
+  if not state then return 0 end
+
+  local value = state.value
+  return if type(value) == 'number' then value else 0
+end
+
+local function stick(controls: Controls, name: string): vector
+  local state = controls.runtime:action(name)
+  if not state then return vector.zero end
+
+  local value = state.value
+  return if type(value) == 'vector' then value else vector.zero
+end
+
+-- Reads one host frame: the edges pressed since the last frame (returned, and remembered for the
+-- next tic's weapon change), and the mouse's motion, summed until a tic takes it.
+function module.frame(controls: Controls): { [string]: boolean }
+  local pressed: { [string]: boolean } = {}
+  for _, name in Edges do
+    local state = controls.runtime:action(name)
+    if state and state.pressed then pressed[name] = true end
+  end
+
+  for slot = 1, 7 do
+    if pressed[`weapon{slot}`] then controls.weapon = slot - 1 end
+  end
+
+  controls.mouseX += scalar(controls, 'mouseX')
+  controls.mouseY += scalar(controls, 'mouseY')
+  controls.pressed = pressed
+  return pressed
+end
+
+-- Drops what was gathered: the menu took the keys, or the game was paused.
+function module.clear(controls: Controls): ()
+  controls.mouseX, controls.mouseY, controls.weapon, controls.turnHeld = 0, 0, nil, 0
+end
+
+-- Asks for the next or the previous owned weapon from the wheel or a pad: the slot to switch to,
+-- given what `player` owns (weaponowned, readyweapon).
+local WeaponOrder = { 0, 7, 1, 2, 8, 3, 4, 5, 6 }
+local KeyOfWeapon = { [0] = 0, 1, 2, 3, 4, 5, 6, 0, 2 }
+
+function module.cycleWeapon(controls: Controls, player: any, step: number, commercial: boolean): ()
+  local current = table.find(WeaponOrder, player.readyweapon) or 1
+  for offset = 1, #WeaponOrder do
+    local index = (current - 1 + offset * step) % #WeaponOrder + 1
+    local weapon = WeaponOrder[index]
+    if weapon == 8 and not commercial then continue end
+
+    if player.weaponowned[weapon] then
+      controls.weapon = KeyOfWeapon[weapon]
+      return
+    end
+  end
+end
+
+-- G_BuildTiccmd: the command for one tic from what is held now and what was gathered since the
+-- last one.
+function module.build(controls: Controls): Ticcmd
+  local settings = controls.settings
+  local strafe = active(controls, 'strafe')
+  local speed = if active(controls, 'run') ~= settings.alwaysRun then 2 else 1
+  local forward, side, turn = 0, 0, 0
+
+  local turning = active(controls, 'turnLeft') or active(controls, 'turnRight')
+  controls.turnHeld = if turning then controls.turnHeld + 1 else 0
+  local turnSpeed = if controls.turnHeld < SlowTurnTics then 3 else speed
+
+  if strafe then
+    if active(controls, 'turnRight') then side += SideMove[speed] end
+    if active(controls, 'turnLeft') then side -= SideMove[speed] end
+  else
+    if active(controls, 'turnRight') then turn -= AngleTurn[turnSpeed] end
+    if active(controls, 'turnLeft') then turn += AngleTurn[turnSpeed] end
+  end
+
+  if active(controls, 'forward') then forward += ForwardMove[speed] end
+  if active(controls, 'backward') then forward -= ForwardMove[speed] end
+  if active(controls, 'strafeRight') then side += SideMove[speed] end
+  if active(controls, 'strafeLeft') then side -= SideMove[speed] end
+
+  local move = stick(controls, 'moveStick')
+  forward += math.round(move.y * ForwardMove[speed])
+  side += math.round(move.x * SideMove[speed])
+
+  local look = stick(controls, 'lookStick')
+  turn -= math.round(look.x * AngleTurn[2] * (if settings.invertGamepad then -1 else 1))
+
+  -- Vanilla scales the mouse by (sensitivity + 5) / 10 and turns 8 units a count; a modern
+  -- mouse reports many more counts, so a count is a quarter of the original's.
+  local mouseScale = (settings.mouseSensitivity + 5) / 10
+  local mouseX, mouseY = controls.mouseX * mouseScale, controls.mouseY * mouseScale
+  if strafe then
+    side += math.round(mouseX * 2)
+  else
+    turn -= math.round(mouseX * 8 * 4)
+  end
+
+  if settings.mouseLook then forward -= math.round(mouseY) end
+
+  local buttons = 0
+  if active(controls, 'fire') then buttons += BtAttack end
+  if active(controls, 'use') then buttons += BtUse end
+
+  local weapon = controls.weapon
+  if weapon then buttons += BtChange + bit32.lshift(weapon, BtWeaponShift) end
+
+  controls.mouseX, controls.mouseY, controls.weapon = 0, 0, nil
+
+  return {
+    forwardmove = math.clamp(forward, -MaxMove, MaxMove),
+    sidemove = math.clamp(side, -MaxMove, MaxMove),
+    angleturn = math.clamp(turn, -32768, 32767),
+    buttons = buttons,
+  }
+end
+
+return module

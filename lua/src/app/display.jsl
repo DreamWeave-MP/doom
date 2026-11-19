@@ -1,0 +1,150 @@
+--!strict
+-- The game's window: DOOM's 320×200 indexed frame, colored through the current palette on the
+-- GPU and shown at the 4:3 shape a CRT gave it, so its pixels are 1.2 times taller than wide. The
+-- frame is centered in the window at the largest size that keeps that shape; the rest is black.
+local render = require('@jess/render')
+local shader = require('@jess/shader')
+
+local module = {}
+
+module.Width, module.Height = 320, 200
+
+-- 320×200 shown as 4:3.
+local Aspect = 4 / 3
+
+export type Display = {
+  window: GpuWindow,
+  frames: GpuTexture,
+  palette: GpuTexture,
+  placement: any,
+  placementBuffer: GpuBuffer,
+  colors: buffer,
+}
+
+-- A triangle covering the target, from the vertex index alone.
+local function covering(input: ShaderInput): { [string]: ShaderExpr }
+  local index = input.builtin.vertexIndex
+  local corner = shader.vec2(
+    shader.float(shader.bitAnd(shader.shiftLeft(index, shader.uint(1)), shader.uint(2))),
+    shader.float(shader.bitAnd(index, shader.uint(2)))
+  )
+
+  return { position = shader.vec4(corner * 2 - 1, 0, 1) }
+end
+
+-- Each window pixel's color: the indexed texel under it through the palette, black outside the
+-- frame's rectangle (`rect` is its left, top, width and height in window pixels).
+local Program = shader.program {
+  pass = { rect = shader.vec4 },
+  material = { frames = shader.texture2d, palette = shader.texture2d },
+  vertex = covering,
+  fragment = function(input: ShaderInput): ShaderExpr
+    local rect = input.pass.rect
+    local along = (input.builtin.position.xy - rect.xy) / rect.zw
+    local inside = shader.step(0, along.x) * shader.step(along.x, 1) * shader.step(0, along.y)
+      * shader.step(along.y, 1)
+    local texel = shader.clamp(
+      shader.floor(along * shader.vec2(module.Width, module.Height)),
+      shader.vec2(0, 0),
+      shader.vec2(module.Width - 1, module.Height - 1)
+    )
+    local index = shader.uint(shader.round(shader.load(input.material.frames, shader.vec2u(texel), 0).x * 255))
+    local color = shader.load(input.material.palette, shader.vec2u(index, shader.uint(0)), 0)
+
+    return shader.vec4(color.xyz * inside, 1)
+  end,
+}
+
+local function place(display: Display, width: number, height: number): ()
+  local scale = math.min(width / Aspect, height)
+  local frameWidth, frameHeight = math.floor(scale * Aspect), math.floor(scale)
+  local left, top = math.floor((width - frameWidth) / 2), math.floor((height - frameHeight) / 2)
+  display.placement:set('rect', { left, top, frameWidth, frameHeight })
+  display.placement:upload(display.placementBuffer)
+end
+
+-- Opens the window, `scale` window pixels to a frame pixel across (3 by default).
+function module.open(title: string, scale: number?): Display
+  local factor = scale or 3
+  local device = jess.gpu.device()
+  local window = jess.gpu.window(device, {
+    title = title,
+    width = math.floor(module.Width * factor),
+    height = math.floor(module.Width * factor / Aspect),
+  })
+  local format = assert(window.format, 'the window closed before it was shown')
+
+  local frames = device:texture {
+    width = module.Width,
+    height = module.Height,
+    format = 'r8Unorm',
+    usage = 'sampled',
+  }
+  local palette = device:texture { width = 256, height = 1, format = 'rgba8Unorm', usage = 'sampled' }
+  local pipeline = device:pipeline(Program, { colors = { format } })
+  local material = {}
+  for _, binding in Program.layout.material.bindings do
+    if binding.kind == 'Sampler' then
+      material[binding.binding] = device:sampler()
+    elseif binding.name == 'frames' then
+      material[binding.binding] = frames
+    else
+      material[binding.binding] = palette
+    end
+  end
+
+  local placement = render.block(Program.layout, 'pass')
+  local placementBuffer = device:buffer(placement.size, 'uniform')
+  local display: Display = {
+    window = window,
+    frames = frames,
+    palette = palette,
+    placement = placement,
+    placementBuffer = placementBuffer,
+    colors = buffer.create(1024),
+  }
+  place(display, window.width, window.height)
+
+  window:show(
+    device:plan {
+      name = 'doom',
+      viewport = { width = window.width, height = window.height },
+      targets = { { name = 'screen', format = format, imported = true } },
+      passes = {
+        {
+          name = 'palette',
+          kind = 'fullscreen',
+          pipeline = pipeline,
+          pass = pipeline:bind('pass', { [0] = placementBuffer }),
+          material = pipeline:bind('material', material),
+          colors = { 'screen' },
+        },
+      },
+    },
+    'screen'
+  )
+
+  return display
+end
+
+-- Keeps the frame centered at its shape when the window changes size.
+function module.resized(display: Display, width: number, height: number): ()
+  place(display, width, height)
+end
+
+-- Sends a frame and its palette (768 bytes of RGB) to the GPU; the window draws them at the
+-- frame's commit.
+function module.present(display: Display, pixels: buffer, rgb: buffer): ()
+  local colors = display.colors
+  for entry = 0, 255 do
+    buffer.writeu8(colors, entry * 4, buffer.readu8(rgb, entry * 3))
+    buffer.writeu8(colors, entry * 4 + 1, buffer.readu8(rgb, entry * 3 + 1))
+    buffer.writeu8(colors, entry * 4 + 2, buffer.readu8(rgb, entry * 3 + 2))
+    buffer.writeu8(colors, entry * 4 + 3, 255)
+  end
+
+  display.palette:write(colors)
+  display.frames:write(pixels)
+end
+
+return module
