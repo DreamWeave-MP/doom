@@ -380,6 +380,12 @@ local function stopAll(mixer: Mixer): ()
 end
 
 -- The effects volume, 0 to 15. Playing sounds take it up on the next update.
+-- A sound heard everywhere at full separation, outside any game: the menu's clicks, a mod's cues.
+-- It needs no level, so it plays at the title as well as in one.
+local function playGlobal(mixer: Mixer, name: string): ()
+  startSound(mixer, { name = name }, nil, 0)
+end
+
 local function setVolume(mixer: Mixer, sfxVolume: number): ()
   mixer.sfxVolume = math.clamp(math.floor(sfxVolume), 0, MaxVolume)
 end
@@ -499,6 +505,7 @@ end
 return {
   new = new,
   update = update,
+  playGlobal = playGlobal,
   setVolume = setVolume,
   stopAll = stopAll,
   playMusic = playMusic,

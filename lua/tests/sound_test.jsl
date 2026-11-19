@@ -197,6 +197,15 @@ suite.describe('S_AdjustSoundParams', function()
 end)
 
 suite.describe('channels', function()
+  suite.it('plays a menu sound with no game loaded, heard in both ears', function()
+    local context = audio.offline { channels = 2, rate = Rate }
+    local mixer = sound.new(effectsWad(), context, { sfxVolume = 15 })
+    sound.playGlobal(mixer, 'pistol')
+    local heard = context:render(TicFrames * 4)
+    expect(rms(heard, 2, 0) > 0.05).toBe(true)
+    expect(rms(heard, 2, 1) > 0.05).toBe(true)
+  end)
+
   suite.it('plays a started sound and stays silent for one past the clipping distance', function()
     local wad = effectsWad()
     local listener = thing(0, 0)
