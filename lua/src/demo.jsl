@@ -64,7 +64,7 @@ local function readHeader(data: buffer): Header
         players = players,
     }
 
-    if not any[for present in players => present] then
+    if not table.find(players, true) then
         fail('demo: no players')
     end
 

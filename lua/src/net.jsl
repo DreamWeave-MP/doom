@@ -7,15 +7,9 @@
 
 local bytes = require("@dream/bytes")
 
-type NetModule = {
-    schema: (options: { version: number, maxMessagesPerPacket: number?, channels: { { [string]: any } }, events: { { [string]: any } } }) -> dream_udp_Schema,
-    client: (options: { schema: dream_udp_Schema, bind: string? }) -> dream_udp_Client,
-    server: (options: { schema: dream_udp_Schema, address: string, protocolId: integer, maxClients: number? }) -> dream_udp_Server,
-}
-
 -- l3i 2.0 exposes this bridge as @dream/udp. A missing transport
 -- is an environment error and must remain visible to the caller.
-local net = require("@dream/udp") :: NetModule
+local net = require("@dream/udp")
 local module = {}
 
 export type EventName = "TICCMD" | "TIC_BUNDLE" | "STATE_HASH"
@@ -98,9 +92,6 @@ local function fail(message: string): never
     error("doom.net: " .. message, 2)
 end
 
-local function lengthOf(source: buffer | string): number
-    return if type(source) == "buffer" then buffer.len(source :: buffer) else #source :: string
-end
 
 local function requireInteger(value: number, name: string, minimum: number, maximum: number): number
     if value ~= math.floor(value) or value < minimum or value > maximum then
@@ -109,10 +100,10 @@ local function requireInteger(value: number, name: string, minimum: number, maxi
     return value
 end
 
-local function readRange(source: buffer | string, offset: number, size: number, label: string): number
-    requireInteger(offset, "offset", 0, math.max(0, lengthOf(source)))
+local function readRange(source: buffer, offset: number, size: number, label: string): number
+    requireInteger(offset, "offset", 0, math.max(0, buffer.len(source)))
     local finish = offset + size
-    if finish > lengthOf(source) then
+    if finish > buffer.len(source) then
         fail(label .. " is truncated")
     end
     return finish
@@ -143,7 +134,7 @@ local function writeCmd(target: buffer, offset: number, cmd: TicCmd): number
     return nextOffset
 end
 
-local function readCmd(source: buffer | string, offset: number): (TicCmd, number)
+local function readCmd(source: buffer, offset: number): (TicCmd, number)
     local nextOffset = readRange(source, offset, module.TICCMD_SIZE, "TICCMD")
     local cmd: TicCmd = {
         forward = buffer.readi8(source, offset),
@@ -162,7 +153,7 @@ function module.writeTicCmd(target: buffer, offset: number, cmd: TicCmd): number
     return writeCmd(target, offset, cmd)
 end
 
-function module.readTicCmd(source: buffer | string, offset: number?): (TicCmd, number)
+function module.readTicCmd(source: buffer, offset: number?): (TicCmd, number)
     return readCmd(source, offset or 0)
 end
 
@@ -172,9 +163,9 @@ function module.packTicCmd(cmd: TicCmd): buffer
     return target
 end
 
-function module.unpackTicCmd(source: buffer | string): TicCmd
+function module.unpackTicCmd(source: buffer): TicCmd
     local cmd, nextOffset = readCmd(source, 0)
-    if nextOffset ~= lengthOf(source) then fail("TICCMD has trailing bytes") end
+    if nextOffset ~= buffer.len(source) then fail("TICCMD has trailing bytes") end
     return cmd
 end
 
@@ -209,10 +200,10 @@ function module.writeTicBundle(target: buffer, offset: number, bundle: TicBundle
     return at
 end
 
-function module.readTicBundle(source: buffer | string, offset: number?, length: number?): (TicBundle, number)
+function module.readTicBundle(source: buffer, offset: number?, length: number?): (TicBundle, number)
     local start = offset or 0
-    local finish = if length then start + length else lengthOf(source)
-    if finish < start or finish > lengthOf(source) then fail("TIC_BUNDLE range is invalid") end
+    local finish = if length then start + length else buffer.len(source)
+    if finish < start or finish > buffer.len(source) then fail("TIC_BUNDLE range is invalid") end
     readRange(source, start, module.BUNDLE_HEADER_SIZE, "TIC_BUNDLE header")
     if buffer.readu8(source, start) ~= module.CODEC_VERSION then fail("unsupported TIC_BUNDLE codec") end
     local count = buffer.readu8(source, start + 2)
@@ -236,9 +227,9 @@ function module.packTicBundle(bundle: TicBundle): buffer
     return target
 end
 
-function module.unpackTicBundle(source: buffer | string): TicBundle
+function module.unpackTicBundle(source: buffer): TicBundle
     local bundle, nextOffset = module.readTicBundle(source)
-    if nextOffset ~= lengthOf(source) then fail("TIC_BUNDLE has trailing bytes") end
+    if nextOffset ~= buffer.len(source) then fail("TIC_BUNDLE has trailing bytes") end
     return bundle
 end
 
@@ -259,16 +250,12 @@ function module.writeStateHash(target: buffer, offset: number, tic: number, dige
     return offset + module.STATE_HASH_SIZE
 end
 
-function module.readStateHash(source: buffer | string, offset: number?): (StateHash, number)
+function module.readStateHash(source: buffer, offset: number?): (StateHash, number)
     local at = offset or 0
     local nextOffset = readRange(source, at, module.STATE_HASH_SIZE, "STATE_HASH")
     if buffer.readu8(source, at) ~= module.CODEC_VERSION then fail("unsupported STATE_HASH codec") end
     local digest = buffer.create(module.STATE_DIGEST_SIZE)
-    if type(source) == "buffer" then
-        buffer.copy(digest, 0, source :: buffer, at + 5, module.STATE_DIGEST_SIZE)
-    else
-        buffer.writestring(digest, 0, (source :: string):sub(at + 6, at + 5 + module.STATE_DIGEST_SIZE))
-    end
+    buffer.copy(digest, 0, source, at + 5, module.STATE_DIGEST_SIZE)
     return { tic = buffer.readu32(source, at + 1), digest = digest }, nextOffset
 end
 
@@ -278,17 +265,17 @@ function module.packStateHash(tic: number, state: buffer | string): buffer
     return target
 end
 
-function module.unpackStateHash(source: buffer | string): StateHash
+function module.unpackStateHash(source: buffer): StateHash
     local hash, nextOffset = module.readStateHash(source)
-    if nextOffset ~= lengthOf(source) then fail("STATE_HASH has trailing bytes") end
+    if nextOffset ~= buffer.len(source) then fail("STATE_HASH has trailing bytes") end
     return hash
 end
 
 local function eventIds(schema: dream_udp_Schema): EventIds
-    local tic = schema:eventId("TICCMD")
-    local bundle = schema:eventId("TIC_BUNDLE")
-    local state = schema:eventId("STATE_HASH")
-    if tic == nil or bundle == nil or state == nil then fail("protocol schema is missing a Doom event") end
+    local missing = "protocol schema is missing a Doom event"
+    local tic = schema:eventId("TICCMD") or fail(missing)
+    local bundle = schema:eventId("TIC_BUNDLE") or fail(missing)
+    local state = schema:eventId("STATE_HASH") or fail(missing)
     return { TICCMD = tic, TIC_BUNDLE = bundle, STATE_HASH = state }
 end
 
@@ -310,7 +297,7 @@ function module.protocol(): Protocol
 end
 
 function module.newClient(protocol: Protocol, options: ClientOptions?): Client
-    local settings = options or {}
+    local settings: ClientOptions = options or {}
     return {
         handle = net.client({ schema = protocol.schema, bind = settings.bind }),
         protocol = protocol,
@@ -334,7 +321,7 @@ end
 local function eventName(protocol: Protocol, id: integer): EventName
     local name = protocol.schema:eventName(id)
     if name == "TICCMD" or name == "TIC_BUNDLE" or name == "STATE_HASH" then return name end
-    fail("transport returned an unknown Doom event id " .. tostring(id))
+    return fail("transport returned an unknown Doom event id " .. tostring(id))
 end
 
 local function clientSend(handle: dream_udp_Client, id: integer, payload: buffer): ()
@@ -393,7 +380,7 @@ function module.clientPoll(client: Client, scratch: buffer): ClientEvent?
     elseif kind == "connectFailed" then
         return { kind = "connectFailed", peer = peer :: integer, reason = a :: string }
     end
-    fail("transport returned unknown client poll kind " .. tostring(kind))
+    return fail("transport returned unknown client poll kind " .. tostring(kind))
 end
 
 function module.serverUpdate(server: Server): ()
@@ -421,7 +408,7 @@ function module.serverPoll(server: Server, scratch: buffer): ServerEvent?
     elseif kind == "rejected" then
         return { kind = "rejected", peer = peer :: integer, clientId = a :: integer, reason = b :: string }
     end
-    fail("transport returned unknown server poll kind " .. tostring(kind))
+    return fail("transport returned unknown server poll kind " .. tostring(kind))
 end
 
 function module.clientSendTicCmd(client: Client, cmd: TicCmd): ()
@@ -460,7 +447,7 @@ end
 -- caller supplies the tic, so replay and tests produce the same command sequence.
 function module.botCommand(tic: number, options: BotOptions?): TicCmd
     requireInteger(tic, "tic", 0, 4294967295)
-    local settings = options or {}
+    local settings: BotOptions = options or {}
     local period = settings.period or 35
     requireInteger(period, "period", 1, 4294967295)
     local phase = math.floor(tic / period) % 4

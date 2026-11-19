@@ -354,8 +354,10 @@ local function playWorkloads(wad: wadModule.Wad)
     local engine = play.engine
     local west, east, south, north = math.huge, -math.huge, math.huge, -math.huge
     for _, vertex in game.vertexes do
-      west, east = math.min(west, vertex.x), math.max(east, vertex.x)
-      south, north = math.min(south, vertex.y), math.max(north, vertex.y)
+      west = math.min(west, vertex.x)
+      east = math.max(east, vertex.x)
+      south = math.min(south, vertex.y)
+      north = math.max(north, vertex.y)
     end
 
     local stepEast, stepNorth = (east - west) // 64, (north - south) // 64

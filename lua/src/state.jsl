@@ -110,7 +110,7 @@ local function encodeValue(value: any, active: {[any]: boolean}, depth: number):
             size += 1
         end
 
-        table.sort(entries, function(left, right): boolean
+        table.sort(entries, function(left: {key: string, value: string}, right: {key: string, value: string}): boolean
             return left.key < right.key
         end)
 
@@ -224,7 +224,7 @@ local function decodeValue(reader: Reader, depth: number): any
         return result
     end
 
-    fail(`state: unknown value tag {tag}`)
+    return fail(`state: unknown value tag {tag}`)
 end
 
 function module.decode(data: buffer): any

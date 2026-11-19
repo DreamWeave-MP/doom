@@ -28,7 +28,7 @@ local function patchNames(wad: any): { string }
   local count = buffer.readi32(data, 0)
   if count < 0 or count > math.floor((buffer.len(data) - 4) / 8) then error('texture: invalid PNAMES', 2) end
 
-  local result = table.create(count)
+  local result: { string } = table.create(count) :: { string }
   for index = 0, count - 1 do
     result[index + 1] = name8(data, 4 + index * 8)
   end

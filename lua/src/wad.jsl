@@ -44,7 +44,7 @@ local function parseFile(data: buffer, path: string): (string, { Lump })
     error(`wad: '{path}' has invalid directory bounds`, 2)
   end
 
-  local lumps: { Lump } = table.create(count)
+  local lumps: { Lump } = table.create(count) :: { Lump }
   for index = 1, count do
     local at = directory + (index - 1) * 16
     local offset, size = buffer.readi32(data, at), buffer.readi32(data, at + 4)
@@ -58,7 +58,7 @@ local function parseFile(data: buffer, path: string): (string, { Lump })
   return kind, lumps
 end
 
-function WadMethods:find(name: string, fromIndex: number?): Lump?
+function WadMethods.find(self: Wad, name: string, fromIndex: number?): Lump?
   local list = self.byName[string.upper(name)]
   if not list then return nil end
   if not fromIndex then return list[#list] end
@@ -70,15 +70,17 @@ function WadMethods:find(name: string, fromIndex: number?): Lump?
   return nil
 end
 
-function WadMethods:all(name: string): { Lump }
+function WadMethods.all(self: Wad, name: string): { Lump }
   return self.byName[string.upper(name)] or {}
 end
 
-function WadMethods:read(which: Lump | string, fromIndex: number?): buffer
-  local lump: Lump?
+function WadMethods.read(self: Wad, which: Lump | string, fromIndex: number?): buffer
+  local lump: Lump
   if type(which) == 'string' then
-    lump = self:find(which, fromIndex)
-    if not lump then error(`wad: lump '{which}' not found`, 2) end
+    local found = self:find(which, fromIndex)
+    if not found then error(`wad: lump '{which}' not found`, 2) end
+
+    lump = found
   else
     lump = which
   end
@@ -99,7 +101,7 @@ local function isMapMarker(name: string): boolean
   return string.match(name, '^E%dM%d$') ~= nil or string.match(name, '^MAP%d%d$') ~= nil
 end
 
-function WadMethods:markerRange(marker: string): (number, number)
+function WadMethods.markerRange(self: Wad, marker: string): (number, number)
   local lump = self:find(marker)
   if not lump then error(`wad: map marker '{marker}' not found`, 2) end
 
@@ -114,7 +116,7 @@ function WadMethods:markerRange(marker: string): (number, number)
   return start, finish
 end
 
-function WadMethods:mapLump(marker: string, name: string): Lump
+function WadMethods.mapLump(self: Wad, marker: string, name: string): Lump
   local start, finish = self:markerRange(marker)
   local upper = string.upper(name)
   for index = finish, start, -1 do

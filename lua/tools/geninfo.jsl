@@ -58,7 +58,7 @@ local function evaluate(text: string): number | string
     local product = 1
     for atom in string.gmatch(term, '[^*]+') do
       atom = string.gsub(atom, '%s', '')
-      local value = Flags[atom] or tonumber(atom)
+      local value: number? = Flags[atom] or tonumber(atom)
       if not value then error(`geninfo: cannot evaluate '{text}'`) end
       product *= value
     end
@@ -88,7 +88,7 @@ do
   table.insert(
     out,
     `  [{stateCount}] = \{ sprite = '{sprite}', frame = {frame}, tics = {tics}, action = {actionText}, `
-      .. `nextstate = {stateIndex[nextState]}, misc1 = {misc1}, misc2 = {misc2} \},\n`
+      .. `nextstate = {stateIndex[assert(nextState)]}, misc1 = {misc1}, misc2 = {misc2} \},\n`
   )
   stateCount += 1
 end
