@@ -12,8 +12,14 @@ DOOM source.
   thinkers, movement and collision, sliding, hitscan and projectiles, every monster and its state
   actions, weapons, pickups, doors, floors, ceilings, lifts, stairs, crushers, lights, teleporters,
   switches, all line and sector specials, deathmatch spawns and frags, item respawn, nightmare
-  respawn, level exits, and map progression. State and thing tables are generated from `info.c`
-  by `tools/geninfo.jsl`.
+  respawn, level exits, the intermission's tally and the finale (`wi_stuff.c`, `f_finale.c`:
+  their stages run from the players' commands, so a netgame's peers agree), and map progression.
+  State and thing tables are generated from `info.c` by `tools/geninfo.jsl`.
+- `@doom/screens` draws the front end from the WAD: the intermission (episode maps and their
+  animations, the single-player, coop, and deathmatch tallies), the finale's text, end art,
+  bunny scroller and cast call, title and help pages, and the menu (`m_menu.c` as a state
+  machine: keys in, commands such as `newGame`, `save`, or `quit` out), with a Multiplayer menu
+  for hosting and joining a game.
 - It plays vanilla demos. All thirteen built-in demos of `doom.wad`, `doom2.wad`, `plutonia.wad`,
   and `tnt.wad` run to the recorded player's death, tic for tic (`tests/play_test.jsl`).
 - Save games (`play.save`, `play.load`) store the whole game graph and restore to the same future.
@@ -24,8 +30,7 @@ DOOM source.
 - WAD, map, palette, patch, and texture readers, and a headless indexed renderer for the title,
   the automap, and a first-person view.
 
-What it is not: there is no sound, no status bar, menu, intermission or finale screen (the
-intermission is a timed pause that any player can skip), and the first-person renderer draws
+What it is not: there is no sound, and the first-person renderer draws
 the map's starting geometry, so opened doors and moved lifts are not shown. The original's
 overflow emulation (intercepts, spechits, the body queue) is not reproduced, so a demo that
 relies on one of those can drift.
