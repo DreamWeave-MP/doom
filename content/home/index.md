@@ -1,6 +1,6 @@
 +++
 title = "DOOM for Jess"
-description = "DOOM's game simulation in Luau, for Jess: WAD reading, the renderer, demos, saves and netgames. Ships no IWAD; bring a legally obtained WAD."
+description = "DOOM for Jess: Linux Doom 1.10 played in Luau on Jess, with a window, sound, saves, mods as Jess packages, and netgames of one to four players in cooperative, deathmatch and team deathmatch. Ships no IWAD; bring a legally obtained WAD."
 date = 2026-10-21
 
 [taxonomies]
@@ -10,7 +10,7 @@ tags = ["Jess", "Luau", "DOOM"]
 sections = ["overview", "releases", "credits"]
 +++
 
-DOOM's game simulation in Luau, for Jess: WAD reading, the renderer, demos, saves and netgames. Ships no IWAD; bring a legally obtained WAD.
+DOOM for Jess: Linux Doom 1.10 played in Luau on Jess, with a window, sound, saves, mods as Jess packages, and netgames of one to four players in cooperative, deathmatch and team deathmatch. Ships no IWAD; bring a legally obtained WAD.
 
 <!-- more -->
 
