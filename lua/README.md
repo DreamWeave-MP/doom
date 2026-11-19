@@ -29,8 +29,11 @@ DOOM source.
   host, clients that replay the same tics, and a world hash to compare.
 - WAD, map, palette, patch, and texture readers, and a headless indexed renderer for the title,
   the automap, and a first-person view.
+- `@doom/sound` plays what the simulation's sounds mean: `s_sound.c`'s eight channels, priorities,
+  distance attenuation, and stereo separation over Jess audio voices, the WAD's DMX sound lumps,
+  and its MUS music through a small FM synthesizer built from the GENMIDI lump.
 
-What it is not: there is no sound, and the first-person renderer draws
+What it is not: the first-person renderer draws
 the map's starting geometry, so opened doors and moved lifts are not shown. The original's
 overflow emulation (intercepts, spechits, the body queue) is not reproduced, so a demo that
 relies on one of those can drift.
@@ -72,6 +75,43 @@ print(play.summary().players[1].x, play.hash())
 `play.tick` takes one ticcmd per slot (0 to 3). `play.observe(slot)` returns what that player
 can know: its own state, everything in line of sight with distance and bearing, and how far it
 can walk in ten directions. One game runs per Jess runtime.
+
+## Sound
+
+The simulation queues every sound it starts or stops, outside the game, so saves, hashes, and
+demos never see it. `play.drainSounds()` hands the queue over; each entry names the sound
+(`pistol`, without the original's `sfx_`), the mobj or sector it comes from (nil for one heard
+everywhere), where that was when it started, and, for pickups, the one player who hears it. The
+host owns the audio context and gives `@doom/sound` the queue once a tic:
+
+```luau
+local audio = require('@jess/audio')
+local play = require('@doom/play')
+local sound = require('@doom/sound')
+
+local game = play.new('doom.wad', { mapName = 'E1M1' })
+local mixer = sound.new(game.wad, audio.output()) -- needs the audio.output capability
+sound.playMusic(mixer, sound.musicFor(game), true)
+
+for _ = 1, 35 do
+  play.tick { [0] = play.command { forward = 50, attack = true } }
+  sound.update(mixer, game, game.consoleplayer, play.drainSounds())
+end
+```
+
+`sound.update` starts the tic's sounds as the listener hears them, moves the playing ones with
+their sources, stops everything when a level begins, and keeps the music fed; call it every tic,
+or the music runs dry. `sound.setVolume` and `sound.setMusicVolume` take the menu's 0 to 15.
+`sound.musicFor(game, moment)` names vanilla's lump for the current map, or for the `title`,
+`intermission`, `finale`, `bunny`, and `cast` screens.
+
+Kept from the original: the random pitch shifts are gone (as in DOS Doom from 1.666), a switch
+sounds from the first active button's sector (or everywhere when there is none), an exit switch
+never plays its own sound, a locked door's grunt is heard by every player, and on any map 8
+nothing is too far away to hear. The music is not an OPL2: its voices are two-operator FM with
+the chip's multiples, waveforms, feedback and envelope rates, but no tremolo, vibrato, or key
+scaling, 16 voices rather than 9, and a volume curve that only approximates Doom's driver. It
+sounds like the songs, not like the card.
 
 ## Live deathmatch for agents
 

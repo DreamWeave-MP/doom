@@ -27,6 +27,12 @@ if #paths == 0 then
         'lua/src/screens/menu.jsl',
         'lua/src/screens/text.jsl',
         'lua/tests/screens_test.jsl',
+        'lua/src/sound/init.jsl',
+        'lua/src/sound/dmx.jsl',
+        'lua/src/sound/mus.jsl',
+        'lua/src/sound/sfx.jsl',
+        'lua/src/sound/synth.jsl',
+        'lua/tests/sound_test.jsl',
     }
 end
 

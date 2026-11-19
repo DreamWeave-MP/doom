@@ -1,0 +1,611 @@
+--!strict
+-- A software stand-in for the OPL2 FM chip vanilla Doom's music played on: two-operator voices
+-- built from the GENMIDI lump's instruments, driven by a MUS score at 140 ticks a second.
+--
+-- It follows the chip's shape, not its exact numbers: operators are a modulator phase-modulating
+-- a carrier (or both summed), with the chip's frequency multiples, four waveforms, modulator
+-- feedback, and attack, decay, sustain, and release rates turned into times from the OPL2 data
+-- sheet's table; volumes map to carrier attenuation the way Doom's OPL driver does it. Left out:
+-- tremolo, vibrato, key scaling of rate and level, and the chip's exact envelope curves and
+-- 9-voice limit (this has 16 voices, and steals the oldest). Without a GENMIDI lump every
+-- instrument is a plain sine organ.
+
+local mus = require('./mus')
+
+export type Operator = {
+  multiple: number,
+  -- Seconds from silence to full; 0 at once, math.huge never.
+  attack: number,
+  -- Decibels a second down to the sustain level, and down from there (or from wherever the
+  -- note was let go) to silence.
+  decay: number,
+  release: number,
+  -- Decibels below full where the decay stops while the note is held.
+  sustain: number,
+  -- Holds the sustain level until the note ends; otherwise it decays on at the release rate.
+  sustained: boolean,
+  waveform: number,
+  -- Attenuation in decibels.
+  level: number,
+}
+
+export type Voice = {
+  modulator: Operator,
+  carrier: Operator,
+  -- Modulator feedback, in cycles per unit of its last two outputs' sum.
+  feedback: number,
+  -- The two operators summed rather than the modulator modulating the carrier.
+  additive: boolean,
+  -- Semitones added to the note.
+  noteOffset: number,
+}
+
+export type Instrument = {
+  -- Plays `fixedNote` whatever note it is given (percussion, mostly).
+  fixed: boolean,
+  fixedNote: number,
+  -- Sounds both voices, the second detuned by `detune` semitones.
+  double: boolean,
+  detune: number,
+  voices: { Voice },
+}
+
+export type Options = {
+  -- Frames a second (22050).
+  rate: number?,
+  -- Voices sounding at once (16).
+  voices: number?,
+}
+
+type Channel = {
+  instrument: number,
+  volume: number,
+  pan: number,
+  bend: number,
+  noteVolume: number,
+}
+
+-- A sounding voice. The envelope fields are per operator: stage (1 attack, 2 decay, 3 sustain,
+-- 4 release, 0 done), decibels below full outside the attack, and amplitude during it.
+type Playing = {
+  channel: number,
+  -- The note the score named, which its release names too, and the one it sounds at (an
+  -- instrument's fixed note).
+  note: number,
+  pitch: number,
+  volume: number,
+  held: boolean,
+  age: number,
+  voice: Voice,
+  detune: number,
+  modulatorIncrement: number,
+  carrierIncrement: number,
+  modulatorPhase: number,
+  carrierPhase: number,
+  lastOutput: number,
+  previousOutput: number,
+  modulatorLevel: number,
+  carrierLevel: number,
+  left: number,
+  right: number,
+  modulatorStage: number,
+  modulatorDecibels: number,
+  modulatorAmplitude: number,
+  modulatorGain: number,
+  carrierStage: number,
+  carrierDecibels: number,
+  carrierAmplitude: number,
+  carrierGain: number,
+}
+
+export type Player = {
+  rate: number,
+  song: mus.Song,
+  instruments: { Instrument },
+  loop: boolean,
+  -- Every event played, and every voice silent.
+  done: boolean,
+  position: number,
+  wait: number,
+  samplesPerTick: number,
+  channels: { Channel },
+  -- Sounding voices by slot, 1 to `limit`, with holes.
+  playing: { [number]: Playing },
+  limit: number,
+  ages: number,
+  finishing: boolean,
+}
+
+local TableSize = 1024
+local BlockSize = 32
+local SilentDecibels = 96
+local MasterGain = 0.5
+local FinishEvent: mus.Event = { kind = 'finish', channel = 0, note = 0, value = 0, controller = 0, delay = 0 }
+local Multiples ={ [0] = 0.5, 1, 2, 3, 4, 5, 6, 7, 8, 8, 10, 10, 12, 12, 15, 15 }
+
+local function waveTable(shape: (number) -> number): { number }
+  return [for index in range(0, TableSize - 1) => shape(index / TableSize)]
+end
+
+local Waves = {
+  [0] = waveTable(function(phase: number): number
+    return math.sin(phase * 2 * math.pi)
+  end),
+  waveTable(function(phase: number): number
+    return math.max(math.sin(phase * 2 * math.pi), 0)
+  end),
+  waveTable(function(phase: number): number
+    return math.abs(math.sin(phase * 2 * math.pi))
+  end),
+  waveTable(function(phase: number): number
+    if phase % 0.5 >= 0.25 then return 0 end
+    return math.abs(math.sin(phase * 2 * math.pi))
+  end),
+}
+
+-- The OPL2 data sheet's attack times (0 to 100%) and decay times (0 to -96 dB) halve with
+-- every rate step from rate 1; rate 0 never moves, and attack rate 15 is instant.
+local function attackSeconds(rate: number): number
+  if rate == 0 then return math.huge end
+  if rate == 15 then return 0 end
+  return 2.82624 / 2 ^ (rate - 1)
+end
+
+local function decibelsPerSecond(rate: number): number
+  if rate == 0 then return 0 end
+  return SilentDecibels / (39.28064 / 2 ^ (rate - 1))
+end
+
+local function operator(data: buffer, at: number): Operator
+  local character = buffer.readu8(data, at)
+  local attackDecay = buffer.readu8(data, at + 1)
+  local sustainRelease = buffer.readu8(data, at + 2)
+  return {
+    multiple = Multiples[bit32.band(character, 15)],
+    attack = attackSeconds(bit32.rshift(attackDecay, 4)),
+    decay = decibelsPerSecond(bit32.band(attackDecay, 15)),
+    sustain = bit32.rshift(sustainRelease, 4) * 3,
+    release = decibelsPerSecond(bit32.band(sustainRelease, 15)),
+    sustained = bit32.band(character, 32) ~= 0,
+    waveform = bit32.band(buffer.readu8(data, at + 3), 3),
+    level = bit32.band(buffer.readu8(data, at + 5), 63) * 0.75,
+  }
+end
+
+local function voice(data: buffer, at: number): Voice
+  local feedback = buffer.readu8(data, at + 6)
+  local amount = bit32.band(bit32.rshift(feedback, 1), 7)
+  return {
+    modulator = operator(data, at),
+    carrier = operator(data, at + 7),
+    feedback = if amount == 0 then 0 else 2 ^ (amount - 7),
+    additive = bit32.band(feedback, 1) ~= 0,
+    noteOffset = buffer.readi16(data, at + 14),
+  }
+end
+
+local GenmidiCount = 175
+local GenmidiSize = 36
+
+-- The GENMIDI lump's 175 instruments: 128 General MIDI programs, then the percussion for notes
+-- 35 to 81.
+local function parseGenmidi(data: buffer): { Instrument }
+  if buffer.len(data) < 8 + GenmidiCount * GenmidiSize or buffer.readstring(data, 0, 8) ~= '#OPL_II#' then
+    error('synth: not a GENMIDI lump', 2)
+  end
+
+  local instruments: { Instrument } = table.create(GenmidiCount) :: { Instrument }
+  for index = 0, GenmidiCount - 1 do
+    local at = 8 + index * GenmidiSize
+    local flags = buffer.readu16(data, at)
+    table.insert(instruments, {
+      fixed = bit32.band(flags, 1) ~= 0,
+      fixedNote = buffer.readu8(data, at + 3),
+      double = bit32.band(flags, 4) ~= 0,
+      detune = (buffer.readu8(data, at + 2) / 2 - 64) / 32,
+      voices = { voice(data, at + 4), voice(data, at + 20) },
+    })
+  end
+
+  return instruments
+end
+
+local Organ: Instrument = {
+  fixed = false,
+  fixedNote = 60,
+  double = false,
+  detune = 0,
+  voices = {
+    {
+      modulator = {
+        multiple = 1,
+        attack = 0,
+        decay = 0,
+        release = 0,
+        sustain = 0,
+        sustained = true,
+        waveform = 0,
+        level = SilentDecibels,
+      },
+      carrier = {
+        multiple = 1,
+        attack = 0.01,
+        decay = 6,
+        release = 60,
+        sustain = 9,
+        sustained = true,
+        waveform = 0,
+        level = 0,
+      },
+      feedback = 0,
+      additive = false,
+      noteOffset = 0,
+    },
+  },
+}
+
+local function resetChannels(player: Player): ()
+  for index = 1, 16 do
+    player.channels[index] = { instrument = 0, volume = 100, pan = 64, bend = 128, noteVolume = 127 }
+  end
+end
+
+local function new(song: mus.Song, instruments: { Instrument }?, loop: boolean, options: Options?): Player
+  local rate = options and options.rate or 22050
+  local player: Player = {
+    rate = rate,
+    song = song,
+    instruments = instruments or {},
+    loop = loop,
+    done = false,
+    position = 1,
+    wait = 0,
+    samplesPerTick = rate / mus.TicksPerSecond,
+    channels = {},
+    playing = {},
+    limit = options and options.voices or 16,
+    ages = 0,
+    finishing = false,
+  }
+  resetChannels(player)
+
+  -- A score with no time in it would loop forever without making a sound.
+  local ticks = 0
+  for _, event in song.events do
+    ticks += event.delay
+  end
+
+  if ticks == 0 then player.loop = false end
+  return player
+end
+
+-- Doom's OPL driver maps MUS volumes through a curve before multiplying; a square root is
+-- close to it.
+local function volumeCurve(volume: number): number
+  return math.floor(math.sqrt(volume / 127) * 127 + 0.5)
+end
+
+-- The carrier's attenuation for a note at `noteVolume` on a channel at `channelVolume`: the
+-- register value Doom's driver writes, 0.75 dB a step.
+local function carrierDecibels(noteVolume: number, channelVolume: number): number
+  local full = bit32.rshift(volumeCurve(noteVolume) * 2 * (volumeCurve(channelVolume) + 1), 9)
+  return (63 - math.min(full, 63)) * 0.75
+end
+
+local function frequency(note: number): number
+  return 440 * 2 ^ ((note - 69) / 12)
+end
+
+local function tune(player: Player, playing: Playing): ()
+  local channel = player.channels[playing.channel + 1]
+  local semitones = playing.pitch + playing.voice.noteOffset + playing.detune + (channel.bend - 128) / 64
+  local hertz = frequency(semitones)
+  playing.modulatorIncrement = hertz * playing.voice.modulator.multiple / player.rate
+  playing.carrierIncrement = hertz * playing.voice.carrier.multiple / player.rate
+end
+
+local function level(player: Player, playing: Playing): ()
+  local channel = player.channels[playing.channel + 1]
+  local carrier = carrierDecibels(playing.volume, channel.volume)
+  playing.carrierLevel = 10 ^ (-carrier / 20)
+
+  local modulator = playing.voice.modulator.level
+  if playing.voice.additive then modulator = math.max(modulator, carrier) end
+  playing.modulatorLevel = 10 ^ (-modulator / 20)
+end
+
+local function pan(player: Player, playing: Playing): ()
+  local position = math.clamp((player.channels[playing.channel + 1].pan - 64) / 64, -1, 1)
+  local angle = (position + 1) * math.pi / 4
+  playing.left, playing.right = math.cos(angle), math.sin(angle)
+end
+
+local function release(playing: Playing): ()
+  playing.held = false
+  if playing.modulatorStage == 1 then
+    playing.modulatorDecibels = -20 * math.log10(math.max(playing.modulatorAmplitude, 1e-5))
+  end
+
+  if playing.carrierStage == 1 then
+    playing.carrierDecibels = -20 * math.log10(math.max(playing.carrierAmplitude, 1e-5))
+  end
+
+  if playing.modulatorStage ~= 0 then playing.modulatorStage = 4 end
+  if playing.carrierStage ~= 0 then playing.carrierStage = 4 end
+end
+
+-- A slot for a new voice: an empty one, or else the oldest let-go voice, or else the oldest.
+local function freeSlot(player: Player): number
+  local best, bestScore = 1, math.huge
+  for index = 1, player.limit do
+    local playing = player.playing[index]
+    if not playing then return index end
+
+    -- Released voices go first, then the oldest.
+    local score = playing.age + (if playing.held then 1e12 else 0)
+    if score < bestScore then
+      best, bestScore = index, score
+    end
+  end
+
+  return best
+end
+
+local function noteOn(player: Player, channelIndex: number, note: number, noteVolume: number): ()
+  local channel = player.channels[channelIndex + 1]
+  local instrument: Instrument?
+  if channelIndex == 15 then
+    if note < 35 or note > 81 then return end
+
+    instrument = player.instruments[128 + note - 35 + 1]
+  else
+    instrument = player.instruments[channel.instrument + 1]
+  end
+
+  local chosen = instrument or Organ
+  local count = if chosen.double and chosen.voices[2] then 2 else 1
+  for index = 1, count do
+    player.ages += 1
+    local playing: Playing = {
+      channel = channelIndex,
+      note = note,
+      pitch = if chosen.fixed then chosen.fixedNote else note,
+      volume = noteVolume,
+      held = true,
+      age = player.ages,
+      voice = chosen.voices[index],
+      detune = if index == 2 then chosen.detune else 0,
+      modulatorIncrement = 0,
+      carrierIncrement = 0,
+      modulatorPhase = 0,
+      carrierPhase = 0,
+      lastOutput = 0,
+      previousOutput = 0,
+      modulatorLevel = 0,
+      carrierLevel = 0,
+      left = 0,
+      right = 0,
+      modulatorStage = 1,
+      modulatorDecibels = 0,
+      modulatorAmplitude = 0,
+      modulatorGain = 0,
+      carrierStage = 1,
+      carrierDecibels = 0,
+      carrierAmplitude = 0,
+      carrierGain = 0,
+    }
+    tune(player, playing)
+    level(player, playing)
+    pan(player, playing)
+    player.playing[freeSlot(player)] = playing
+  end
+end
+
+local function releaseAll(player: Player): ()
+  for _, playing in player.playing do
+    if playing.held then release(playing) end
+  end
+end
+
+local function dispatch(player: Player, event: mus.Event): ()
+  local kind = event.kind
+  local channelIndex = event.channel
+  local channel = player.channels[channelIndex + 1]
+  if kind == 'play' then
+    if event.volume then channel.noteVolume = event.volume end
+  elseif kind == 'bend' then
+    channel.bend = event.value
+  elseif kind == 'controller' then
+    if event.controller == 0 then
+      channel.instrument = event.value
+    elseif event.controller == 3 then
+      channel.volume = event.value
+    elseif event.controller == 4 then
+      channel.pan = event.value
+    end
+  elseif kind == 'system' and event.value == 14 then
+    channel.volume, channel.pan, channel.bend = 100, 64, 128
+  elseif kind == 'finish' then
+    releaseAll(player)
+    if not player.loop then
+      player.finishing = true
+      return
+    end
+
+    resetChannels(player)
+    player.position = 0
+    return
+  end
+
+  -- What the event does to the channel's sounding voices.
+  for index, playing in player.playing do
+    if playing.channel ~= channelIndex then continue end
+
+    if kind == 'release' or kind == 'play' then
+      if playing.held and playing.note == event.note then release(playing) end
+    elseif kind == 'bend' then
+      tune(player, playing)
+    elseif kind == 'controller' and event.controller == 3 then
+      level(player, playing)
+    elseif kind == 'controller' and event.controller == 4 then
+      pan(player, playing)
+    elseif kind == 'system' and event.value == 10 then
+      player.playing[index] = nil
+    elseif kind == 'system' and event.value == 11 then
+      if playing.held then release(playing) end
+    end
+  end
+
+  if kind == 'play' then noteOn(player, channelIndex, event.note, channel.noteVolume) end
+end
+
+-- Moves an operator's envelope on by `seconds`; returns its stage, decibels, amplitude, and gain.
+local function envelope(
+  op: Operator,
+  stage: number,
+  decibels: number,
+  amplitude: number,
+  seconds: number
+): (number, number, number, number)
+  if stage == 1 then
+    if op.attack == math.huge then return 1, decibels, 0, 0 end
+
+    amplitude = if op.attack == 0 then 1 else amplitude + seconds / op.attack
+    if amplitude < 1 then return 1, decibels, amplitude, amplitude end
+
+    stage, decibels = 2, 0
+  end
+
+  if stage == 2 then
+    decibels += op.decay * seconds
+    if decibels >= op.sustain then
+      decibels = op.sustain
+      stage = if op.sustained then 3 else 4
+    end
+  elseif stage == 4 then
+    decibels += op.release * seconds
+    if decibels >= SilentDecibels then return 0, SilentDecibels, 0, 0 end
+  elseif stage == 0 then
+    return 0, SilentDecibels, 0, 0
+  end
+
+  return stage, decibels, amplitude, 10 ^ (-decibels / 20)
+end
+
+-- Adds `count` frames (at most BlockSize) of one voice into the block's two channels.
+local function renderVoice(player: Player, playing: Playing, left: { number }, right: { number }, count: number): boolean
+  local seconds = count / player.rate
+  local voiceData = playing.voice
+  local modulator, carrier = voiceData.modulator, voiceData.carrier
+  local modulatorStart, carrierStart = playing.modulatorGain, playing.carrierGain
+
+  local stage, decibels, amplitude, gain = envelope(
+    modulator,
+    playing.modulatorStage,
+    playing.modulatorDecibels,
+    playing.modulatorAmplitude,
+    seconds
+  )
+  playing.modulatorStage, playing.modulatorDecibels, playing.modulatorAmplitude = stage, decibels, amplitude
+  playing.modulatorGain = gain * playing.modulatorLevel
+
+  stage, decibels, amplitude, gain = envelope(
+    carrier,
+    playing.carrierStage,
+    playing.carrierDecibels,
+    playing.carrierAmplitude,
+    seconds
+  )
+  playing.carrierStage, playing.carrierDecibels, playing.carrierAmplitude = stage, decibels, amplitude
+  playing.carrierGain = gain * playing.carrierLevel
+
+  local modulatorWave, carrierWave = Waves[modulator.waveform], Waves[carrier.waveform]
+  local modulatorGain, carrierGain = modulatorStart, carrierStart
+  local modulatorStep = (playing.modulatorGain - modulatorStart) / count
+  local carrierStep = (playing.carrierGain - carrierStart) / count
+  local modulatorPhase, carrierPhase = playing.modulatorPhase, playing.carrierPhase
+  local modulatorIncrement, carrierIncrement = playing.modulatorIncrement, playing.carrierIncrement
+  local lastOutput, previousOutput = playing.lastOutput, playing.previousOutput
+  local feedback, additive = voiceData.feedback, voiceData.additive
+  local leftGain, rightGain = playing.left * MasterGain, playing.right * MasterGain
+
+  for index = 1, count do
+    modulatorGain += modulatorStep
+    carrierGain += carrierStep
+    modulatorPhase += modulatorIncrement
+    carrierPhase += carrierIncrement
+
+    local phase = modulatorPhase + feedback * (lastOutput + previousOutput)
+    local modulatorOutput = modulatorWave[(phase - math.floor(phase)) * TableSize // 1 + 1] * modulatorGain
+    previousOutput, lastOutput = lastOutput, modulatorOutput
+
+    local output
+    if additive then
+      output = carrierWave[(carrierPhase - math.floor(carrierPhase)) * TableSize // 1 + 1] * carrierGain + modulatorOutput
+    else
+      phase = carrierPhase + 4 * modulatorOutput
+      output = carrierWave[(phase - math.floor(phase)) * TableSize // 1 + 1] * carrierGain
+    end
+
+    left[index] += output * leftGain
+    right[index] += output * rightGain
+  end
+
+  playing.modulatorPhase = modulatorPhase - math.floor(modulatorPhase)
+  playing.carrierPhase = carrierPhase - math.floor(carrierPhase)
+  playing.lastOutput, playing.previousOutput = lastOutput, previousOutput
+
+  if playing.carrierStage ~= 0 then return true end
+  return additive and playing.modulatorStage ~= 0
+end
+
+-- Renders `frames` frames of the song as interleaved stereo 32-bit floats.
+local function render(player: Player, frames: number): buffer
+  local out = buffer.create(frames * 8)
+  local left, right = table.create(BlockSize, 0), table.create(BlockSize, 0)
+  local events = player.song.events
+  local written = 0
+  while written < frames do
+    while player.wait <= 0 and not player.finishing do
+      -- A score that runs out without a finish event finishes there.
+      local event = events[player.position] or FinishEvent
+      dispatch(player, event)
+      player.position += 1
+      player.wait += event.delay * player.samplesPerTick
+    end
+
+    local count = math.min(frames - written, BlockSize)
+    if not player.finishing then count = math.min(count, math.max(math.ceil(player.wait), 1)) end
+
+    for index = 1, count do
+      left[index], right[index] = 0, 0
+    end
+
+    local sounding = false
+    for index, playing in player.playing do
+      if renderVoice(player, playing, left, right, count) then
+        sounding = true
+      else
+        player.playing[index] = nil
+      end
+    end
+
+    for index = 1, count do
+      local at = (written + index - 1) * 8
+      buffer.writef32(out, at, math.clamp(left[index], -1, 1))
+      buffer.writef32(out, at + 4, math.clamp(right[index], -1, 1))
+    end
+
+    written += count
+    player.wait -= count
+    if player.finishing and not sounding then player.done = true end
+  end
+
+  return out
+end
+
+return {
+  new = new,
+  render = render,
+  parseGenmidi = parseGenmidi,
+}

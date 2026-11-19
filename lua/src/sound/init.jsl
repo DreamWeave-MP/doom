@@ -1,0 +1,515 @@
+--!strict
+-- @doom/sound: what the play simulation's sound events sound like. A port of s_sound.c's channel
+-- logic (8 channels, priorities, one sound per origin, S_AdjustSoundParams' attenuation and
+-- stereo separation) over Jess audio voices, the DMX sound lumps decoded to PCM, and the MUS
+-- music played through ./synth into a stream.
+--
+-- The host owns the audio context (an output for play, an offline one for tests) and calls
+-- `update` once a tic with `play.drainSounds()`; nothing here touches the simulation.
+
+local audio = require('@jess/audio')
+local dmx = require('@self/dmx')
+local mus = require('@self/mus')
+local sfxTable = require('@self/sfx')
+local synth = require('@self/synth')
+local tables = require('@doom/tables')
+local wadModule = require('@doom/wad')
+
+type Wad = wadModule.Wad
+
+-- Anything with a place: a mobj, or a sector's soundorg.
+export type Origin = { x: number, y: number }
+
+-- What the listener needs: the console player's mobj.
+export type Listener = { x: number, y: number, angle: number }
+
+-- `play.drainSounds()`'s entries; see `SoundEvent` in @doom/play.
+export type SoundEvent = {
+  name: string?,
+  stop: boolean?,
+  origin: Origin?,
+  x: number?,
+  y: number?,
+  player: number?,
+}
+
+-- The parts of `play.game` sound reads.
+export type Game = {
+  players: { [number]: { mo: Listener? } },
+  gamemap: number,
+  gameepisode: number,
+  commercial: boolean,
+  mapname: string?,
+  leveltime: number,
+}
+
+export type Options = {
+  -- Sounds at once (8, the original's default).
+  channels: number?,
+  -- Effects and music volume, 0 to 15 (8 each, the original's defaults).
+  sfxVolume: number?,
+  musicVolume: number?,
+  -- The music synthesizer's rate (22050), voices (16), and how many seconds it stays ahead of
+  -- the output (0.3).
+  musicRate: number?,
+  musicVoices: number?,
+  musicSeconds: number?,
+}
+
+export type Channel = {
+  -- The sound playing, or nil for a free channel.
+  sfx: sfxTable.Sfx?,
+  origin: Origin?,
+  voice: audio.Voice?,
+  gain: number,
+  pan: number,
+}
+
+type Music = {
+  lump: string,
+  player: synth.Player,
+  stream: audio.Stream,
+  voice: audio.Voice,
+}
+
+export type Mixer = {
+  wad: Wad,
+  context: audio.Context,
+  effects: audio.Node,
+  musicBus: audio.Node,
+  channels: { Channel },
+  sfxVolume: number,
+  musicVolume: number,
+  -- Decoded sounds by lump name; false for one the WAD doesn't have.
+  sounds: { [string]: audio.Pcm | false },
+  -- Frames a moving sound glides to its new level and pan over: a tic.
+  ramp: number,
+  -- The level and its time as the last update saw them, to tell when a level begins.
+  map: string?,
+  leveltime: number,
+  music: Music?,
+  instruments: { synth.Instrument }?,
+  musicRate: number,
+  musicVoices: number,
+  musicSeconds: number,
+}
+
+local FracUnit = 65536
+local U32 = 4294967296
+local ClippingDistance = 1200 * FracUnit
+local CloseDistance = 160 * FracUnit
+local Attenuator = (ClippingDistance - CloseDistance) // FracUnit
+local StereoSwing = 96 * FracUnit
+local NormalSeparation = 128
+local NormalPitch = 128
+local MaxVolume = 15
+local StopFade = 64
+
+local finesine, tantoangle = tables.finesine, tables.tantoangle
+
+local function slopeDiv(numerator: number, denominator: number): number
+  if denominator < 512 then return 2048 end
+
+  local answer = (numerator * 8) // (denominator // 256)
+  return if answer <= 2048 then answer else 2048
+end
+
+-- R_PointToAngle2, as r_main.c computes it.
+local function pointToAngle(x1: number, y1: number, x2: number, y2: number): number
+  local deltaX, deltaY = x2 - x1, y2 - y1
+  if deltaX == 0 and deltaY == 0 then return 0 end
+
+  if deltaX >= 0 then
+    if deltaY >= 0 then
+      if deltaX > deltaY then return tantoangle[slopeDiv(deltaY, deltaX) + 1] end
+      return 0x40000000 - 1 - tantoangle[slopeDiv(deltaX, deltaY) + 1]
+    end
+
+    deltaY = -deltaY
+    if deltaX > deltaY then return (-tantoangle[slopeDiv(deltaY, deltaX) + 1]) % U32 end
+    return 0xC0000000 + tantoangle[slopeDiv(deltaX, deltaY) + 1]
+  end
+
+  deltaX = -deltaX
+  if deltaY >= 0 then
+    if deltaX > deltaY then return 0x80000000 - 1 - tantoangle[slopeDiv(deltaY, deltaX) + 1] end
+    return 0x40000000 + tantoangle[slopeDiv(deltaX, deltaY) + 1]
+  end
+
+  deltaY = -deltaY
+  if deltaX > deltaY then return 0x80000000 + tantoangle[slopeDiv(deltaY, deltaX) + 1] end
+  return 0xC0000000 - 1 - tantoangle[slopeDiv(deltaX, deltaY) + 1]
+end
+
+-- C's integer division, which truncates toward zero.
+local function divide(numerator: number, denominator: number): number
+  local quotient = numerator / denominator
+  return if quotient < 0 then math.ceil(quotient) else math.floor(quotient)
+end
+
+-- S_AdjustSoundParams for a sound at `sourceX`, `sourceY`: whether the listener hears it, at what volume
+-- (0 to `sfxVolume`), and with what separation (0 left, 128 centred, 255 right). On any map 8
+-- (the boss levels, as linuxdoom tests `gamemap` alone) nothing is too far, and the level
+-- falls off toward 15 rather than 0, as the original's arithmetic has it.
+local function adjustSoundParams(
+  listener: Listener,
+  sourceX: number,
+  sourceY: number,
+  sfxVolume: number,
+  gamemap: number
+): (boolean, number, number)
+  local adx, ady = math.abs(listener.x - sourceX), math.abs(listener.y - sourceY)
+  local distance = adx + ady - math.min(adx, ady) // 2
+  if gamemap ~= 8 and distance > ClippingDistance then return false, 0, NormalSeparation end
+
+  local angle = pointToAngle(listener.x, listener.y, sourceX, sourceY)
+  if angle > listener.angle then
+    angle -= listener.angle
+  else
+    angle += 0xffffffff - listener.angle
+  end
+
+  local fine = angle // 524288
+  local separation = 128 - (StereoSwing // FracUnit * finesine[fine + 1]) // FracUnit
+
+  local volume
+  if distance < CloseDistance then
+    volume = sfxVolume
+  elseif gamemap == 8 then
+    distance = math.min(distance, ClippingDistance)
+    volume = 15 + divide((sfxVolume - 15) * ((ClippingDistance - distance) // FracUnit), Attenuator)
+  else
+    volume = (sfxVolume * ((ClippingDistance - distance) // FracUnit)) // Attenuator
+  end
+
+  return volume > 0, volume, separation
+end
+
+-- The left and right levels (0 to `volume`) linuxdoom's mixer gives a channel at `separation`.
+local function separationLevels(volume: number, separation: number): (number, number)
+  local step = separation + 1
+  local left = volume - (volume * step * step) // 65536
+  step -= 257
+  local right = volume - (volume * step * step) // 65536
+  return left, right
+end
+
+-- A voice's gain and equal-power pan for those levels: the same left and right, out of 15.
+local function voiceLevels(volume: number, separation: number): (number, number)
+  local left, right = separationLevels(volume, separation)
+  left, right = left / MaxVolume, right / MaxVolume
+  local gain = math.sqrt(left * left + right * right)
+  if gain == 0 then return 0, 0 end
+  return gain, math.atan2(right, left) * 4 / math.pi - 1
+end
+
+local function new(wad: Wad, context: audio.Context, options: Options?): Mixer
+  local count = options and options.channels or 8
+  local channels: { Channel } = table.create(count) :: { Channel }
+  for _ = 1, count do
+    table.insert(channels, { sfx = nil, origin = nil, voice = nil, gain = 0, pan = 0 })
+  end
+
+  local mixer: Mixer = {
+    wad = wad,
+    context = context,
+    effects = context:bus(),
+    musicBus = context:bus(),
+    channels = channels,
+    sfxVolume = math.clamp(math.floor(options and options.sfxVolume or 8), 0, MaxVolume),
+    musicVolume = math.clamp(math.floor(options and options.musicVolume or 8), 0, MaxVolume),
+    sounds = {},
+    ramp = context:rate() // 35,
+    map = nil,
+    leveltime = 0,
+    music = nil,
+    instruments = nil,
+    musicRate = options and options.musicRate or 22050,
+    musicVoices = options and options.musicVoices or 16,
+    musicSeconds = options and options.musicSeconds or 0.3,
+  }
+  mixer.musicBus:set('gain', mixer.musicVolume / MaxVolume)
+  return mixer
+end
+
+-- The decoded sound for an effect (a link's lump is the sound it links to), or nil when the
+-- WAD has no such lump.
+local function soundFor(mixer: Mixer, sfx: sfxTable.Sfx): audio.Pcm?
+  local lumpName = 'DS' .. string.upper(sfx.link or sfx.name)
+  local cached = mixer.sounds[lumpName]
+  if cached ~= nil then return cached or nil end
+
+  local pcm: audio.Pcm | false = false
+  if mixer.wad:find(lumpName) then
+    local decoded = dmx.decode(mixer.wad:read(lumpName))
+    if decoded then pcm = audio.pcm(decoded.samples, { format = 'u8', channels = 1, rate = decoded.rate }) end
+  end
+
+  mixer.sounds[lumpName] = pcm
+  return pcm or nil
+end
+
+-- S_StopChannel.
+local function stopChannel(channel: Channel): ()
+  if channel.voice then channel.voice:stop(nil, StopFade) end
+  channel.sfx, channel.origin, channel.voice = nil, nil, nil
+end
+
+-- S_StopSound: stops the first channel playing from `origin` (nil included).
+local function stopSound(mixer: Mixer, origin: Origin?): ()
+  for _, channel in mixer.channels do
+    if channel.sfx and channel.origin == origin then
+      stopChannel(channel)
+      return
+    end
+  end
+end
+
+-- S_getChannel: a free channel, or the one `origin` already plays on, or else the first whose
+-- sound matters no more than this one; nil when every channel matters more.
+local function getChannel(mixer: Mixer, origin: Origin?, sfx: sfxTable.Sfx): Channel?
+  for _, channel in mixer.channels do
+    if not channel.sfx then return channel end
+
+    if origin and channel.origin == origin then
+      stopChannel(channel)
+      return channel
+    end
+  end
+
+  for _, channel in mixer.channels do
+    local playing = channel.sfx :: sfxTable.Sfx
+    if playing.priority >= sfx.priority then
+      stopChannel(channel)
+      return channel
+    end
+  end
+
+  return nil
+end
+
+-- The volume a sound starts or updates at before distance: the sfx volume, with a link's
+-- adjustment; nil when that leaves it silent.
+local function baseVolume(mixer: Mixer, sfx: sfxTable.Sfx): number?
+  local volume = mixer.sfxVolume
+  if not sfx.link then return volume end
+
+  volume += sfx.volume
+  if volume < 1 then return nil end
+  return math.min(volume, mixer.sfxVolume)
+end
+
+-- S_StartSoundAtVolume. The original's random pitch variation is left out, as the DOS
+-- releases from 1.666 on left it out.
+local function startSound(mixer: Mixer, event: SoundEvent, listener: Listener?, gamemap: number): ()
+  local name = event.name
+  local sfx = name and sfxTable[name]
+  if not sfx then return end
+
+  local pcm = soundFor(mixer, sfx)
+  if not pcm then return end
+
+  local volume = baseVolume(mixer, sfx)
+  if not volume then return end
+
+  local origin = event.origin
+  local separation = NormalSeparation
+  if origin and listener and origin ~= listener then
+    local startX, startY = event.x or origin.x, event.y or origin.y
+    local audible, adjusted, adjustedSeparation = adjustSoundParams(listener, startX, startY, mixer.sfxVolume, gamemap)
+    volume, separation = adjusted, adjustedSeparation
+    if startX == listener.x and startY == listener.y then separation = NormalSeparation end
+    if not audible then return end
+  end
+
+  stopSound(mixer, origin)
+  local channel = getChannel(mixer, origin, sfx)
+  if not channel then return end
+
+  local gain, pan = voiceLevels(volume, separation)
+  channel.sfx, channel.origin, channel.gain, channel.pan = sfx, origin, gain, pan
+  channel.voice = mixer.context:play(pcm, {
+    gain = gain,
+    pan = pan,
+    rate = 2 ^ ((sfx.pitch - NormalPitch) / 64),
+    bus = mixer.effects,
+  })
+end
+
+-- S_UpdateSounds: frees channels whose sound ended, and moves the rest with their origins.
+local function updateSounds(mixer: Mixer, listener: Listener?, gamemap: number): ()
+  for _, channel in mixer.channels do
+    local sfx, voice = channel.sfx, channel.voice
+    if not sfx or not voice then continue end
+
+    if voice:state() == 'ended' then
+      stopChannel(channel)
+      continue
+    end
+
+    local volume = baseVolume(mixer, sfx)
+    if not volume then
+      stopChannel(channel)
+      continue
+    end
+
+    local separation = NormalSeparation
+    local origin = channel.origin
+    if origin and listener and origin ~= listener then
+      local audible, adjusted, adjustedSeparation = adjustSoundParams(listener, origin.x, origin.y, mixer.sfxVolume, gamemap)
+      if not audible then
+        stopChannel(channel)
+        continue
+      end
+
+      volume, separation = adjusted, adjustedSeparation
+    end
+
+    local gain, pan = voiceLevels(volume, separation)
+    if gain ~= channel.gain then voice:ramp('gain', gain, mixer.ramp) end
+    if pan ~= channel.pan then voice:ramp('pan', pan, mixer.ramp) end
+    channel.gain, channel.pan = gain, pan
+  end
+end
+
+-- Stops every sound effect, as a new level does.
+local function stopAll(mixer: Mixer): ()
+  for _, channel in mixer.channels do
+    if channel.sfx then stopChannel(channel) end
+  end
+end
+
+-- The effects volume, 0 to 15. Playing sounds take it up on the next update.
+local function setVolume(mixer: Mixer, sfxVolume: number): ()
+  mixer.sfxVolume = math.clamp(math.floor(sfxVolume), 0, MaxVolume)
+end
+
+-- Keeps the music's stream full: synthesizes as much as it has room for.
+local function pumpMusic(mixer: Mixer): ()
+  local music = mixer.music
+  if not music then return end
+
+  local room = music.stream:room()
+  while room > 0 do
+    if music.player.done then
+      music.stream:finish()
+      mixer.music = nil
+      return
+    end
+
+    local frames = math.min(room, 1024)
+    music.stream:write(synth.render(music.player, frames), frames)
+    room -= frames
+  end
+end
+
+-- Starts a level's sounds and moves the playing ones, once a tic: `events` from
+-- `play.drainSounds()`, heard by the player in `listenerSlot` (events meant for another player
+-- are dropped). A new level, or the same one begun again, first stops every effect, as S_Start
+-- does. It also keeps the music fed.
+local function update(mixer: Mixer, game: Game, listenerSlot: number, events: { SoundEvent }): ()
+  if game.mapname ~= mixer.map or game.leveltime < mixer.leveltime then stopAll(mixer) end
+  mixer.map, mixer.leveltime = game.mapname, game.leveltime
+
+  local player = game.players[listenerSlot]
+  local listener = player and player.mo
+  local gamemap = game.gamemap
+  for _, event in events do
+    if event.player and event.player ~= listenerSlot then continue end
+
+    if event.stop then
+      stopSound(mixer, event.origin)
+    else
+      startSound(mixer, event, listener, gamemap)
+    end
+  end
+
+  updateSounds(mixer, listener, gamemap)
+  pumpMusic(mixer)
+end
+
+local function stopMusic(mixer: Mixer): ()
+  local music = mixer.music
+  if not music then return end
+
+  music.voice:stop(nil, StopFade)
+  music.stream:finish()
+  mixer.music = nil
+end
+
+-- S_ChangeMusic: plays the MUS lump `lumpName` (`D_E1M1`), looping or not; the song already
+-- playing carries on. False when the WAD has no such lump or it isn't MUS.
+local function playMusic(mixer: Mixer, lumpName: string, loop: boolean): boolean
+  lumpName = string.upper(lumpName)
+  if mixer.music and mixer.music.lump == lumpName then return true end
+
+  stopMusic(mixer)
+  local wad = mixer.wad
+  if not wad:find(lumpName) then return false end
+
+  local data = wad:read(lumpName)
+  if buffer.len(data) < 4 or buffer.readstring(data, 0, 4) ~= 'MUS\x1a' then return false end
+
+  if not mixer.instruments then
+    mixer.instruments = if wad:find('GENMIDI') then synth.parseGenmidi(wad:read('GENMIDI')) else {}
+  end
+
+  local player = synth.new(mus.parse(data), mixer.instruments, loop, { rate = mixer.musicRate, voices = mixer.musicVoices })
+  local stream = audio.stream({ channels = 2, rate = mixer.musicRate, seconds = mixer.musicSeconds })
+  local voice = mixer.context:play(stream, { bus = mixer.musicBus })
+  mixer.music = { lump = lumpName, player = player, stream = stream, voice = voice }
+  pumpMusic(mixer)
+  return true
+end
+
+-- The music volume, 0 to 15.
+local function setMusicVolume(mixer: Mixer, musicVolume: number): ()
+  mixer.musicVolume = math.clamp(math.floor(musicVolume), 0, MaxVolume)
+  mixer.musicBus:set('gain', mixer.musicVolume / MaxVolume)
+end
+
+-- s_sound.c's S_Start: Doom II's maps play from mus_runnin on; Doom's three episodes in order,
+-- and the fourth borrows from the others.
+local CommercialMusic = {
+  'RUNNIN', 'STALKS', 'COUNTD', 'BETWEE', 'DOOM', 'THE_DA', 'SHAWN', 'DDTBLU',
+  'IN_CIT', 'DEAD', 'STLKS2', 'THEDA2', 'DOOM2', 'DDTBL2', 'RUNNI2', 'DEAD2',
+  'STLKS3', 'ROMERO', 'SHAWN2', 'MESSAG', 'COUNT2', 'DDTBL3', 'AMPIE', 'THEDA3',
+  'ADRIAN', 'MESSG2', 'ROMER2', 'TENSE', 'SHAWN3', 'OPENIN', 'EVIL', 'ULTIMA',
+}
+local EpisodeFourMusic = { 'E3M4', 'E3M2', 'E3M3', 'E1M5', 'E2M7', 'E2M4', 'E2M6', 'E2M5', 'E1M9' }
+
+export type Moment = 'level' | 'title' | 'intermission' | 'finale' | 'bunny' | 'cast'
+
+-- The vanilla music lump for a moment of `game`: its current map (the default), the title
+-- screen, the intermission, the finale's text screen, Doom's bunny scroller, or Doom II's cast.
+local function musicFor(game: Game, moment: Moment?): string
+  local commercial = game.commercial
+  local which = moment or 'level'
+  if which == 'title' then return if commercial then 'D_DM2TTL' else 'D_INTRO' end
+  if which == 'intermission' then return if commercial then 'D_DM2INT' else 'D_INTER' end
+  if which == 'finale' then return if commercial then 'D_READ_M' else 'D_VICTOR' end
+  if which == 'bunny' then return 'D_BUNNY' end
+  if which == 'cast' then return 'D_EVIL' end
+
+  if commercial then return 'D_' .. (CommercialMusic[game.gamemap] or CommercialMusic[1]) end
+  if game.gameepisode < 4 then return `D_E{game.gameepisode}M{game.gamemap}` end
+  return 'D_' .. (EpisodeFourMusic[game.gamemap] or EpisodeFourMusic[1])
+end
+
+return {
+  new = new,
+  update = update,
+  setVolume = setVolume,
+  stopAll = stopAll,
+  playMusic = playMusic,
+  stopMusic = stopMusic,
+  setMusicVolume = setMusicVolume,
+  pumpMusic = pumpMusic,
+  musicFor = musicFor,
+  adjustSoundParams = adjustSoundParams,
+  separationLevels = separationLevels,
+  sfx = sfxTable,
+  dmx = dmx,
+  mus = mus,
+  synth = synth,
+}

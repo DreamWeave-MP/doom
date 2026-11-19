@@ -5,7 +5,7 @@ id = "org.dreamweave.doom"
 version = "0.1.0"
 jess_api = "1"
 include = ["src", "bin", "tests", "README.md", "LICENSE.TXT"]
-tests = ["tests/wad_test.jsl", "tests/net_test.jsl", "tests/play_test.jsl", "tests/rules_test.jsl", "tests/hud_test.jsl", "tests/screens_test.jsl"]
+tests = ["tests/wad_test.jsl", "tests/net_test.jsl", "tests/play_test.jsl", "tests/rules_test.jsl", "tests/hud_test.jsl", "tests/screens_test.jsl", "tests/sound_test.jsl"]
 
 [modules]
 "@doom/fixed" = "src/fixed.jsl"
@@ -32,6 +32,7 @@ tests = ["tests/wad_test.jsl", "tests/net_test.jsl", "tests/play_test.jsl", "tes
 "@doom/setup" = "src/setup.jsl"
 "@doom/hud" = "src/hud/init.jsl"
 "@doom/screens" = "src/screens.jsl"
+"@doom/sound" = "src/sound/init.jsl"
 "@doom" = "src/init.jsl"
 
 [[layer]]
@@ -61,6 +62,7 @@ exports = [
   "@doom/setup",
   "@doom/hud",
   "@doom/screens",
+  "@doom/sound",
   "@doom",
 ]
 

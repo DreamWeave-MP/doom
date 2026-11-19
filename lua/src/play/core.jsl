@@ -137,6 +137,38 @@ function P.SubRandom(): number
   return first - P.Random()
 end
 
+-- S_StartSound and S_StopSound, as a queue the host drains (`play.drainSounds`): the
+-- simulation only says what started where, and mixing is the presentation's. An entry is
+-- { name, origin, x, y, player } (origin a mobj, a sector's soundorg, or nil for a global sound;
+-- x and y where it was when it started; player the slot of the only listener who hears it, as
+-- vanilla's consoleplayer-only pickup sounds) or { stop = true, origin }. The queue is outside G,
+-- so saves and hashes never see it, and nothing in the play reads it back. A host that never
+-- drains loses the oldest batch rather than growing it forever.
+local MaxQueuedSounds = 1024
+
+P.sounds = {}
+
+function P.StartSound(origin: any, name: any, player: any?): ()
+  if not name or name == 0 or name == 'None' then return end
+
+  local sounds = P.sounds
+  if #sounds >= MaxQueuedSounds then table.clear(sounds) end
+
+  table.insert(sounds, {
+    name = name,
+    origin = origin,
+    x = origin and origin.x,
+    y = origin and origin.y,
+    player = player and player.index,
+  })
+end
+
+function P.StopSound(origin: any): ()
+  local sounds = P.sounds
+  if #sounds >= MaxQueuedSounds then table.clear(sounds) end
+  table.insert(sounds, { stop = true, origin = origin })
+end
+
 function P.AproxDistance(dx: number, dy: number): number
   dx, dy = math.abs(dx), math.abs(dy)
   if dx < dy then return dx + dy - dx // 2 end
