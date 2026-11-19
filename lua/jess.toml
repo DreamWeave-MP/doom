@@ -24,6 +24,8 @@ tests = ["tests/wad_test.jsl", "tests/net_test.jsl", "tests/play_test.jsl", "tes
 "@doom/net" = "src/net.jsl"
 "@doom/content" = "src/content.jsl"
 "@doom/session" = "src/session/init.jsl"
+"@doom/launch" = "src/app/options.jsl"
+"@doom/testing" = "src/testing.jsl"
 "@doom/play" = "src/play/api.jsl"
 "@doom/agent" = "src/agent.jsl"
 "@doom/view" = "src/view/init.jsl"
@@ -55,6 +57,8 @@ exports = [
   "@doom/net",
   "@doom/content",
   "@doom/session",
+  "@doom/launch",
+  "@doom/testing",
   "@doom/play",
   "@doom/agent",
   "@doom/view",
@@ -67,10 +71,6 @@ exports = [
   "@doom/sound",
   "@doom",
 ]
-
-[[layer.entrypoint]]
-module = "@doom/net"
-capabilities = ["network.transport"]
 
 [managed.rules]
 module = "src/app/rules.jsl"

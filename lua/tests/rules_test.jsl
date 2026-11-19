@@ -6,7 +6,7 @@ local play = require('@doom/play')
 local rules = require('@doom/rules')
 local setup = require('@doom/setup')
 local test = require('@jess/test')
-local rooms = require('./support/rooms')
+local rooms = require('@doom/testing')
 
 local expect = test.expect
 local suite = test.new()

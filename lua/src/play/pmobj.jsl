@@ -1374,4 +1374,13 @@ function P.MovePsprites(player: any): ()
   psprites[1].sx, psprites[1].sy = psprites[0].sx, psprites[0].sy
 end
 
+-- The weapon code's pieces, for weapon actions a mod writes: P_SetPsprite, the ammo a shot takes,
+-- P_BulletSlope (returning the slope it found), and P_GunShot.
+P.SetPsprite, P.UseAmmo, P.GunShot = setPsprite, useAmmo, gunShot
+
+function P.BulletSlope(mo: any): number
+  bulletSlope(mo)
+  return bulletslope
+end
+
 return { shared = P }

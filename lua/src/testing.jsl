@@ -1,7 +1,7 @@
 --!nonstrict
--- Synthetic WADs for the tests: one square room the size of a small arena, written to a file of
--- the caller's naming under target/doom-tests (test modules run side by side, so each names its
--- own). They need no game data.
+-- @doom/testing: synthetic WADs for tests, this package's and mods'. One square room the size of
+-- a small arena, written to a file of the caller's naming under target/doom-tests (test modules
+-- run side by side, so each names its own). They need no game data.
 local fs = require('@dream/fs')
 
 local module = {}
@@ -21,8 +21,12 @@ end
 
 module.name8 = name8
 
+-- A suite run from a package's source and from its JPK can run side by side, as can several
+-- packages' suites; each runtime writes its own files.
+local Run = string.format('%x%x', math.random(0, 0x7fffffff), math.floor(os.clock() * 1e6) % 0x7fffffff)
+
 function module.path(name: string): string
-  return fs.join(TestFolder, name)
+  return fs.join(TestFolder, `{Run}-{name}`)
 end
 
 -- Writes { name, bytes } lumps as the WAD `name` and returns its path.

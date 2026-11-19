@@ -12,7 +12,7 @@ local expect = test.expect
 local suite = test.new()
 local fs = require('@dream/fs')
 
-local rooms = require('./support/rooms')
+local rooms = require('@doom/testing')
 local TestName = 'play.wad'
 local FRACUNIT = 65536
 
