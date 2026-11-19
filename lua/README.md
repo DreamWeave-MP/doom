@@ -62,9 +62,10 @@ second whatever the display does; the window draws at the host's 60 frames a sec
 | Quicksave / quickload | F6 / F9 (slot 1) | |
 | Scoreboard (deathmatch) | Hold F1 or `` ` `` | |
 
-The bindings are a Jess input document (`src/app/controls.jsl`). Under `jess package run` Jess
-gives an application its windows' keyboard and pointer; a gamepad reaches it only through a host
-that launches it with a device backend (see Limitations).
+The bindings are a Jess input document (`src/app/controls.jsl`). Gamepads plug in and out while
+the game runs. They need a Jess that gives command-line applications the platform's gamepads (evdev
+on Linux, gilrs on macOS and Windows; jess 0.3.0 doesn't, the release after it does). On Linux a
+pad is readable by whoever is at the seat on any systemd distribution; elsewhere, join `input`.
 
 Saves live in `saves/` beside where you run the game, six slots, each a versioned header (mode,
 rules, skill, map, and the simulation content in order) and the simulation's whole state. A save
@@ -207,8 +208,7 @@ over the demos; `BENCHMARKS.md` holds what it and `bench/bench.jsl` measured.
 
 ## Limitations
 
-- **Gamepads** are bound but reach the game only through a Jess host that attaches a device
-  backend; `jess package run` gives an application its windows' keyboard and pointer only.
+- **Gamepads** need a Jess newer than 0.3.0 (see Controls). There is no rumble yet.
 - **Music** is not an OPL2. Its voices are two-operator FM with the chip's multiples, waveforms,
   feedback and envelope rates, pitched as DMX's driver pitches them, but with no tremolo,
   vibrato, or key scaling, 16 voices rather than 9, and a volume curve that only approximates
