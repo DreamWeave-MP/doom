@@ -1,8 +1,9 @@
 --!nonstrict
 --!native
 -- p_enemy.c: monster movement, targeting, and every monster state action.
--- Sound calls are gone, but the P_Random draws that picked a sound stay, since
--- they advance the shared random stream.
+-- Sounds go to P.StartSound's queue; the P_Random draws that pick a variant
+-- happen whether or not anything hears them, since they advance the shared
+-- random stream.
 local P: any = require('./core').shared
 
 local G = P.G
@@ -254,8 +255,14 @@ function actions.A_Look(actor: any): ()
   if not seen and not lookForPlayers(actor, false) then return end
 
   local sound = actor.info.seesound
-  if sound == 'posit1' or sound == 'posit2' or sound == 'posit3' or sound == 'bgsit1' or sound == 'bgsit2' then P.Random() end
+  if sound == 'posit1' or sound == 'posit2' or sound == 'posit3' then
+    sound = `posit{P.Random() % 3 + 1}`
+  elseif sound == 'bgsit1' or sound == 'bgsit2' then
+    sound = `bgsit{P.Random() % 2 + 1}`
+  end
 
+  -- The spider and cyborg bosses are heard at full volume wherever they are.
+  P.StartSound(if actor.type == MT.MT_SPIDER or actor.type == MT.MT_CYBORG then nil else actor, sound)
   P.SetMobjState(actor, actor.info.seestate)
 end
 
@@ -296,6 +303,7 @@ function actions.A_Chase(actor: any): ()
   end
 
   if actor.info.meleestate ~= 0 and checkMeleeRange(actor) then
+    P.StartSound(actor, actor.info.attacksound)
     P.SetMobjState(actor, actor.info.meleestate)
     return
   end
@@ -313,7 +321,7 @@ function actions.A_Chase(actor: any): ()
   actor.movecount -= 1
   if actor.movecount < 0 or not move(actor) then newChaseDir(actor) end
 
-  if hasSound(actor.info.activesound) then P.Random() end
+  if hasSound(actor.info.activesound) and P.Random() < 3 then P.StartSound(actor, actor.info.activesound) end
 end
 
 local function faceTarget(actor: any): ()
@@ -333,16 +341,26 @@ local function bullet(actor: any, bangle: number, slope: number): ()
   P.LineAttack(actor, angle, MISSILERANGE, slope, damage)
 end
 
-function actions.A_PosAttack(actor: any): ()
+local function posAttack(actor: any, sound: string): ()
   if not actor.target then return end
 
   faceTarget(actor)
+  P.StartSound(actor, sound)
   bullet(actor, actor.angle, P.AimLineAttack(actor, actor.angle, MISSILERANGE))
+end
+
+function actions.A_PosAttack(actor: any): ()
+  posAttack(actor, 'pistol')
+end
+
+function actions.A_CPosAttack(actor: any): ()
+  posAttack(actor, 'shotgn')
 end
 
 function actions.A_SPosAttack(actor: any): ()
   if not actor.target then return end
 
+  P.StartSound(actor, 'shotgn')
   faceTarget(actor)
   local bangle = actor.angle
   local slope = P.AimLineAttack(actor, bangle, MISSILERANGE)
@@ -350,8 +368,6 @@ function actions.A_SPosAttack(actor: any): ()
     bullet(actor, bangle, slope)
   end
 end
-
-actions.A_CPosAttack = actions.A_PosAttack
 
 local function refire(actor: any, chance: number): ()
   faceTarget(actor)
@@ -369,12 +385,13 @@ function actions.A_SpidRefire(actor: any): ()
   refire(actor, 10)
 end
 
-local function missileAttack(type: number, meleeSides: number?, meleeScale: number?, face: boolean?): (any) -> ()
+local function missileAttack(type: number, meleeSides: number?, meleeScale: number?, face: boolean?, meleeSound: string?): (any) -> ()
   return function(actor: any): ()
     if not actor.target then return end
     if face ~= false then faceTarget(actor) end
 
     if meleeSides and checkMeleeRange(actor) then
+      P.StartSound(actor, meleeSound)
       local damage = (P.Random() % meleeSides + 1) * (meleeScale :: number)
       P.DamageMobj(actor.target, actor, actor, damage)
       return
@@ -385,25 +402,26 @@ local function missileAttack(type: number, meleeSides: number?, meleeScale: numb
 end
 
 actions.A_BspiAttack = missileAttack(MT.MT_ARACHPLAZ)
-actions.A_TroopAttack = missileAttack(MT.MT_TROOPSHOT, 8, 3)
+actions.A_TroopAttack = missileAttack(MT.MT_TROOPSHOT, 8, 3, true, 'claw')
 actions.A_HeadAttack = missileAttack(MT.MT_HEADSHOT, 6, 10)
 actions.A_CyberAttack = missileAttack(MT.MT_ROCKET)
-actions.A_BruisAttack = missileAttack(MT.MT_BRUISERSHOT, 8, 10, false)
+actions.A_BruisAttack = missileAttack(MT.MT_BRUISERSHOT, 8, 10, false, 'claw')
 
-local function meleeAttack(sides: number, scale: number): (any) -> ()
+local function meleeAttack(sides: number, scale: number, sound: string?): (any) -> ()
   return function(actor: any): ()
     if not actor.target then return end
 
     faceTarget(actor)
     if checkMeleeRange(actor) then
       local damage = (P.Random() % sides + 1) * scale
+      P.StartSound(actor, sound)
       P.DamageMobj(actor.target, actor, actor, damage)
     end
   end
 end
 
 actions.A_SargAttack = meleeAttack(10, 4)
-actions.A_SkelFist = meleeAttack(10, 6)
+actions.A_SkelFist = meleeAttack(10, 6, 'skepch')
 
 function actions.A_SkelMissile(actor: any): ()
   if not actor.target then return end
@@ -458,7 +476,10 @@ function actions.A_Tracer(actor: any): ()
 end
 
 function actions.A_SkelWhoosh(actor: any): ()
-  if actor.target then faceTarget(actor) end
+  if not actor.target then return end
+
+  faceTarget(actor)
+  P.StartSound(actor, 'skeswg')
 end
 
 local corpsehit: any
@@ -497,6 +518,7 @@ function actions.A_VileChase(actor: any): ()
         faceTarget(actor)
         actor.target = temp
         P.SetMobjState(actor, S.S_VILE_HEAL1)
+        P.StartSound(corpsehit, 'slop')
 
         local info = corpsehit.info
         P.SetMobjState(corpsehit, info.raisestate)
@@ -512,7 +534,9 @@ function actions.A_VileChase(actor: any): ()
   actions.A_Chase(actor)
 end
 
-function actions.A_VileStart(_actor: any): () end
+function actions.A_VileStart(actor: any): ()
+  P.StartSound(actor, 'vilatk')
+end
 
 local function fire(actor: any): ()
   local dest = actor.tracer
@@ -527,7 +551,17 @@ local function fire(actor: any): ()
   P.SetThingPosition(actor)
 end
 
-actions.A_Fire, actions.A_StartFire, actions.A_FireCrackle = fire, fire, fire
+actions.A_Fire = fire
+
+function actions.A_StartFire(actor: any): ()
+  P.StartSound(actor, 'flamst')
+  fire(actor)
+end
+
+function actions.A_FireCrackle(actor: any): ()
+  P.StartSound(actor, 'flame')
+  fire(actor)
+end
 
 function actions.A_VileTarget(actor: any): ()
   local target = actor.target
@@ -549,6 +583,7 @@ function actions.A_VileAttack(actor: any): ()
   faceTarget(actor)
   if not P.CheckSight(actor, target) then return end
 
+  P.StartSound(actor, 'barexp')
   P.DamageMobj(target, actor, actor, 20)
   target.momz = idiv(1000 * FRACUNIT, target.info.mass)
 
@@ -571,7 +606,10 @@ local function fatShot(actor: any, turn: number): ()
   mo.momy = FixedMul(mo.info.speed, finesine[fine + 1])
 end
 
-actions.A_FatRaise = faceTarget
+function actions.A_FatRaise(actor: any): ()
+  faceTarget(actor)
+  P.StartSound(actor, 'manatk')
+end
 
 function actions.A_FatAttack1(actor: any): ()
   faceTarget(actor)
@@ -600,6 +638,7 @@ local function skullAttack(actor: any): ()
   if not dest then return end
 
   actor.flags = bor(actor.flags, P.MF_SKULLFLY)
+  P.StartSound(actor, actor.info.attacksound)
   faceTarget(actor)
   local fine = actor.angle // 524288
   actor.momx = FixedMul(SKULLSPEED, finesine[fine + 2049])
@@ -653,12 +692,30 @@ end
 
 function actions.A_Scream(actor: any): ()
   local sound = actor.info.deathsound
-  if sound == 'podth1' or sound == 'podth2' or sound == 'podth3' or sound == 'bgdth1' or sound == 'bgdth2' then P.Random() end
+  if sound == 'podth1' or sound == 'podth2' or sound == 'podth3' then
+    sound = `podth{P.Random() % 3 + 1}`
+  elseif sound == 'bgdth1' or sound == 'bgdth2' then
+    sound = `bgdth{P.Random() % 2 + 1}`
+  end
+
+  P.StartSound(if actor.type == MT.MT_SPIDER or actor.type == MT.MT_CYBORG then nil else actor, sound)
 end
 
-function actions.A_XScream(_actor: any): () end
+function actions.A_XScream(actor: any): ()
+  P.StartSound(actor, 'slop')
+end
 
-actions.A_Pain, actions.A_PlayerScream, actions.A_BrainPain = actions.A_XScream, actions.A_XScream, actions.A_XScream
+function actions.A_Pain(actor: any): ()
+  P.StartSound(actor, actor.info.painsound)
+end
+
+function actions.A_PlayerScream(mo: any): ()
+  P.StartSound(mo, if G.commercial and mo.health < -50 then 'pdiehi' else 'pldeth')
+end
+
+function actions.A_BrainPain(_mo: any): ()
+  P.StartSound(nil, 'bospn')
+end
 
 function actions.A_Explode(thingy: any): ()
   P.RadiusAttack(thingy, thingy.target, 128)
@@ -711,7 +768,20 @@ function actions.A_BossDeath(mo: any): ()
   P.ExitLevel()
 end
 
-actions.A_Hoof, actions.A_Metal, actions.A_BabyMetal = actions.A_Chase, actions.A_Chase, actions.A_Chase
+function actions.A_Hoof(mo: any): ()
+  P.StartSound(mo, 'hoof')
+  actions.A_Chase(mo)
+end
+
+function actions.A_Metal(mo: any): ()
+  P.StartSound(mo, 'metal')
+  actions.A_Chase(mo)
+end
+
+function actions.A_BabyMetal(mo: any): ()
+  P.StartSound(mo, 'bspwlk')
+  actions.A_Chase(mo)
+end
 
 function actions.A_BrainAwake(_mo: any): ()
   local targets = {}
@@ -723,6 +793,7 @@ function actions.A_BrainAwake(_mo: any): ()
   end
 
   G.braintargets, G.braintargeton = targets, 0
+  P.StartSound(nil, 'bossit')
 end
 
 local function brainExplosion(x: number, y: number): ()
@@ -738,6 +809,8 @@ function actions.A_BrainScream(mo: any): ()
   for x = mo.x - 196 * FRACUNIT, mo.x + 320 * FRACUNIT - 1, FRACUNIT * 8 do
     brainExplosion(x, mo.y - 320 * FRACUNIT)
   end
+
+  P.StartSound(nil, 'bosdth')
 end
 
 function actions.A_BrainExplode(mo: any): ()
@@ -763,6 +836,7 @@ function actions.A_BrainSpit(mo: any): ()
   -- A cube fired along the x axis divides by zero in the original.
   local steps = if newmobj.momy == 0 then 0 else idiv(targ.y - mo.y, newmobj.momy)
   newmobj.reactiontime = idiv(steps, P.states[newmobj.state].tics)
+  P.StartSound(nil, 'bospit')
 end
 
 local SpawnTable = {
@@ -784,7 +858,7 @@ local function spawnFly(mo: any): ()
   if mo.reactiontime ~= 0 then return end
 
   local targ = mo.target
-  P.SpawnMobj(targ.x, targ.y, targ.z, MT.MT_SPAWNFIRE)
+  P.StartSound(P.SpawnMobj(targ.x, targ.y, targ.z, MT.MT_SPAWNFIRE), 'telept')
 
   local r = P.Random()
   local type = MT.MT_BRUISER
@@ -802,6 +876,11 @@ local function spawnFly(mo: any): ()
   P.RemoveMobj(mo)
 end
 
-actions.A_SpawnFly, actions.A_SpawnSound = spawnFly, spawnFly
+actions.A_SpawnFly = spawnFly
+
+function actions.A_SpawnSound(mo: any): ()
+  P.StartSound(mo, 'boscub')
+  spawnFly(mo)
+end
 
 return { shared = P }

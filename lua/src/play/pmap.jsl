@@ -770,7 +770,10 @@ local usething: any
 local function useTraverse(_frac: number, line: any, _thing: any): boolean
   if line.special == 0 then
     lineOpening(line)
-    return P.openrange > 0
+    if P.openrange > 0 then return true end
+
+    P.StartSound(usething, 'noway')
+    return false
   end
 
   local side = if pointOnLineSide(usething.x, usething.y, line) == 1 then 1 else 0

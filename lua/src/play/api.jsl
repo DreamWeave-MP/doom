@@ -26,6 +26,7 @@ module.BT_ATTACK, module.BT_USE, module.BT_CHANGE = 1, 2, 4
 -- Starts a game on an opened WAD (or a path) and returns the game state.
 function module.new(wad: any, options: any?): any
   if type(wad) == 'string' then wad = wadModule.open(wad) end
+  P.sounds = {}
   P.InitNew(wad, options)
   return G
 end
@@ -33,6 +34,30 @@ end
 -- Runs one tic. `cmds` is indexed by slot, 0 to 3.
 function module.tick(cmds: any?): ()
   P.Ticker(cmds)
+end
+
+-- One S_StartSound or S_StopSound the simulation made. A start names the sound without its
+-- `sfx_` prefix (`pistol`); `origin` is the mobj or the sector `soundorg` (a table with x and y)
+-- it comes from, which a presentation may follow while it plays, or nil for a sound heard at
+-- full volume everywhere; `x` and `y` are where the origin was when it started; and `player`,
+-- when set, is the only slot that hears it (pickups, which vanilla plays for the console player
+-- alone). A stop (`stop` true) silences whatever `origin` is playing: the mobj was removed.
+export type SoundEvent = {
+  name: string?,
+  stop: boolean?,
+  origin: any,
+  x: number?,
+  y: number?,
+  player: number?,
+}
+
+-- The sound events since the last drain, oldest first, and an empty queue after. The queue
+-- is not part of the game: saving, loading, and hashing never see it, and a host that never
+-- drains it only loses old events.
+function module.drainSounds(): { SoundEvent }
+  local sounds = P.sounds
+  P.sounds = {}
+  return sounds
 end
 
 export type Action = {
@@ -69,6 +94,7 @@ end
 
 function module.load(wad: any, data: buffer): any
   if type(wad) == 'string' then wad = wadModule.open(wad) end
+  P.sounds = {}
   P.Restore(wad, data)
   return G
 end
@@ -130,9 +156,11 @@ function module.hash(): string
 end
 
 -- Plays a demo lump (by name, or its bytes) from the start. Stops at the end
--- of the demo, when the level is left, or after `maxTics`.
-function module.playDemo(wad: any, demo: string | buffer, maxTics: number?): any
+-- of the demo, when the level is left, or after `maxTics`. `afterTic`, given,
+-- runs after every tic with the tics played so far (to drain sounds, say).
+function module.playDemo(wad: any, demo: string | buffer, maxTics: number?, afterTic: ((number) -> ())?): any
   if type(wad) == 'string' then wad = wadModule.open(wad) end
+  P.sounds = {}
 
   local data = if type(demo) == 'string' then wad:read(demo) else demo
   local header, frames = demoModule.parseFull(data)
@@ -159,6 +187,7 @@ function module.playDemo(wad: any, demo: string | buffer, maxTics: number?): any
 
     P.Ticker(cmds)
     played = index
+    if afterTic then afterTic(index) end
     if G.gamestate ~= 'level' then break end
   end
 

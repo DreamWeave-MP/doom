@@ -127,6 +127,7 @@ end
 -- Floors.
 function think.floor(floor: any): ()
   local res = movePlane(floor.sector, floor.speed, floor.floordestheight, floor.crush, false, floor.direction)
+  if G.leveltime % 8 == 0 then P.StartSound(floor.sector.soundorg, 'stnmov') end
   if res ~= PASTDEST then return end
 
   local sector = floor.sector
@@ -137,6 +138,7 @@ function think.floor(floor: any): ()
   end
 
   P.RemoveThinker(floor)
+  P.StartSound(sector.soundorg, 'pstop')
 end
 
 local function newFloor(sector: any, type: string, direction: number, speed: number): any
@@ -327,7 +329,10 @@ function think.ceiling(ceiling: any): ()
   local type = ceiling.type
   if ceiling.direction == 1 then
     local res = movePlane(ceiling.sector, ceiling.speed, ceiling.topheight, false, true, 1)
+    if G.leveltime % 8 == 0 and type ~= 'silentCrushAndRaise' then P.StartSound(ceiling.sector.soundorg, 'stnmov') end
     if res ~= PASTDEST then return end
+
+    if type == 'silentCrushAndRaise' then P.StartSound(ceiling.sector.soundorg, 'pstop') end
 
     if type == 'raiseToHighest' then
       removeActive(G.activeceilings, ceiling)
@@ -336,7 +341,11 @@ function think.ceiling(ceiling: any): ()
     end
   elseif ceiling.direction == -1 then
     local res = movePlane(ceiling.sector, ceiling.speed, ceiling.bottomheight, ceiling.crush, true, -1)
+    if G.leveltime % 8 == 0 and type ~= 'silentCrushAndRaise' then P.StartSound(ceiling.sector.soundorg, 'stnmov') end
+
     if res == PASTDEST then
+      if type == 'silentCrushAndRaise' then P.StartSound(ceiling.sector.soundorg, 'pstop') end
+
       if type == 'silentCrushAndRaise' or type == 'crushAndRaise' then
         ceiling.speed = CEILSPEED
         ceiling.direction = 1
@@ -432,12 +441,17 @@ function think.plat(plat: any): ()
   local status = plat.status
   if status == UP then
     local res = movePlane(plat.sector, plat.speed, plat.high, plat.crush, false, 1)
+    local changes = plat.type == 'raiseAndChange' or plat.type == 'raiseToNearestAndChange'
+    if changes and G.leveltime % 8 == 0 then P.StartSound(plat.sector.soundorg, 'stnmov') end
+
     if res == CRUSHED and not plat.crush then
       plat.count = plat.wait
       plat.status = DOWN
+      P.StartSound(plat.sector.soundorg, 'pstart')
     elseif res == PASTDEST then
       plat.count = plat.wait
       plat.status = WAITING
+      P.StartSound(plat.sector.soundorg, 'pstop')
       if plat.type ~= 'perpetualRaise' then removeActive(G.activeplats, plat) end
     end
   elseif status == DOWN then
@@ -445,10 +459,14 @@ function think.plat(plat: any): ()
     if res == PASTDEST then
       plat.count = plat.wait
       plat.status = WAITING
+      P.StartSound(plat.sector.soundorg, 'pstop')
     end
   elseif status == WAITING then
     plat.count -= 1
-    if plat.count == 0 then plat.status = if plat.sector.floorheight == plat.low then UP else DOWN end
+    if plat.count == 0 then
+      plat.status = if plat.sector.floorheight == plat.low then UP else DOWN
+      P.StartSound(plat.sector.soundorg, 'pstart')
+    end
   end
 end
 
@@ -513,6 +531,8 @@ local function doPlat(line: any, type: string, amount: number): boolean
       end
     end
 
+    local changes = type == 'raiseToNearestAndChange' or type == 'raiseAndChange'
+    P.StartSound(sec.soundorg, if changes then 'stnmov' else 'pstart')
     addActive(G.activeplats, plat)
   end
 
@@ -539,8 +559,10 @@ function think.door(door: any): ()
 
     if type == 'blazeRaise' or type == 'normal' then
       door.direction = -1
+      P.StartSound(door.sector.soundorg, if type == 'blazeRaise' then 'bdcls' else 'dorcls')
     elseif type == 'close30ThenOpen' then
       door.direction = 1
+      P.StartSound(door.sector.soundorg, 'doropn')
     end
   elseif direction == 2 then
     door.topcountdown -= 1
@@ -549,6 +571,7 @@ function think.door(door: any): ()
     if type == 'raiseIn5Mins' then
       door.direction = 1
       door.type = 'normal'
+      P.StartSound(door.sector.soundorg, 'doropn')
     end
   elseif direction == -1 then
     local res = movePlane(door.sector, door.speed, door.sector.floorheight, false, true, -1)
@@ -556,12 +579,16 @@ function think.door(door: any): ()
       if type == 'blazeRaise' or type == 'blazeClose' or type == 'normal' or type == 'close' then
         door.sector.specialdata = nil
         P.RemoveThinker(door)
+        if type == 'blazeRaise' or type == 'blazeClose' then P.StartSound(door.sector.soundorg, 'bdcls') end
       elseif type == 'close30ThenOpen' then
         door.direction = 0
         door.topcountdown = 35 * 30
       end
     elseif res == CRUSHED then
-      if type ~= 'blazeClose' and type ~= 'close' then door.direction = 1 end
+      if type ~= 'blazeClose' and type ~= 'close' then
+        door.direction = 1
+        P.StartSound(door.sector.soundorg, 'doropn')
+      end
     end
   elseif direction == 1 then
     local res = movePlane(door.sector, door.speed, door.topheight, false, true, 1)
@@ -593,6 +620,18 @@ local function newDoor(sector: any, type: string): any
   return door
 end
 
+-- The sound EV_DoDoor starts for a door it just made: none for an open door that is
+-- already open.
+local function doDoorSound(door: any, sec: any): string?
+  local type = door.type
+  if type == 'blazeClose' then return 'bdcls' end
+  if type == 'close' or type == 'close30ThenOpen' then return 'dorcls' end
+  if door.topheight == sec.ceilingheight then return nil end
+  if type == 'blazeRaise' or type == 'blazeOpen' then return 'bdopn' end
+  if type == 'normal' or type == 'open' then return 'doropn' end
+  return nil
+end
+
 function P.DoDoor(line: any, type: string): boolean
   local secnum, rtn = -1, false
   while true do
@@ -612,6 +651,8 @@ function P.DoDoor(line: any, type: string): boolean
       if type == 'blazeClose' or type == 'close' then door.direction = -1 end
       if type == 'blazeClose' or type == 'blazeRaise' or type == 'blazeOpen' then door.speed = VDOORSPEED * 4 end
     end
+
+    P.StartSound(sec.soundorg, doDoorSound(door, sec))
   end
 
   return rtn
@@ -630,7 +671,11 @@ local function doLockedDoor(line: any, type: string, thing: any): boolean
   if not player then return false end
 
   local card = LockedDoors[line.special]
-  if card and not hasKey(player, card) then return false end
+  if card and not hasKey(player, card) then
+    P.StartSound(nil, 'oof')
+    return false
+  end
+
   return P.DoDoor(line, type)
 end
 
@@ -640,7 +685,11 @@ local function verticalDoor(line: any, thing: any): ()
   local card = ManualLocks[special]
   if card then
     if not player then return end
-    if not hasKey(player, card) then return end
+
+    if not hasKey(player, card) then
+      P.StartSound(nil, 'oof')
+      return
+    end
   end
 
   -- A one-sided door line has no back side to open.
@@ -659,6 +708,7 @@ local function verticalDoor(line: any, thing: any): ()
     return
   end
 
+  P.StartSound(sec.soundorg, if special == 117 or special == 118 then 'bdopn' else 'doropn')
   door = newDoor(sec, 'normal')
   if special == 31 or special == 32 or special == 33 or special == 34 then
     door.type = 'open'
@@ -799,9 +849,10 @@ local function teleport(line: any, side: number, thing: any): boolean
         local player = thing.player
         if player then player.viewz = thing.z + player.viewheight end
 
-        P.SpawnMobj(oldx, oldy, oldz, MT.MT_TFOG)
+        P.StartSound(P.SpawnMobj(oldx, oldy, oldz, MT.MT_TFOG), 'telept')
         local fine = m.angle // 524288
-        P.SpawnMobj(m.x + 20 * P.finesine[fine + 2049], m.y + 20 * P.finesine[fine + 1], thing.z, MT.MT_TFOG)
+        local fog = P.SpawnMobj(m.x + 20 * P.finesine[fine + 2049], m.y + 20 * P.finesine[fine + 1], thing.z, MT.MT_TFOG)
+        P.StartSound(fog, 'telept')
         if player then thing.reactiontime = 18 end
 
         thing.angle = m.angle
@@ -832,6 +883,11 @@ local function changeSwitchTexture(line: any, useAgain: boolean): ()
     local other = textures.numbers[(if prefix == 'SW1' then 'SW2' else 'SW1') .. string.sub(name, 4)]
     if not other then continue end
 
+    -- The original sounds from buttonlist->soundorg, the first button slot's sector, or
+    -- everywhere while it is empty; and since the special is already cleared, an exit switch
+    -- never gets its sfx_swtchx.
+    local first = G.buttons[1]
+    P.StartSound(first and first.line.frontsector.soundorg, if line.special == 11 then 'swtchx' else 'swtchn')
     local previous = side[where]
     side[where] = other
     if not useAgain then return end
@@ -1170,6 +1226,9 @@ function P.UpdateSpecials(): ()
     button.timer -= 1
     if button.timer == 0 then
       G.sides[button.line.sidenum[1] + 1][button.where] = button.texture
+      -- The original passes the address of the button's soundorg pointer, which is no place at
+      -- all; the switch's own sector is what it meant.
+      P.StartSound(button.line.frontsector.soundorg, 'swtchn')
       buttons[slot] = nil
     end
   end

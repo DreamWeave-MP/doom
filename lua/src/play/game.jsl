@@ -83,7 +83,9 @@ local function checkSpot(playernum: number, mthing: any): boolean
 
   local fine = ((P.ANG45 * P.idiv(mthing.angle, 45)) % U32) // 524288
   local sector = P.PointInSubsector(x, y).sector
-  P.SpawnMobj(x + 20 * P.finesine[fine + 2049], y + 20 * P.finesine[fine + 1], sector.floorheight, MT.MT_TFOG)
+  local fog = P.SpawnMobj(x + 20 * P.finesine[fine + 2049], y + 20 * P.finesine[fine + 1], sector.floorheight, MT.MT_TFOG)
+  -- SetupLevel's viewz of 1 marks the level's first frame, which starts no sound.
+  if G.players[G.consoleplayer].viewz ~= 1 then P.StartSound(fog, 'telept') end
   return true
 end
 
