@@ -8,3 +8,7 @@
 /content/**/_changelog.md
 /.jess/
 *.jpk
+
+# Connect tokens are credentials; saved games are the player's.
+tokens/
+saves/
