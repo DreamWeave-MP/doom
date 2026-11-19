@@ -1,0 +1,248 @@
+--!strict
+-- What every front-end screen draws with: a WAD's patches and flats, cached by name, drawn the
+-- way v_video.c's V_DrawPatch does (mirrored, scaled, or one column at a time when a screen
+-- needs it), and the HU font's STCFN glyphs written as text. Screens draw in the original's
+-- 320 by 200 coordinates onto the top left of an indexed frame, clipped to it.
+local patchModule = require('../patch')
+
+local module = {}
+
+export type Frame = { pixels: buffer, width: number, height: number }
+export type Patch = patchModule.Patch
+
+export type Sprite = { name: string, flip: boolean }
+
+export type Screens = {
+  wad: any,
+  commercial: boolean,
+  retail: boolean,
+  shareware: boolean,
+  patches: { [string]: Patch | false },
+  flats: { [string]: buffer | false },
+  sprites: { [string]: Sprite }?,
+}
+
+module.Width, module.Height = 320, 200
+
+-- hu_stuff.h's HU font: '!' to '_', STCFN033 to STCFN095.
+local FontStart, FontEnd = 33, 95
+
+-- A space, and any character the font lacks, advances this far.
+local SpaceWidth = 4
+
+function module.new(wad: any): Screens
+  local commercial = wad:find('MAP01') ~= nil
+  return {
+    wad = wad,
+    commercial = commercial,
+    retail = not commercial and wad:find('E4M1') ~= nil,
+    shareware = not commercial and wad:find('E2M1') == nil,
+    patches = {},
+    flats = {},
+  }
+end
+
+-- The patch lump `name`, or nil when the WAD has none (or what it has is no patch).
+function module.patch(screens: Screens, name: string): Patch?
+  local cached = screens.patches[name]
+  if cached ~= nil then return cached or nil end
+
+  local found: Patch | false = false
+  if screens.wad:find(name) then
+    -- patch.open throws on a lump that is not a patch: such a name draws nothing.
+    local ok, decoded = pcall(patchModule.open, screens.wad:read(name))
+    if ok then found = decoded end
+  end
+
+  screens.patches[name] = found
+  return found or nil
+end
+
+function module.has(screens: Screens, name: string): boolean
+  return module.patch(screens, name) ~= nil
+end
+
+-- Draws `name` with its origin at (left, top); false when the WAD has no such patch.
+function module.drawPatch(screens: Screens, target: Frame, left: number, top: number, name: string): boolean
+  local patch = module.patch(screens, name)
+  if not patch then return false end
+
+  patchModule.draw(target.pixels, target.width, target.height, patch, left, top)
+  return true
+end
+
+-- Walks the posts of one column of `patch`, calling `each(row, color)` for every pixel, row
+-- counted from the patch's top.
+local function eachPixel(patch: Patch, column: number, each: (number, number) -> ())
+  local data = patch.data
+  local at = buffer.readu32(data, 8 + column * 4)
+  while at < buffer.len(data) do
+    local topDelta = buffer.readu8(data, at)
+    if topDelta == 255 then return end
+
+    local length = buffer.readu8(data, at + 1)
+    for row = 0, length - 1 do
+      each(topDelta + row, buffer.readu8(data, at + 3 + row))
+    end
+
+    at += length + 4
+  end
+end
+
+local function plot(target: Frame, left: number, top: number, color: number)
+  if left < 0 or top < 0 or left >= target.width or top >= target.height then return end
+
+  buffer.writeu8(target.pixels, top * target.width + left, color)
+end
+
+-- V_DrawPatchFlipped, and V_DrawPatch at a whole-number `scale`: the patch's offsets scale with it.
+function module.drawPatchEx(target: Frame, patch: Patch, left: number, top: number, flip: boolean, scale: number)
+  local originLeft = left - patch.left * scale
+  local originTop = top - patch.top * scale
+  for column = 0, patch.width - 1 do
+    local screenColumn = originLeft + (if flip then patch.width - 1 - column else column) * scale
+    eachPixel(patch, column, function(row: number, color: number)
+      for dy = 0, scale - 1 do
+        for dx = 0, scale - 1 do
+          plot(target, screenColumn + dx, originTop + row * scale + dy, color)
+        end
+      end
+    end)
+  end
+end
+
+-- F_DrawPatchCol: one column of a patch at screen column `left`, from the top, its offsets ignored.
+function module.drawColumn(target: Frame, patch: Patch, left: number, column: number)
+  if column < 0 or column >= patch.width then return end
+
+  eachPixel(patch, column, function(row: number, color: number)
+    plot(target, left, row, color)
+  end)
+end
+
+-- Fills the screen with a 64 by 64 flat, tiled from the top left as F_TextWrite does.
+function module.tileFlat(screens: Screens, target: Frame, name: string): boolean
+  local flat = screens.flats[name]
+  if flat == nil then
+    local lump = screens.wad:find(name)
+    flat = if lump and lump.size >= 4096 then screens.wad:read(lump) else false
+    screens.flats[name] = flat
+  end
+
+  if not flat then return false end
+
+  local width, height = math.min(target.width, module.Width), math.min(target.height, module.Height)
+  for screenRow = 0, height - 1 do
+    local row = bit32.band(screenRow, 63) * 64
+    for screenColumn = 0, width - 1 do
+      local color = buffer.readu8(flat, row + bit32.band(screenColumn, 63))
+      buffer.writeu8(target.pixels, screenRow * target.width + screenColumn, color)
+    end
+  end
+
+  return true
+end
+
+local function glyph(screens: Screens, code: number): Patch?
+  if code < FontStart or code > FontEnd then return nil end
+
+  return module.patch(screens, string.format('STCFN%03d', code))
+end
+
+-- M_StringWidth: how wide `text` is in the HU font, the widest line's width.
+function module.textWidth(screens: Screens, text: string, scale: number?): number
+  local factor = scale or 1
+  local widest, width = 0, 0
+  for index = 1, #text do
+    local code = string.byte(string.upper(string.sub(text, index, index)))
+    if code == 10 then
+      width = 0
+      continue
+    end
+
+    local patch = glyph(screens, code)
+    width += (if patch then patch.width else SpaceWidth) * factor
+    widest = math.max(widest, width)
+  end
+
+  return widest
+end
+
+export type TextOptions = {
+  scale: number?,
+  lineHeight: number?,
+  limit: number?,
+}
+
+-- M_WriteText: `text` in the HU font with its first glyph's top left at (left, top), upper-cased, a
+-- newline going back to left and down `lineHeight` (12, the menu's; the finale uses 11). A glyph
+-- that would cross the right edge ends the text. `limit` draws only that many characters.
+function module.drawText(screens: Screens, target: Frame, left: number, top: number, text: string, options: TextOptions?)
+  local settings: TextOptions = options or {}
+  local scale = settings.scale or 1
+  local lineHeight = (settings.lineHeight or 12) * scale
+  local count = math.min(settings.limit or #text, #text)
+  local cx, cy = left, top
+  for index = 1, count do
+    local code = string.byte(string.upper(string.sub(text, index, index)))
+    if code == 10 then
+      cx = left
+      cy += lineHeight
+      continue
+    end
+
+    local patch = glyph(screens, code)
+    if not patch then
+      cx += SpaceWidth * scale
+      continue
+    end
+
+    local width = patch.width * scale
+    if cx + width > module.Width then return end
+
+    if scale == 1 then
+      patchModule.draw(target.pixels, target.width, target.height, patch, cx, cy)
+    else
+      module.drawPatchEx(target, patch, cx, cy, false, scale)
+    end
+
+    cx += width
+  end
+end
+
+-- How tall `text` is: a line of the font's height for each line.
+function module.textHeight(screens: Screens, text: string): number
+  local first = glyph(screens, FontStart)
+  local height = if first then first.height else 8
+  local lines = 1
+  for _ in string.gmatch(text, '\n') do
+    lines += 1
+  end
+
+  return height * lines
+end
+
+-- The sprite lump that shows `sprite` (four letters) at `frame` (0 for A) from the front, and
+-- whether it is drawn mirrored: R_InitSprites' lump[0], from the lumps named for it.
+function module.sprite(screens: Screens, sprite: string, frame: number): Sprite?
+  local index: { [string]: Sprite } = screens.sprites or {}
+  if not screens.sprites then
+    for _, lump in screens.wad.lumps do
+      local name = lump.name
+      local prefix, first, rotation, second, flippedRotation = string.match(name, '^(%w%w%w%w)(%u)(%d)(%u?)(%d?)$')
+      if not prefix or not first or not rotation then continue end
+
+      index[`{prefix}{first}{rotation}`] = { name = name, flip = false }
+      if second and second ~= '' and flippedRotation and flippedRotation ~= '' then
+        index[`{prefix}{second}{flippedRotation}`] = { name = name, flip = true }
+      end
+    end
+
+    screens.sprites = index
+  end
+
+  local letter = string.char(65 + frame)
+  return index[`{sprite}{letter}0`] or index[`{sprite}{letter}1`]
+end
+
+return module

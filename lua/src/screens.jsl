@@ -1,0 +1,119 @@
+--!strict
+-- @doom/screens: DOOM's front end, drawn from a WAD onto an indexed frame (a render.Frame, at
+-- least 320 by 200; screens draw in the original's 320 by 200 coordinates at its top left).
+--
+-- The intermission and the finale are the play simulation's state (`game.wi`, `game.finale`,
+-- ticked from the players' commands, so a netgame's peers agree); these functions only draw
+-- them. The menu is the application's: keys in, commands out, nothing simulated.
+local draw = require('./screens/draw')
+local finale = require('./screens/finale')
+local intermission = require('./screens/intermission')
+local menu = require('./screens/menu')
+
+local module = {}
+
+export type Frame = draw.Frame
+export type Screens = draw.Screens
+export type Menu = menu.Menu
+export type MenuCommand = menu.Command
+export type MenuOptions = menu.Options
+
+-- A WAD's screens: its patches, flats, and HU font, read on first use and kept.
+function module.new(wad: any): Screens
+  return draw.new(wad)
+end
+
+-- WI_Drawer for the player in `slot`, whose face marks their row in a netgame's tables.
+function module.drawIntermission(screens: Screens, game: any, slot: number, target: Frame)
+  intermission.draw(screens, game, slot, target)
+end
+
+-- F_Drawer: the text, the end art, or the cast call.
+function module.drawFinale(screens: Screens, game: any, target: Frame)
+  finale.draw(screens, game, target)
+end
+
+-- The finale's text as typed out so far, and all of it.
+function module.finaleText(game: any): (string, string)
+  return finale.text(game)
+end
+
+-- D_PageDrawer: a full-screen page such as TITLEPIC, CREDIT, HELP1, HELP2, or INTERPIC. False
+-- when the WAD lacks it.
+function module.drawPage(screens: Screens, name: string, target: Frame): boolean
+  return draw.drawPatch(screens, target, 0, 0, name)
+end
+
+-- Read This!'s page 1 or 2 for this WAD (HELP1 and HELP2, or HELP and CREDIT).
+function module.drawHelp(screens: Screens, page: number, target: Frame)
+  menu.drawHelp(screens, page, target)
+end
+
+function module.drawPause(screens: Screens, target: Frame)
+  menu.drawPause(screens, target)
+end
+
+-- The HU font: text with its top left at (left, top), and how wide a text is.
+function module.drawText(screens: Screens, target: Frame, left: number, top: number, text: string)
+  draw.drawText(screens, target, left, top, text)
+end
+
+function module.textWidth(screens: Screens, text: string): number
+  return draw.textWidth(screens, text)
+end
+
+export type AttractStep = { page: string?, tics: number?, demo: string? }
+
+-- D_DoAdvanceDemo: step `sequence` (0 onward) of the title loop, a page shown for `tics` or a
+-- demo lump to play, and the step after it.
+function module.attract(screens: Screens, sequence: number): (AttractStep, number)
+  local steps = if screens.retail then 7 else 6
+  local step = sequence % steps
+  local following = (step + 1) % steps
+  if step == 0 then return { page = 'TITLEPIC', tics = if screens.commercial then 35 * 11 else 170 }, following end
+  if step == 1 then return { demo = 'DEMO1' }, following end
+  if step == 2 then return { page = 'CREDIT', tics = 200 }, following end
+  if step == 3 then return { demo = 'DEMO2' }, following end
+  if step == 5 then return { demo = 'DEMO3' }, following end
+  if step == 6 then return { demo = 'DEMO4' }, following end
+
+  if screens.commercial then return { page = 'TITLEPIC', tics = 35 * 11 }, following end
+  return { page = if screens.retail then 'CREDIT' else 'HELP2', tics = 200 }, following
+end
+
+-- A closed menu on `wad`'s patches. `options` carries the settings it starts from, the save
+-- slots' descriptions, and whether a game (or a netgame) is being played.
+function module.newMenu(wad: any, options: MenuOptions?): Menu
+  return menu.new(draw.new(wad), options)
+end
+
+-- One key: 'up', 'down', 'left', 'right', 'enter', 'back', 'escape', 'yes', 'no', or one
+-- character. Returns a command for the application and the sound effect to play, either nil.
+function module.menuInput(target: Menu, key: string): (MenuCommand?, string?)
+  return menu.input(target, key)
+end
+
+function module.menuTick(target: Menu)
+  menu.tick(target)
+end
+
+function module.drawMenu(target: Menu, frame: Frame)
+  menu.draw(target, frame)
+end
+
+function module.openMenu(target: Menu)
+  menu.open(target)
+end
+
+-- The saved games' descriptions by slot, 1 to 6.
+function module.setSaveSlots(target: Menu, saveSlots: { [number]: string })
+  menu.setSaveSlots(target, saveSlots)
+end
+
+-- Whether a game, and whether a netgame, is being played: Save Game, End Game, New Game, and
+-- Load Game depend on it.
+function module.setMenuContext(target: Menu, inGame: boolean, netgame: boolean)
+  menu.setContext(target, inGame, netgame)
+end
+
+return module

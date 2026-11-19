@@ -1,0 +1,394 @@
+--!strict
+-- wi_stuff.c's WI_Drawer: the intermission drawn from the play simulation's `game.lastlevel`
+-- (the level's tally) and `game.wi` (the stage and its counters). The animated backgrounds of
+-- DOOM's first three episodes are a function of the intermission's tic counter alone: the
+-- original started each animation at a random tic, which here is a fixed one.
+local draw = require('./draw')
+
+type Frame = draw.Frame
+type Screens = draw.Screens
+
+local module = {}
+
+local TitleY = 2
+local SpacingY = 33
+local StatsX, StatsY = 50, 50
+local TimeX, TimeY = 16, draw.Height - 32
+local NetStatsY, NetSpacingX = 50, 64
+local MatrixX, MatrixY, MatrixSpacingX = 42, 68, 40
+local TotalsX, KillersX, KillersY, VictimsX, VictimsY = 269, 10, 100, 5, 50
+
+-- Where each level sits on the episode maps WIMAP0 to WIMAP2.
+local Nodes = {
+  {
+    { 185, 164 }, { 148, 143 }, { 69, 122 }, { 209, 102 }, { 116, 89 },
+    { 166, 55 }, { 71, 56 }, { 135, 29 }, { 71, 24 },
+  },
+  {
+    { 254, 25 }, { 97, 50 }, { 188, 64 }, { 128, 78 }, { 214, 92 },
+    { 133, 130 }, { 208, 136 }, { 148, 140 }, { 235, 158 },
+  },
+  {
+    { 156, 168 }, { 48, 154 }, { 174, 95 }, { 265, 75 }, { 130, 48 },
+    { 279, 23 }, { 198, 48 }, { 140, 25 }, { 281, 136 },
+  },
+}
+
+type Animation = { level: number?, period: number, frames: number, left: number, top: number }
+
+-- Each episode's animations. A `level` one shows only while entering that map (zero-based).
+local Animations: { { Animation } } = {
+  {
+    { period = 11, frames = 3, left = 224, top = 104 },
+    { period = 11, frames = 3, left = 184, top = 160 },
+    { period = 11, frames = 3, left = 112, top = 136 },
+    { period = 11, frames = 3, left = 72, top = 112 },
+    { period = 11, frames = 3, left = 88, top = 96 },
+    { period = 11, frames = 3, left = 64, top = 48 },
+    { period = 11, frames = 3, left = 192, top = 40 },
+    { period = 11, frames = 3, left = 136, top = 16 },
+    { period = 11, frames = 3, left = 80, top = 16 },
+    { period = 11, frames = 3, left = 64, top = 24 },
+  },
+  {
+    { level = 1, period = 11, frames = 1, left = 128, top = 136 },
+    { level = 2, period = 11, frames = 1, left = 128, top = 136 },
+    { level = 3, period = 11, frames = 1, left = 128, top = 136 },
+    { level = 4, period = 11, frames = 1, left = 128, top = 136 },
+    { level = 5, period = 11, frames = 1, left = 128, top = 136 },
+    { level = 6, period = 11, frames = 1, left = 128, top = 136 },
+    { level = 7, period = 11, frames = 1, left = 128, top = 136 },
+    { level = 8, period = 11, frames = 3, left = 192, top = 144 },
+    { level = 8, period = 11, frames = 1, left = 128, top = 136 },
+  },
+  {
+    { period = 11, frames = 3, left = 104, top = 168 },
+    { period = 11, frames = 3, left = 40, top = 136 },
+    { period = 11, frames = 3, left = 160, top = 96 },
+    { period = 11, frames = 3, left = 104, top = 80 },
+    { period = 11, frames = 3, left = 120, top = 32 },
+    { period = 8, frames = 3, left = 40, top = 0 },
+  },
+}
+
+type Context = {
+  screens: Screens,
+  target: Frame,
+  game: any,
+  wbs: any,
+  wi: any,
+  episode: number,
+  last: number,
+  next: number,
+  me: number,
+}
+
+local function patchWidth(context: Context, name: string): number
+  local patch = draw.patch(context.screens, name)
+  return if patch then patch.width else 0
+end
+
+local function patchHeight(context: Context, name: string): number
+  local patch = draw.patch(context.screens, name)
+  return if patch then patch.height else 0
+end
+
+local function put(context: Context, left: number, top: number, name: string)
+  draw.drawPatch(context.screens, context.target, left, top, name)
+end
+
+local function levelName(context: Context, map: number): string
+  if context.screens.commercial then return string.format('CWILV%02d', map) end
+
+  return `WILV{context.episode}{map}`
+end
+
+local function animated(context: Context): boolean
+  return not context.screens.commercial and context.episode <= 2
+end
+
+-- WI_drawAnimatedBack, each animation's frame worked out from the tics since it began.
+local function drawAnimatedBack(context: Context)
+  if not animated(context) then return end
+
+  local wi = context.wi
+  local start = wi.animstart or 0
+  for index, animation in Animations[context.episode + 1] do
+    local frame = -1
+    if animation.level then
+      -- The tower's crown waits out the counting (the original's "gawd-awful hack").
+      local blocked = wi.state == 'StatCount' and index == 8
+      if context.next == animation.level and not blocked and wi.bcnt > start then
+        frame = math.min(animation.frames - 1, (wi.bcnt - start - 1) // animation.period)
+      end
+    else
+      local first = start + 1 + (index * 5) % animation.period
+      if wi.bcnt >= first then frame = ((wi.bcnt - first) // animation.period) % animation.frames end
+    end
+
+    if frame < 0 then continue end
+
+    -- MONDO HACK: episode 2's last animation borrows its fifth's pictures.
+    local source = if context.episode == 1 and index == 9 then 5 else index
+    put(context, animation.left, animation.top, string.format('WIA%d%02d%02d', context.episode, source - 1, frame))
+  end
+end
+
+-- WI_drawNum: right-aligned at left, at least `digits` digits (as many as needed when negative).
+-- Returns the new left.
+local function drawNum(context: Context, left: number, top: number, value: number, digits: number): number
+  local fontWidth = patchWidth(context, 'WINUM0')
+  local count = digits
+  local negative = value < 0
+  local number = math.abs(value)
+  if count < 0 then
+    count = 0
+    local rest = number
+    while rest > 0 do
+      rest //= 10
+      count += 1
+    end
+
+    count = math.max(count, 1)
+  end
+
+  -- if non-number, do not draw it
+  if number == 1994 then return 0 end
+
+  for _ = 1, count do
+    left -= fontWidth
+    put(context, left, top, `WINUM{number % 10}`)
+    number //= 10
+  end
+
+  if negative then
+    left -= 8
+    put(context, left, top, 'WIMINUS')
+  end
+
+  return left
+end
+
+local function drawPercent(context: Context, left: number, top: number, value: number)
+  if value < 0 then return end
+
+  put(context, left, top, 'WIPCNT')
+  drawNum(context, left, top, value, -1)
+end
+
+-- WI_drawTime: minutes and seconds right-aligned at left, or "sucks" past 61 minutes.
+local function drawTime(context: Context, left: number, top: number, seconds: number)
+  if seconds < 0 then return end
+
+  if seconds > 61 * 59 then
+    put(context, left - patchWidth(context, 'WISUCKS'), top, 'WISUCKS')
+    return
+  end
+
+  local colon = patchWidth(context, 'WICOLON')
+  local divisor = 1
+  repeat
+    local part = (seconds // divisor) % 60
+    left = drawNum(context, left, top, part, 2) - colon
+    divisor *= 60
+    if divisor == 60 or seconds // divisor > 0 then put(context, left, top, 'WICOLON') end
+  until seconds // divisor == 0
+end
+
+-- WI_drawLF: "<level> Finished!"
+local function drawFinished(context: Context)
+  local name = levelName(context, context.last)
+  put(context, (draw.Width - patchWidth(context, name)) // 2, TitleY, name)
+
+  local top = TitleY + (5 * patchHeight(context, name)) // 4
+  put(context, (draw.Width - patchWidth(context, 'WIF')) // 2, top, 'WIF')
+end
+
+-- WI_drawEL: "Entering <level>"
+local function drawEntering(context: Context)
+  put(context, (draw.Width - patchWidth(context, 'WIENTER')) // 2, TitleY, 'WIENTER')
+
+  local name = levelName(context, context.next)
+  local top = TitleY + (5 * patchHeight(context, name)) // 4
+  put(context, (draw.Width - patchWidth(context, name)) // 2, top, name)
+end
+
+-- WI_drawOnLnode: the first of `names` that fits on screen at level `node`'s spot.
+local function drawOnNode(context: Context, node: number, names: { string })
+  local spot = Nodes[context.episode + 1][node + 1]
+  if not spot then return end
+
+  for _, name in names do
+    local patch = draw.patch(context.screens, name)
+    if not patch then continue end
+
+    local edge, ceiling = spot[1] - patch.left, spot[2] - patch.top
+    if edge >= 0 and edge + patch.width < draw.Width and ceiling >= 0 and ceiling + patch.height < draw.Height then
+      put(context, spot[1], spot[2], name)
+      return
+    end
+  end
+end
+
+local function drawShowNextLoc(context: Context, pointer: boolean)
+  if not context.screens.commercial then
+    if context.episode > 2 then
+      drawEntering(context)
+      return
+    end
+
+    local last = if context.last == 8 then context.next - 1 else context.last
+    for node = 0, last do
+      drawOnNode(context, node, { 'WISPLAT' })
+    end
+
+    if context.wbs.didsecret then drawOnNode(context, 8, { 'WISPLAT' }) end
+    if pointer then drawOnNode(context, context.next, { 'WIURH0', 'WIURH1' }) end
+  end
+
+  if not context.screens.commercial or context.next ~= 30 then drawEntering(context) end
+end
+
+local function drawStats(context: Context)
+  local wi = context.wi
+  local lineHeight = (3 * patchHeight(context, 'WINUM0')) // 2
+  drawFinished(context)
+
+  put(context, StatsX, StatsY, 'WIOSTK')
+  drawPercent(context, draw.Width - StatsX, StatsY, wi.cnt_kills[0])
+  put(context, StatsX, StatsY + lineHeight, 'WIOSTI')
+  drawPercent(context, draw.Width - StatsX, StatsY + lineHeight, wi.cnt_items[0])
+  put(context, StatsX, StatsY + 2 * lineHeight, 'WISCRT2')
+  drawPercent(context, draw.Width - StatsX, StatsY + 2 * lineHeight, wi.cnt_secret[0])
+
+  put(context, TimeX, TimeY, 'WITIME')
+  drawTime(context, draw.Width // 2 - TimeX, TimeY, wi.cnt_time)
+  if context.episode < 3 then
+    put(context, draw.Width // 2 + TimeX, TimeY, 'WIPAR')
+    drawTime(context, draw.Width - TimeX, TimeY, wi.cnt_par)
+  end
+end
+
+local function drawNetgameStats(context: Context)
+  local wi, game = context.wi, context.game
+  local dofrags = wi.dofrags ~= 0
+  local percentWidth = patchWidth(context, 'WIPCNT')
+  local statsX = 32 + patchWidth(context, 'STFST01') // 2 + if dofrags then 0 else 32
+  drawFinished(context)
+
+  put(context, statsX + NetSpacingX - patchWidth(context, 'WIOSTK'), NetStatsY, 'WIOSTK')
+  put(context, statsX + 2 * NetSpacingX - patchWidth(context, 'WIOSTI'), NetStatsY, 'WIOSTI')
+  put(context, statsX + 3 * NetSpacingX - patchWidth(context, 'WIOSTS'), NetStatsY, 'WIOSTS')
+  if dofrags then put(context, statsX + 4 * NetSpacingX - patchWidth(context, 'WIFRGS'), NetStatsY, 'WIFRGS') end
+
+  local top = NetStatsY + patchHeight(context, 'WIOSTK')
+  for slot = 0, 3 do
+    if not game.playeringame[slot] then continue end
+
+    local face = `STPB{slot}`
+    local left = statsX
+    put(context, left - patchWidth(context, face), top, face)
+    if slot == context.me then put(context, left - patchWidth(context, face), top, 'STFST01') end
+
+    left += NetSpacingX
+    drawPercent(context, left - percentWidth, top + 10, wi.cnt_kills[slot])
+    left += NetSpacingX
+    drawPercent(context, left - percentWidth, top + 10, wi.cnt_items[slot])
+    left += NetSpacingX
+    drawPercent(context, left - percentWidth, top + 10, wi.cnt_secret[slot])
+    left += NetSpacingX
+    if dofrags then drawNum(context, left, top + 10, wi.cnt_frags[slot], -1) end
+
+    top += SpacingY
+  end
+end
+
+local function drawDeathmatchStats(context: Context)
+  local wi, game = context.wi, context.game
+  drawFinished(context)
+
+  put(context, TotalsX - patchWidth(context, 'WIMSTT') // 2, MatrixY - SpacingY + 10, 'WIMSTT')
+  put(context, KillersX, KillersY, 'WIKILRS')
+  put(context, VictimsX, VictimsY, 'WIVCTMS')
+
+  local left, top = MatrixX + MatrixSpacingX, MatrixY
+  for slot = 0, 3 do
+    if game.playeringame[slot] then
+      local face = `STPB{slot}`
+      local half = patchWidth(context, face) // 2
+      put(context, left - half, MatrixY - SpacingY, face)
+      put(context, MatrixX - half, top, face)
+      if slot == context.me then
+        put(context, left - half, MatrixY - SpacingY, 'STFDEAD0')
+        put(context, MatrixX - half, top, 'STFST01')
+      end
+    end
+
+    left += MatrixSpacingX
+    top += SpacingY
+  end
+
+  local width = patchWidth(context, 'WINUM0')
+  top = MatrixY + 10
+  for killer = 0, 3 do
+    left = MatrixX + MatrixSpacingX
+    if game.playeringame[killer] then
+      for victim = 0, 3 do
+        if game.playeringame[victim] then drawNum(context, left + width, top, wi.dm_frags[killer][victim], 2) end
+        left += MatrixSpacingX
+      end
+
+      drawNum(context, TotalsX + width, top, wi.dm_totals[killer], 2)
+    end
+
+    top += SpacingY
+  end
+end
+
+-- The background patch the intermission is drawn over.
+function module.background(screens: Screens, episode: number): string
+  if screens.commercial or episode > 3 then return 'INTERPIC' end
+
+  return `WIMAP{episode - 1}`
+end
+
+-- Draws the intermission of `game` as the player in `slot` sees it (their face marks their row).
+-- Draws nothing outside an intermission.
+function module.draw(screens: Screens, game: any, slot: number, target: Frame)
+  local wbs, wi = game.lastlevel, game.wi
+  if game.gamestate ~= 'intermission' or not wbs or not wi then return end
+
+  -- WI_initVariables: only Ultimate DOOM has a fourth episode's map.
+  local episode = wbs.episode - 1
+  if not screens.retail and episode > 2 then episode -= 3 end
+
+  local context: Context = {
+    screens = screens,
+    target = target,
+    game = game,
+    wbs = wbs,
+    wi = wi,
+    episode = episode,
+    last = wbs.last - 1,
+    next = wbs.next - 1,
+    me = slot,
+  }
+
+  draw.drawPatch(screens, target, 0, 0, module.background(screens, episode + 1))
+  drawAnimatedBack(context)
+  if wi.state == 'StatCount' then
+    if game.deathmatch ~= 0 then
+      drawDeathmatchStats(context)
+    elseif game.netgame then
+      drawNetgameStats(context)
+    else
+      drawStats(context)
+    end
+  elseif wi.state == 'ShowNextLoc' then
+    drawShowNextLoc(context, bit32.band(wi.cnt, 31) < 20)
+  else
+    drawShowNextLoc(context, true)
+  end
+end
+
+return module

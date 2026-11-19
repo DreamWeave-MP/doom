@@ -1,0 +1,106 @@
+--!strict
+-- f_finale.c's F_Drawer: the finale's text over its flat, the end art of each DOOM episode
+-- (the bunny scroller included), and DOOM II's cast call, drawn from the play simulation's
+-- `game.finale`.
+local draw = require('./draw')
+local info = require('../play/info')
+local text = require('./text')
+
+type Frame = draw.Frame
+type Screens = draw.Screens
+
+local module = {}
+
+local TextSpeed = 3
+local FrameMask = 0x7fff
+
+-- The characters of the finale's text typed out so far, and the whole text: F_TextWrite's count.
+function module.text(game: any): (string, string)
+  local finale = game.finale
+  if not finale then return '', '' end
+
+  local full = text.Finale[finale.text] or ''
+  if finale.stage ~= 0 then return full, full end
+
+  local count = math.max(0, (finale.count - 10) // TextSpeed)
+  return string.sub(full, 1, count), full
+end
+
+local function drawText(screens: Screens, game: any, target: Frame)
+  local finale = game.finale
+  draw.tileFlat(screens, target, finale.flat)
+
+  local shown = module.text(game)
+  draw.drawText(screens, target, 10, 10, shown, { lineHeight = 11 })
+end
+
+-- F_BunnyScroll: PFUB2 comes in from the left, pushing PFUB1 off to the right, then THE END lands.
+local function drawBunny(screens: Screens, count: number, target: Frame)
+  local arriving, leaving = draw.patch(screens, 'PFUB2'), draw.patch(screens, 'PFUB1')
+  local scrolled = math.clamp(320 - (count - 230) // 2, 0, 320)
+  for screenColumn = 0, draw.Width - 1 do
+    if screenColumn + scrolled < 320 then
+      if arriving then draw.drawColumn(target, arriving, screenColumn, screenColumn + scrolled) end
+    elseif leaving then
+      draw.drawColumn(target, leaving, screenColumn, screenColumn + scrolled - 320)
+    end
+  end
+
+  if count < 1130 then return end
+
+  local stage = if count < 1180 then 0 else math.min(6, (count - 1180) // 5)
+  draw.drawPatch(screens, target, (draw.Width - 13 * 8) // 2, (draw.Height - 8 * 8) // 2, `END{stage}`)
+end
+
+-- F_CastDrawer: BOSSBACK, the monster's name centered at the foot, and its current frame.
+local function drawCast(screens: Screens, game: any, target: Frame)
+  local finale = game.finale
+  draw.drawPatch(screens, target, 0, 0, 'BOSSBACK')
+
+  local cast = text.CastOrder[finale.castnum] or text.CastOrder[1]
+  local width = draw.textWidth(screens, cast.name)
+  draw.drawText(screens, target, 160 - width // 2, 180, cast.name)
+
+  local state = info.states[finale.caststate]
+  if not state then return end
+
+  local sprite = draw.sprite(screens, state.sprite, bit32.band(state.frame, FrameMask))
+  if not sprite then return end
+
+  local patch = draw.patch(screens, sprite.name)
+  if patch then draw.drawPatchEx(target, patch, 160, 170, sprite.flip, 1) end
+end
+
+-- The end art of a DOOM episode, by F_Drawer's rules.
+function module.endArt(screens: Screens, episode: number): string
+  if episode == 1 then return if screens.retail then 'CREDIT' else 'HELP2' end
+  if episode == 2 then return 'VICTORY2' end
+  if episode == 3 then return 'PFUB1' end
+
+  return 'ENDPIC'
+end
+
+-- Draws the finale of `game`. Draws nothing outside one.
+function module.draw(screens: Screens, game: any, target: Frame)
+  local finale = game.finale
+  if game.gamestate ~= 'finale' or not finale then return end
+
+  if finale.stage == 2 then
+    drawCast(screens, game, target)
+    return
+  end
+
+  if finale.stage == 0 then
+    drawText(screens, game, target)
+    return
+  end
+
+  if game.gameepisode == 3 then
+    drawBunny(screens, finale.count, target)
+    return
+  end
+
+  draw.drawPatch(screens, target, 0, 0, module.endArt(screens, game.gameepisode))
+end
+
+return module

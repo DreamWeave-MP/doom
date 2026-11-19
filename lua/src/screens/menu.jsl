@@ -1,0 +1,870 @@
+--!strict
+-- m_menu.c as a state machine with no globals: a Menu takes keys and returns what the
+-- application should do (start a game, load, save, change a setting, quit), and draws itself.
+-- The menus are the original's, plus Multiplayer, which has no patch and is written in the HU
+-- font: hosting a game (mode, players, skill, map) and joining one (address and token).
+local draw = require('./draw')
+local text = require('./text')
+
+type Frame = draw.Frame
+type Screens = draw.Screens
+
+local module = {}
+
+-- What a key asks of the application. `kind` is one of: newGame (episode, skill), load (slot),
+-- save (slot, description), quit, endGame, setting (name, value), open, close, readThis,
+-- host (mode, players, skill, map), join (address, token).
+export type Command = {
+  kind: string,
+  episode: number?,
+  skill: number?,
+  slot: number?,
+  description: string?,
+  name: string?,
+  value: (number | boolean)?,
+  mode: string?,
+  players: number?,
+  map: string?,
+  address: string?,
+  token: string?,
+}
+
+-- status: -1 holds no cursor, 0 is not selectable now, 1 runs on enter, 2 is a slider whose
+-- left and right run it too.
+type Item = {
+  status: number,
+  patch: string?,
+  label: string?,
+  key: string?,
+  action: string,
+}
+
+type Page = {
+  items: { Item },
+  previous: string?,
+  left: number,
+  top: number,
+  lastOn: number,
+}
+
+type Message = {
+  text: string,
+  needsInput: boolean,
+  routine: string?,
+}
+
+type Entry = {
+  field: string,
+  old: string,
+}
+
+export type Settings = {
+  screenSize: number,
+  mouseSensitivity: number,
+  sfxVolume: number,
+  musicVolume: number,
+  messages: boolean,
+}
+
+export type Menu = {
+  screens: Screens,
+  active: boolean,
+  page: string,
+  itemOn: number,
+  pages: { [string]: Page },
+  skull: number,
+  skullCounter: number,
+  message: Message?,
+  messageLastActive: boolean,
+  episode: number,
+  inGame: boolean,
+  netgame: boolean,
+  settings: Settings,
+  saveSlots: { [number]: string },
+  entry: Entry?,
+  saveSlot: number,
+  saveText: string,
+  host: { mode: number, players: number, skill: number, map: number },
+  join: { address: string, token: string },
+  maps: { string },
+}
+
+export type Options = {
+  screenSize: number?,
+  mouseSensitivity: number?,
+  sfxVolume: number?,
+  musicVolume: number?,
+  messages: boolean?,
+  saveSlots: { [number]: string }?,
+  inGame: boolean?,
+  netgame: boolean?,
+}
+
+local LineHeight = 16
+local SkullX = -32
+local SaveStringSize = 24
+local SaveSlots = 6
+local FieldSize = 255
+
+local HostModes = { 'cooperative', 'deathmatch', 'teamDeathmatch' }
+local HostModeNames = { 'COOPERATIVE', 'DEATHMATCH', 'TEAM DEATHMATCH' }
+local SkillNames = { 'I\'M TOO YOUNG TO DIE', 'HEY, NOT TOO ROUGH', 'HURT ME PLENTY', 'ULTRA-VIOLENCE', 'NIGHTMARE!' }
+
+local QuitSounds = {
+  doom = { 'pldeth', 'dmpain', 'popain', 'slop', 'telept', 'posit1', 'posit3', 'sgtatk' },
+  commercial = { 'vilact', 'getpow', 'boscub', 'slop', 'skeswg', 'kntdth', 'bspact', 'sgtatk' },
+}
+
+local function item(status: number, patch: string?, action: string, key: string?): Item
+  return { status = status, patch = patch, action = action, key = key }
+end
+
+local function labelled(status: number, label: string, action: string, key: string?): Item
+  return { status = status, label = label, action = action, key = key }
+end
+
+local function slots(action: string): { Item }
+  local list = {}
+  for slot = 1, SaveSlots do
+    table.insert(list, item(1, nil, action, tostring(slot)))
+  end
+
+  return list
+end
+
+-- M_Init's menus, trimmed for the WAD the way M_Init trims them.
+local function buildPages(screens: Screens): { [string]: Page }
+  local main = {
+    item(1, 'M_NGAME', 'newGame', 'n'),
+    labelled(1, 'MULTIPLAYER', 'multiplayer', 'm'),
+    item(1, 'M_OPTION', 'options', 'o'),
+    item(1, 'M_LOADG', 'loadGame', 'l'),
+    item(1, 'M_SAVEG', 'saveGame', 's'),
+    item(1, 'M_RDTHIS', 'readThis', 'r'),
+    item(1, 'M_QUITG', 'quit', 'q'),
+  }
+
+  local episodes = {
+    item(1, 'M_EPI1', 'episode', 'k'),
+    item(1, 'M_EPI2', 'episode', 't'),
+    item(1, 'M_EPI3', 'episode', 'i'),
+    item(1, 'M_EPI4', 'episode', 't'),
+  }
+
+  local pages: { [string]: Page } = {
+    main = { items = main, left = 97, top = 64, lastOn = 0 },
+    episode = { items = episodes, previous = 'main', left = 48, top = 63, lastOn = 0 },
+    skill = {
+      items = {
+        item(1, 'M_JKILL', 'skill', 'i'),
+        item(1, 'M_ROUGH', 'skill', 'h'),
+        item(1, 'M_HURT', 'skill', 'h'),
+        item(1, 'M_ULTRA', 'skill', 'u'),
+        item(1, 'M_NMARE', 'skill', 'n'),
+      },
+      previous = 'episode',
+      left = 48,
+      top = 63,
+      lastOn = 2,
+    },
+    options = {
+      items = {
+        item(1, 'M_ENDGAM', 'endGame', 'e'),
+        item(1, 'M_MESSG', 'messages', 'm'),
+        item(1, 'M_DETAIL', 'detail', 'g'),
+        item(2, 'M_SCRNSZ', 'screenSize', 's'),
+        item(-1, nil, 'none'),
+        item(2, 'M_MSENS', 'mouseSensitivity', 'm'),
+        item(-1, nil, 'none'),
+        item(1, 'M_SVOL', 'sound', 's'),
+      },
+      previous = 'main',
+      left = 60,
+      top = 37,
+      lastOn = 0,
+    },
+    read1 = { items = { item(1, nil, 'readThis2') }, previous = 'main', left = 280, top = 185, lastOn = 0 },
+    read2 = { items = { item(1, nil, 'finishReadThis') }, previous = 'read1', left = 330, top = 175, lastOn = 0 },
+    sound = {
+      items = {
+        item(2, 'M_SFXVOL', 'sfxVolume', 's'),
+        item(-1, nil, 'none'),
+        item(2, 'M_MUSVOL', 'musicVolume', 'm'),
+        item(-1, nil, 'none'),
+      },
+      previous = 'options',
+      left = 80,
+      top = 64,
+      lastOn = 0,
+    },
+    load = { items = slots('loadSlot'), previous = 'main', left = 80, top = 54, lastOn = 0 },
+    save = { items = slots('saveSlot'), previous = 'main', left = 80, top = 54, lastOn = 0 },
+    multiplayer = {
+      items = {
+        labelled(1, 'HOST GAME', 'hostGame', 'h'),
+        labelled(1, 'JOIN GAME', 'joinGame', 'j'),
+      },
+      previous = 'main',
+      left = 88,
+      top = 72,
+      lastOn = 0,
+    },
+    host = {
+      items = {
+        labelled(2, 'MODE', 'hostMode', 'm'),
+        labelled(2, 'PLAYERS', 'hostPlayers', 'p'),
+        labelled(2, 'SKILL', 'hostSkill', 's'),
+        labelled(2, 'MAP', 'hostMap', 'a'),
+        labelled(1, 'START', 'hostStart', 't'),
+      },
+      previous = 'multiplayer',
+      left = 56,
+      top = 56,
+      lastOn = 0,
+    },
+    join = {
+      items = {
+        labelled(1, 'ADDRESS', 'joinAddress', 'a'),
+        labelled(1, 'TOKEN', 'joinToken', 't'),
+        labelled(1, 'CONNECT', 'joinConnect', 'c'),
+      },
+      previous = 'multiplayer',
+      left = 56,
+      top = 64,
+      lastOn = 0,
+    },
+  }
+
+  if screens.commercial then
+    -- DOOM II has one help page, so Read This! gives its place to Quit Game.
+    table.remove(main, 6)
+    pages.main.top += 8
+    pages.skill.previous = 'main'
+    pages.read1.left, pages.read1.top = 330, 165
+    pages.read1.items[1].action = 'finishReadThis'
+  elseif not screens.retail then
+    table.remove(episodes, 4)
+  end
+
+  return pages
+end
+
+local function mapList(screens: Screens): { string }
+  local maps = {}
+  if screens.commercial then
+    for map = 1, 32 do
+      local name = string.format('MAP%02d', map)
+      if screens.wad:find(name) then table.insert(maps, name) end
+    end
+  else
+    for episode = 1, 4 do
+      for map = 1, 9 do
+        local name = `E{episode}M{map}`
+        if screens.wad:find(name) then table.insert(maps, name) end
+      end
+    end
+  end
+
+  if #maps == 0 then table.insert(maps, if screens.commercial then 'MAP01' else 'E1M1') end
+  return maps
+end
+
+function module.new(screens: Screens, options: Options?): Menu
+  local settings: Options = options or {}
+  return {
+    screens = screens,
+    active = false,
+    page = 'main',
+    itemOn = 0,
+    pages = buildPages(screens),
+    skull = 0,
+    skullCounter = 10,
+    message = nil,
+    messageLastActive = false,
+    episode = 1,
+    inGame = settings.inGame == true,
+    netgame = settings.netgame == true,
+    settings = {
+      screenSize = math.clamp(settings.screenSize or 6, 0, 8),
+      mouseSensitivity = math.clamp(settings.mouseSensitivity or 5, 0, 9),
+      sfxVolume = math.clamp(settings.sfxVolume or 8, 0, 15),
+      musicVolume = math.clamp(settings.musicVolume or 8, 0, 15),
+      messages = settings.messages ~= false,
+    },
+    saveSlots = table.clone(settings.saveSlots or {}),
+    entry = nil,
+    saveSlot = 1,
+    saveText = '',
+    host = { mode = 1, players = 2, skill = 3, map = 1 },
+    join = { address = '', token = '' },
+    maps = mapList(screens),
+  }
+end
+
+-- The descriptions of the saved games, by slot 1 to 6; a slot left out is empty.
+function module.setSaveSlots(menu: Menu, saveSlots: { [number]: string })
+  menu.saveSlots = table.clone(saveSlots)
+end
+
+-- Whether a game is being played (Save Game and End Game need one) and whether it is a netgame
+-- (which refuses New Game, Load Game, and End Game).
+function module.setContext(menu: Menu, inGame: boolean, netgame: boolean)
+  menu.inGame, menu.netgame = inGame, netgame
+end
+
+local function setupNextMenu(menu: Menu, page: string)
+  menu.page = page
+  menu.itemOn = menu.pages[page].lastOn
+end
+
+-- M_StartControlPanel: opens the main menu where it was left.
+function module.open(menu: Menu)
+  if menu.active then return end
+
+  menu.active = true
+  setupNextMenu(menu, 'main')
+end
+
+local function clearMenus(menu: Menu)
+  menu.active = false
+end
+
+local function startMessage(menu: Menu, message: string, routine: string?, needsInput: boolean)
+  menu.messageLastActive = menu.active
+  menu.message = { text = message, routine = routine, needsInput = needsInput }
+  menu.active = true
+end
+
+local function setting(menu: Menu, name: string, value: number | boolean): Command
+  return { kind = 'setting', name = name, value = value }
+end
+
+local function slider(menu: Menu, name: string, choice: number, maximum: number): Command
+  local settings: any = menu.settings
+  local value = settings[name]
+  if choice == 0 and value > 0 then value -= 1 end
+  if choice == 1 and value < maximum then value += 1 end
+
+  settings[name] = value
+  return setting(menu, name, value)
+end
+
+local function cycle(value: number, count: number, choice: number): number
+  if choice == 0 then return (value - 2) % count + 1 end
+
+  return value % count + 1
+end
+
+local function hostCommand(menu: Menu): Command
+  local host = menu.host
+  return {
+    kind = 'host',
+    mode = HostModes[host.mode],
+    players = host.players,
+    skill = host.skill - 1,
+    map = menu.maps[host.map],
+  }
+end
+
+-- Runs the item's routine, as M_Responder calls it: `choice` is the item's position on enter,
+-- or 0 and 1 for a slider's left and right. Returns the command and the sound it makes.
+local function run(menu: Menu, action: string, choice: number): (Command?, string?)
+  if action == 'newGame' then
+    if menu.netgame then
+      startMessage(menu, text.Messages.newGame, nil, false)
+      return nil, nil
+    end
+
+    setupNextMenu(menu, if menu.screens.commercial then 'skill' else 'episode')
+  elseif action == 'multiplayer' then
+    setupNextMenu(menu, 'multiplayer')
+  elseif action == 'options' then
+    setupNextMenu(menu, 'options')
+  elseif action == 'loadGame' then
+    if menu.netgame then
+      startMessage(menu, text.Messages.loadNet, nil, false)
+      return nil, nil
+    end
+
+    -- M_ReadSaveStrings: an empty slot cannot be loaded.
+    for slot, entry in menu.pages.load.items do
+      entry.status = if menu.saveSlots[slot] then 1 else 0
+    end
+
+    setupNextMenu(menu, 'load')
+  elseif action == 'saveGame' then
+    if not menu.inGame then
+      startMessage(menu, text.Messages.saveDead, nil, false)
+      return nil, nil
+    end
+
+    setupNextMenu(menu, 'save')
+  elseif action == 'readThis' then
+    setupNextMenu(menu, 'read1')
+    return { kind = 'readThis' }, nil
+  elseif action == 'readThis2' then
+    setupNextMenu(menu, 'read2')
+  elseif action == 'finishReadThis' then
+    setupNextMenu(menu, 'main')
+  elseif action == 'quit' then
+    local list = if menu.screens.commercial then text.QuitMessages.commercial else text.QuitMessages.doom
+    -- Which message is presentation, not simulation: any random number will do.
+    local message = list[math.random(2, #list)]
+    startMessage(menu, `{message}\n\n{text.QuitPrompt}`, 'quitResponse', true)
+  elseif action == 'episode' then
+    if menu.screens.shareware and choice > 0 then
+      startMessage(menu, text.Messages.shareware, nil, false)
+      setupNextMenu(menu, 'read1')
+      return nil, nil
+    end
+
+    menu.episode = choice + 1
+    setupNextMenu(menu, 'skill')
+  elseif action == 'skill' then
+    if choice == 4 then
+      startMessage(menu, text.Messages.nightmare, 'verifyNightmare', true)
+      return nil, nil
+    end
+
+    clearMenus(menu)
+    return { kind = 'newGame', episode = menu.episode, skill = choice }, nil
+  elseif action == 'endGame' then
+    if not menu.inGame then return nil, 'oof' end
+
+    if menu.netgame then
+      startMessage(menu, text.Messages.netEnd, nil, false)
+      return nil, nil
+    end
+
+    startMessage(menu, text.Messages.endGame, 'endGameResponse', true)
+  elseif action == 'messages' then
+    menu.settings.messages = not menu.settings.messages
+    return setting(menu, 'messages', menu.settings.messages), nil
+  elseif action == 'screenSize' then
+    return slider(menu, 'screenSize', choice, 8), nil
+  elseif action == 'mouseSensitivity' then
+    return slider(menu, 'mouseSensitivity', choice, 9), nil
+  elseif action == 'sfxVolume' then
+    return slider(menu, 'sfxVolume', choice, 15), nil
+  elseif action == 'musicVolume' then
+    return slider(menu, 'musicVolume', choice, 15), nil
+  elseif action == 'sound' then
+    setupNextMenu(menu, 'sound')
+  elseif action == 'loadSlot' then
+    clearMenus(menu)
+    return { kind = 'load', slot = choice + 1 }, nil
+  elseif action == 'saveSlot' then
+    -- M_SaveSelect: from here every key edits the slot's description.
+    menu.saveSlot = choice + 1
+    menu.saveText = menu.saveSlots[choice + 1] or ''
+    menu.entry = { field = 'save', old = menu.saveText }
+  elseif action == 'hostGame' then
+    setupNextMenu(menu, 'host')
+  elseif action == 'joinGame' then
+    setupNextMenu(menu, 'join')
+  elseif action == 'hostMode' then
+    menu.host.mode = cycle(menu.host.mode, #HostModes, choice)
+  elseif action == 'hostPlayers' then
+    menu.host.players = cycle(menu.host.players - 1, 3, choice) + 1
+  elseif action == 'hostSkill' then
+    menu.host.skill = cycle(menu.host.skill, #SkillNames, choice)
+  elseif action == 'hostMap' then
+    menu.host.map = cycle(menu.host.map, #menu.maps, choice)
+  elseif action == 'hostStart' then
+    clearMenus(menu)
+    return hostCommand(menu), nil
+  elseif action == 'joinAddress' then
+    menu.entry = { field = 'address', old = menu.join.address }
+  elseif action == 'joinToken' then
+    menu.entry = { field = 'token', old = menu.join.token }
+  elseif action == 'joinConnect' then
+    if menu.join.address == '' then
+      menu.itemOn = 0
+      menu.entry = { field = 'address', old = '' }
+      return nil, nil
+    end
+
+    clearMenus(menu)
+    return { kind = 'join', address = menu.join.address, token = menu.join.token }, nil
+  end
+
+  return nil, nil
+end
+
+-- A message's routine, given whether the answer was yes.
+local function answer(menu: Menu, routine: string, yes: boolean): (Command?, string?)
+  if not yes then return nil, nil end
+
+  if routine == 'verifyNightmare' then return { kind = 'newGame', episode = menu.episode, skill = 4 }, nil end
+
+  if routine == 'endGameResponse' then
+    menu.pages[menu.page].lastOn = menu.itemOn
+    return { kind = 'endGame' }, nil
+  end
+
+  if routine == 'quitResponse' then
+    local sounds = if menu.screens.commercial then QuitSounds.commercial else QuitSounds.doom
+    return { kind = 'quit' }, sounds[math.random(1, #sounds)]
+  end
+
+  return nil, nil
+end
+
+local function entryValue(menu: Menu, field: string): string
+  if field == 'save' then return menu.saveText end
+
+  local join: any = menu.join
+  return join[field]
+end
+
+local function setEntryValue(menu: Menu, field: string, value: string)
+  if field == 'save' then
+    menu.saveText = value
+    return
+  end
+
+  local join: any = menu.join
+  join[field] = value
+end
+
+-- Text entry: a save's description, upper-cased and held to the font and the slot's width as
+-- M_Responder holds it, or the join address and token, taken as typed.
+local function enterText(menu: Menu, entry: Entry, key: string): (Command?, string?)
+  local value = entryValue(menu, entry.field)
+  if key == 'back' then
+    setEntryValue(menu, entry.field, string.sub(value, 1, -2))
+    return nil, nil
+  end
+
+  if key == 'escape' then
+    setEntryValue(menu, entry.field, entry.old)
+    menu.entry = nil
+    return nil, nil
+  end
+
+  if key == 'enter' then
+    menu.entry = nil
+    if entry.field ~= 'save' or value == '' then return nil, nil end
+
+    clearMenus(menu)
+    menu.saveSlots[menu.saveSlot] = value
+    return { kind = 'save', slot = menu.saveSlot, description = value }, nil
+  end
+
+  if #key ~= 1 then return nil, nil end
+
+  local code = string.byte(key)
+  if code < 32 or code > 126 then return nil, nil end
+
+  if entry.field ~= 'save' then
+    if #value < FieldSize then setEntryValue(menu, entry.field, value .. key) end
+    return nil, nil
+  end
+
+  local upper = string.upper(key)
+  local upperCode = string.byte(upper)
+  if upperCode ~= 32 and (upperCode < 33 or upperCode > 95) then return nil, nil end
+
+  if #value < SaveStringSize - 1 and draw.textWidth(menu.screens, value) < (SaveStringSize - 2) * 8 then
+    setEntryValue(menu, entry.field, value .. upper)
+  end
+
+  return nil, nil
+end
+
+-- M_Responder for one key: 'up', 'down', 'left', 'right', 'enter', 'back', 'escape', 'yes',
+-- 'no', or a single character (text entry, menu hot keys, and top or n for a question). Returns
+-- the command for the application, if any, and the name of the sound effect the key makes
+-- (pstop, pistol, swtchn, swtchx, stnmov, oof, or a quit sound), if any.
+function module.input(menu: Menu, key: string): (Command?, string?)
+  local entry = menu.entry
+  if entry then return enterText(menu, entry, key) end
+
+  local message = menu.message
+  if message then
+    local yes = key == 'yes' or key == 'y' or key == 'Y'
+    local no = key == 'no' or key == 'n' or key == 'N'
+    if message.needsInput and not (yes or no or key == ' ' or key == 'escape') then return nil, nil end
+
+    menu.active = menu.messageLastActive
+    menu.message = nil
+    local command: Command?, sound: string? = nil, nil
+    if message.routine then command, sound = answer(menu, message.routine, yes) end
+
+    -- M_Responder closes the menu after any message, whatever it was over.
+    local wasActive = menu.active
+    menu.active = false
+    if not command and wasActive then return { kind = 'close' }, sound or 'swtchx' end
+
+    return command, sound or 'swtchx'
+  end
+
+  if not menu.active then
+    if key ~= 'escape' then return nil, nil end
+
+    module.open(menu)
+    return { kind = 'open' }, 'swtchn'
+  end
+
+  local page = menu.pages[menu.page]
+  local items = page.items
+  local current = items[menu.itemOn + 1]
+  if key == 'down' or key == 'up' then
+    local step = if key == 'down' then 1 else -1
+    repeat
+      menu.itemOn = (menu.itemOn + step) % #items
+    until items[menu.itemOn + 1].status ~= -1
+
+    return nil, 'pstop'
+  end
+
+  if key == 'left' or key == 'right' then
+    if current.status ~= 2 then return nil, nil end
+
+    local command = run(menu, current.action, if key == 'left' then 0 else 1)
+    return command, 'stnmov'
+  end
+
+  if key == 'enter' then
+    if current.status <= 0 then return nil, nil end
+
+    page.lastOn = menu.itemOn
+    if current.status == 2 then
+      local command = run(menu, current.action, 1)
+      return command, 'stnmov'
+    end
+
+    local command, sound = run(menu, current.action, menu.itemOn)
+    return command, sound or 'pistol'
+  end
+
+  if key == 'escape' then
+    page.lastOn = menu.itemOn
+    clearMenus(menu)
+    return { kind = 'close' }, 'swtchx'
+  end
+
+  if key == 'back' then
+    page.lastOn = menu.itemOn
+    if not page.previous then return nil, nil end
+
+    setupNextMenu(menu, page.previous)
+    return nil, 'swtchn'
+  end
+
+  if #key ~= 1 then return nil, nil end
+
+  -- A hot key moves to the next item it names, wrapping round.
+  local lower = string.lower(key)
+  for offset = 1, #items do
+    local index = (menu.itemOn + offset) % #items
+    if items[index + 1].key == lower then
+      menu.itemOn = index
+      return nil, 'pstop'
+    end
+  end
+
+  return nil, nil
+end
+
+-- M_Ticker: the skull blinks every 8 tics.
+function module.tick(menu: Menu)
+  menu.skullCounter -= 1
+  if menu.skullCounter > 0 then return end
+
+  menu.skull = 1 - menu.skull
+  menu.skullCounter = 8
+end
+
+local function put(menu: Menu, target: Frame, left: number, top: number, name: string)
+  draw.drawPatch(menu.screens, target, left, top, name)
+end
+
+-- M_DrawThermo: a slider `width` cells wide with its knob at `dot`.
+local function drawThermo(menu: Menu, target: Frame, left: number, top: number, width: number, dot: number)
+  local at = left
+  put(menu, target, at, top, 'M_THERML')
+  at += 8
+  for _ = 1, width do
+    put(menu, target, at, top, 'M_THERMM')
+    at += 8
+  end
+
+  put(menu, target, at, top, 'M_THERMR')
+  put(menu, target, left + 8 + dot * 8, top, 'M_THERMO')
+end
+
+local function drawSaveLoadBorder(menu: Menu, target: Frame, left: number, top: number)
+  put(menu, target, left - 8, top + 7, 'M_LSLEFT')
+  local at = left
+  for _ = 1, SaveStringSize do
+    put(menu, target, at, top + 7, 'M_LSCNTR')
+    at += 8
+  end
+
+  put(menu, target, at, top + 7, 'M_LSRGHT')
+end
+
+local function drawSlots(menu: Menu, target: Frame, title: string)
+  put(menu, target, 72, 28, title)
+
+  local page = menu.pages.load
+  for slot = 1, SaveSlots do
+    local top = page.top + LineHeight * (slot - 1)
+    local description = menu.saveSlots[slot] or text.EmptySlot
+    if menu.entry and menu.entry.field == 'save' and slot == menu.saveSlot then description = menu.saveText end
+
+    drawSaveLoadBorder(menu, target, page.left, top)
+    draw.drawText(menu.screens, target, page.left, top, description)
+  end
+
+  if menu.entry and menu.entry.field == 'save' then
+    local top = page.top + LineHeight * (menu.saveSlot - 1)
+    draw.drawText(menu.screens, target, page.left + draw.textWidth(menu.screens, menu.saveText), top, '_')
+  end
+end
+
+-- The tail of `value` that fits in `width` pixels, for an address or token longer than the line.
+local function fitted(menu: Menu, value: string, width: number): string
+  local shown = value
+  while #shown > 0 and draw.textWidth(menu.screens, shown) > width do
+    shown = string.sub(shown, 2)
+  end
+
+  return shown
+end
+
+local function drawLabel(menu: Menu, target: Frame, left: number, top: number, label: string)
+  draw.drawText(menu.screens, target, left, top + 4, label)
+end
+
+local function drawMultiplayerTitle(menu: Menu, target: Frame, title: string)
+  local width = draw.textWidth(menu.screens, title, 2)
+  draw.drawText(menu.screens, target, (draw.Width - width) // 2, 20, title, { scale = 2 })
+end
+
+local function drawHost(menu: Menu, target: Frame, page: Page)
+  drawMultiplayerTitle(menu, target, 'HOST GAME')
+
+  local host = menu.host
+  local values = {
+    HostModeNames[host.mode],
+    tostring(host.players),
+    SkillNames[host.skill],
+    menu.maps[host.map],
+  }
+
+  for index, value in values do
+    drawLabel(menu, target, page.left + 72, page.top + LineHeight * (index - 1), value)
+  end
+end
+
+local function drawJoin(menu: Menu, target: Frame, page: Page)
+  drawMultiplayerTitle(menu, target, 'JOIN GAME')
+
+  local width = draw.Width - (page.left + 72) - 8
+  for index, field in { 'address', 'token' } do
+    local value = entryValue(menu, field)
+    local editing = menu.entry ~= nil and menu.entry.field == field
+    local shown = fitted(menu, if editing then value .. '_' else value, width)
+    drawLabel(menu, target, page.left + 72, page.top + LineHeight * (index - 1), shown)
+  end
+end
+
+-- The page's own drawing, before its items: titles, values, and sliders.
+local function drawPage(menu: Menu, target: Frame, page: Page)
+  local screens = menu.screens
+  local name = menu.page
+  if name == 'main' then
+    put(menu, target, 94, 2, 'M_DOOM')
+  elseif name == 'episode' then
+    put(menu, target, 54, 38, 'M_EPISOD')
+  elseif name == 'skill' then
+    put(menu, target, 96, 14, 'M_NEWG')
+    put(menu, target, 54, 38, 'M_SKILL')
+  elseif name == 'options' then
+    put(menu, target, 108, 15, 'M_OPTTTL')
+    put(menu, target, page.left + 175, page.top + LineHeight * 2, 'M_GDHIGH')
+    put(menu, target, page.left + 120, page.top + LineHeight, if menu.settings.messages then 'M_MSGON' else 'M_MSGOFF')
+    drawThermo(menu, target, page.left, page.top + LineHeight * 6, 10, menu.settings.mouseSensitivity)
+    drawThermo(menu, target, page.left, page.top + LineHeight * 4, 9, menu.settings.screenSize)
+  elseif name == 'sound' then
+    put(menu, target, 60, 38, 'M_SVOL')
+    drawThermo(menu, target, page.left, page.top + LineHeight, 16, menu.settings.sfxVolume)
+    drawThermo(menu, target, page.left, page.top + LineHeight * 3, 16, menu.settings.musicVolume)
+  elseif name == 'read1' then
+    module.drawHelp(screens, 1, target)
+  elseif name == 'read2' then
+    module.drawHelp(screens, 2, target)
+  elseif name == 'load' then
+    drawSlots(menu, target, 'M_LOADG')
+  elseif name == 'save' then
+    drawSlots(menu, target, 'M_SAVEG')
+  elseif name == 'multiplayer' then
+    drawMultiplayerTitle(menu, target, 'MULTIPLAYER')
+  elseif name == 'host' then
+    drawHost(menu, target, page)
+  elseif name == 'join' then
+    drawJoin(menu, target, page)
+  end
+end
+
+-- M_DrawReadThis1 and 2: the help page shown for Read This!'s `page` (1 or 2) in this WAD.
+function module.helpPage(screens: Screens, page: number): string
+  if page == 1 then return if screens.commercial then 'HELP' else 'HELP1' end
+  if screens.commercial or screens.retail then return 'CREDIT' end
+
+  return 'HELP2'
+end
+
+function module.drawHelp(screens: Screens, page: number, target: Frame)
+  draw.drawPatch(screens, target, 0, 0, module.helpPage(screens, page))
+end
+
+local function drawMessage(menu: Menu, target: Frame, message: string)
+  local screens = menu.screens
+  local first = draw.patch(screens, 'STCFN033')
+  local lineHeight = if first then first.height else 8
+  local top = 100 - draw.textHeight(screens, message) // 2
+  for _, line in string.split(message, '\n') do
+    draw.drawText(screens, target, 160 - draw.textWidth(screens, line) // 2, top, line)
+    top += lineHeight
+  end
+end
+
+-- M_Drawer: the open menu over whatever `target` already shows, or the message it asks.
+function module.draw(menu: Menu, target: Frame)
+  local message = menu.message
+  if message then
+    drawMessage(menu, target, message.text)
+    return
+  end
+
+  if not menu.active then return end
+
+  local page = menu.pages[menu.page]
+  drawPage(menu, target, page)
+
+  local textual = menu.page == 'multiplayer' or menu.page == 'host' or menu.page == 'join'
+  for index, entry in page.items do
+    local top = page.top + LineHeight * (index - 1)
+    if entry.patch then
+      put(menu, target, page.left, top, entry.patch)
+    elseif entry.label and textual then
+      drawLabel(menu, target, page.left, top, entry.label)
+    elseif entry.label then
+      -- A main-menu entry with no patch, in the HU font at twice its size to sit with the rest.
+      draw.drawText(menu.screens, target, page.left, top + 1, entry.label, { scale = 2 })
+    end
+  end
+
+  local skull = if menu.skull == 0 then 'M_SKULL1' else 'M_SKULL2'
+  put(menu, target, page.left + SkullX, page.top - 5 + menu.itemOn * LineHeight, skull)
+end
+
+-- The PAUSE patch, centered at the top of a full-screen view as D_Display draws it.
+function module.drawPause(screens: Screens, target: Frame)
+  draw.drawPatch(screens, target, (draw.Width - 68) // 2, 4, 'M_PAUSE')
+end
+
+return module
