@@ -183,7 +183,7 @@ function module.payloadDigest(payload: { files: { string }, read: (path: string)
     hasher:update(data)
   end
 
-  return bytes.toHex(hasher:finish())
+  return hasher:finish()
 end
 
 -- Checks a definition and returns it frozen, with its digest and whether it touches the
